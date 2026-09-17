@@ -637,11 +637,15 @@ def get_context_text(repo_root: Path | None = None) -> str:
             if ct.description:
                 lines.append(f"Description: {ct.description}")
 
-        # Check for prd.md
-        prd_file = current_task_dir / "prd.md"
-        if prd_file.is_file():
+        # Check for task artifacts (prd.md, todolist.md, verification.md)
+        present_artifacts = [
+            f
+            for f in ("prd.md", "todolist.md", "verification.md")
+            if (current_task_dir / f).is_file()
+        ]
+        if present_artifacts:
             lines.append("")
-            lines.append("[!] This task has prd.md - read it for task details")
+            lines.append(f"[!] Active task artifacts: {', '.join(present_artifacts)}")
     else:
         lines.append("(none)")
     lines.append("")

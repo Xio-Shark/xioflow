@@ -53,7 +53,15 @@ from .task_deps import (
 )
 
 # Planning artifacts injected into worker prompts (order preserved).
-_CONTEXT_ARTIFACTS = ("prd.md", "design.md", "implement.md", "implement.jsonl", "check.jsonl")
+_CONTEXT_ARTIFACTS = (
+    "prd.md",
+    "todolist.md",
+    "verification.md",
+    "design.md",
+    "implement.md",
+    "implement.jsonl",
+    "check.jsonl",
+)
 
 # Status written when a dispatched worker fails after retries.
 FAILED_STATUS = "failed"

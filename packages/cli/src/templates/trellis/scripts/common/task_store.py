@@ -60,6 +60,13 @@ from .safe_commit import (
     safe_archive_paths_to_add,
     safe_git_add,
 )
+from .task_stack import (
+    detect_stack,
+    normalize_stack,
+    render_context_content,
+    render_todolist_content,
+    render_verification_content,
+)
 from .task_utils import (
     archive_destination_for,
     archive_task_complete,
@@ -375,6 +382,14 @@ def cmd_create(args: argparse.Namespace) -> int:
         # Inferred: default_package → None (no task.json yet for create)
         package = resolve_package(repo_root=repo_root)
 
+    # Detect or normalize target technology stack
+    raw_stack = getattr(args, "stack", None)
+    if raw_stack:
+        stack = normalize_stack(raw_stack)
+    else:
+        stack = detect_stack(repo_root, package)
+    meta["stack"] = stack
+
     # Default assignee to current developer
     assignee = args.assignee
     if not assignee:
@@ -574,7 +589,23 @@ def cmd_create(args: argparse.Namespace) -> int:
     prd_path = task_dir / "prd.md"
     if not prd_path.exists():
         prd_path.write_text(
-            _default_prd_content(args.title, description),
+            render_context_content(args.title, description, stack),
+            encoding="utf-8",
+        )
+
+    # Todolist for actionable execution items
+    todo_path = task_dir / "todolist.md"
+    if not todo_path.exists():
+        todo_path.write_text(
+            render_todolist_content(args.title, description),
+            encoding="utf-8",
+        )
+
+    # Verification and comparison document for evidence-based verification
+    verify_path = task_dir / "verification.md"
+    if not verify_path.exists():
+        verify_path.write_text(
+            render_verification_content(args.title),
             encoding="utf-8",
         )
 
@@ -684,11 +715,16 @@ def cmd_create(args: argparse.Namespace) -> int:
                             )
 
     print(colored(f"Created task: {dir_name}", Colors.GREEN), file=sys.stderr)
+    print(colored(f"  Target Tech Stack: {stack}", Colors.CYAN), file=sys.stderr)
+    print("", file=sys.stderr)
+    print(colored("Artifacts Generated:", Colors.BLUE), file=sys.stderr)
+    print("  - prd.md: Background, Requirements, Open-source Research & Stack Gotchas", file=sys.stderr)
+    print("  - todolist.md: Lightweight action items & progress tracking", file=sys.stderr)
+    print("  - verification.md: Verification plan, Before/After comparison & Execution evidence", file=sys.stderr)
     print("", file=sys.stderr)
     print(colored("Next steps:", Colors.BLUE), file=sys.stderr)
-    print("  - Fill prd.md with requirements and acceptance criteria", file=sys.stderr)
-    print("  - Lightweight task: PRD-only is valid", file=sys.stderr)
-    print("  - Complex task: add design.md and implement.md before task.py start", file=sys.stderr)
+    print("  - Review prd.md: Search mature packages before coding; watch for stack gotchas", file=sys.stderr)
+    print("  - Track progress in todolist.md and record real proof in verification.md", file=sys.stderr)
     if created_jsonl:
         print(
             "  - Curate implement.jsonl / check.jsonl (created empty) as spec/research "

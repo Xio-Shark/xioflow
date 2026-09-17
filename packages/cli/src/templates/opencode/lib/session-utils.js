@@ -77,7 +77,7 @@ function getTaskStatus(ctx, platformInput = null) {
   const hasPrd = existsSync(join(taskDir, "prd.md"))
   const hasDesign = existsSync(join(taskDir, "design.md"))
   const hasImplementPlan = existsSync(join(taskDir, "implement.md"))
-  const artifactNames = ["prd.md", "design.md", "implement.md", "implement.jsonl", "check.jsonl"]
+  const artifactNames = ["prd.md", "todolist.md", "verification.md", "design.md", "implement.md", "implement.jsonl", "check.jsonl"]
   const present = artifactNames.filter(name => existsSync(join(taskDir, name)))
   if (existsSync(join(taskDir, "research"))) present.push("research/")
   const presentLine = present.length > 0 ? present.join(", ") : "(none)"

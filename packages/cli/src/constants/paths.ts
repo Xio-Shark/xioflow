@@ -48,8 +48,12 @@ export const FILE_NAMES = {
   CURRENT_TASK: ".current-task",
   /** Task metadata */
   TASK_JSON: "task.json",
-  /** Requirements document */
+  /** Requirements and context document */
   PRD: "prd.md",
+  /** Actionable execution checklist */
+  TODOLIST: "todolist.md",
+  /** Verification and comparison document */
+  VERIFICATION: "verification.md",
   /** Workflow guide */
   WORKFLOW_GUIDE: "workflow.md",
   /** Journal file prefix */

@@ -91,12 +91,14 @@ Phase 3: Finish  → spec update, commit, journal
 - Complex request: ask whether to create a task and plan first. If not, clarify scope or suggest a smaller split.
 - Consent to create a task is not approval to implement — planning artifacts come first.
 
-### Planning Artifacts
+### Planning & Execution Artifacts
 
-- `prd.md` — requirements and acceptance criteria. Every task.
-- `design.md` / `implement.md` — technical design and execution plan. Complex tasks.
-- `implement.jsonl` / `check.jsonl` — spec/research manifests injected into sub-agents. Sub-agent platforms.
-- Lightweight tasks may be PRD-only; complex tasks need all three artifacts before `task.py start`.
+- `prd.md` — Background, requirements, open-source research guidance & tech stack gotchas. Every task.
+- `todolist.md` — Actionable execution checklist. Track progress and keep changes surgical.
+- `verification.md` — Verification plan, Before/After comparison, and real execution evidence.
+- `design.md` / `implement.md` — Technical design and execution plan for complex tasks.
+- `implement.jsonl` / `check.jsonl` — Spec/research manifests injected into sub-agents when applicable.
+- Lightweight tasks use the 3-piece artifacts (`prd.md`, `todolist.md`, `verification.md`); complex tasks may add `design.md` before `task.py start`.
 
 ### Parent / Child Task Trees
 

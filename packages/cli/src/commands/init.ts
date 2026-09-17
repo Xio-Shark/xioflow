@@ -333,6 +333,16 @@ function writeTaskSkeleton(
       "utf-8",
     );
     fs.writeFileSync(path.join(taskDir, FILE_NAMES.PRD), prdContent, "utf-8");
+    fs.writeFileSync(
+      path.join(taskDir, FILE_NAMES.TODOLIST),
+      `# ${taskJson.title || "Bootstrap Task"} - Todo List\n\n- [ ] Step 1: Initial exploration\n- [ ] Step 2: Implementation & guidelines\n- [ ] Step 3: Verification\n`,
+      "utf-8",
+    );
+    fs.writeFileSync(
+      path.join(taskDir, FILE_NAMES.VERIFICATION),
+      `# ${taskJson.title || "Bootstrap Task"} - Verification & Comparison\n\n## 1. Verification Plan\n- Test commands:\n\n## 2. Before / After Comparison\n\n## 3. Real Execution Evidence\n`,
+      "utf-8",
+    );
     return true;
   } catch {
     return false;
