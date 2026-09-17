@@ -55,7 +55,7 @@ from pathlib import Path
 
 from common.paths import (
     DIR_TASKS,
-    DIR_WORKFLOW,
+    get_workflow_dir_name,
     FILE_JOURNAL_PREFIX,
     get_repo_root,
     get_current_task,
@@ -1121,7 +1121,7 @@ def _auto_commit_workspace(repo_root: Path) -> str:
         paths = [
             p
             for p in safe_trellis_paths_to_add(repo_root, task_name=None)
-            if not p.startswith(f"{DIR_WORKFLOW}/{DIR_TASKS}/")
+            if not p.startswith(f"{get_workflow_dir_name(repo_root)}/{DIR_TASKS}/")
         ]
     if not paths:
         print("[OK] No workspace changes to commit.", file=sys.stderr)
@@ -1130,7 +1130,7 @@ def _auto_commit_workspace(repo_root: Path) -> str:
     success, _, err = safe_git_add(paths, repo_root)
     if not success:
         if err and "ignored by" in err.lower():
-            print_gitignore_warning(paths)
+            print_gitignore_warning(paths, repo_root)
             return COMMIT_BLOCKED
         print(
             f"[WARN] git add failed: {err.strip() if err else 'unknown error'}",

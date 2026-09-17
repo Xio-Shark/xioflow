@@ -230,8 +230,8 @@ def resolve_task_dir(target_dir: str, repo_root: Path) -> Path | None:
 
     if Path(target_dir).is_absolute():
         candidate = Path(target_dir)
-    elif "/" in normalized or normalized.startswith(".trellis"):
-        # Relative path (contains path separator or starts with .trellis)
+    elif "/" in normalized or normalized.startswith((".xioflow", ".trellis")):
+        # Relative path (contains path separator or starts with a workflow dir)
         candidate = repo_root / Path(normalized)
     else:
         # Task name - must resolve inside the tasks directory. The historical
@@ -494,5 +494,5 @@ if __name__ == "__main__":
     tasks = get_tasks_dir(repo)
 
     print(f"Tasks dir: {tasks}")
-    print(f"resolve_task_dir('.trellis/tasks/test'): {resolve_task_dir('.trellis/tasks/test', repo)}")
+    print(f"resolve_task_dir('.xioflow/tasks/test'): {resolve_task_dir('.xioflow/tasks/test', repo)}")
     print(f"resolve_task_dir('../test'): {resolve_task_dir('../test', repo)}")

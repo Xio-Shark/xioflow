@@ -80,7 +80,7 @@ The user explicitly wants to look back at this task — not as a forced step, on
 - "记一下这次踩的坑"
 - "复盘下这个任务"
 
-Reach: identify the current task's session id (from `.trellis/.runtime/sessions/*.json` or `mem list --task <task-dir>`), then `extract <id> --phase brainstorm` and `--phase implement`. Present a summary — surface concrete file:line citations where possible. Whether to also write the summary somewhere (PRD, spec, notes file) is the user's call; offer, don't auto-write.
+Reach: identify the current task's session id (from `.xioflow/.runtime/sessions/*.json` or `mem list --task <task-dir>`), then `extract <id> --phase brainstorm` and `--phase implement`. Present a summary — surface concrete file:line citations where possible. Whether to also write the summary somewhere (PRD, spec, notes file) is the user's call; offer, don't auto-write.
 
 ## Anti-patterns: do NOT reach for `mem` here
 

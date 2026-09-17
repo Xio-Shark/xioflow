@@ -8,11 +8,16 @@ import {
   type ChannelScope,
 } from "./schema.js";
 
-/** Top-level Trellis channels directory. */
+/** Top-level channels directory (`~/.xioflow/channels`, legacy `~/.trellis/channels`). */
 export function channelRoot(): string {
-  const env = process.env.TRELLIS_CHANNEL_ROOT;
+  const env =
+    process.env.XIOFLOW_CHANNEL_ROOT ?? process.env.TRELLIS_CHANNEL_ROOT;
   if (env && env.length > 0) return path.resolve(env);
-  return path.join(os.homedir(), ".trellis", "channels");
+  const current = path.join(os.homedir(), ".xioflow", "channels");
+  const legacy = path.join(os.homedir(), ".trellis", "channels");
+  if (fs.existsSync(current)) return current;
+  if (fs.existsSync(legacy)) return legacy;
+  return current;
 }
 
 /**

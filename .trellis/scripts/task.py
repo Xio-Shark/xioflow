@@ -39,13 +39,13 @@ from pathlib import Path
 from common.log import Colors, colored
 from common.paths import (
     DEVELOPER_HINT,
-    DIR_WORKFLOW,
     DIR_TASKS,
     FILE_TASK_JSON,
     get_repo_root,
     get_developer,
     get_tasks_dir,
     get_current_task,
+    get_workflow_dir_name,
 )
 from common.active_task import (
     clear_active_task,
@@ -186,7 +186,7 @@ def _record_start_state(
             file=sys.stderr,
         )
         print(
-            f"Once you branch off, run: python3 {DIR_WORKFLOW}/scripts/task.py "
+            f"Once you branch off, run: python3 {get_workflow_dir_name(repo_root)}/scripts/task.py "
             "set-branch <task> <feature-branch>",
             file=sys.stderr,
         )
@@ -212,7 +212,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     if not full_path.is_dir():
         print(colored(f"Error: Task not found: {task_input}", Colors.RED))
-        print("Hint: Use task name (e.g., 'my-task') or full path (e.g., '.trellis/tasks/01-31-my-task')")
+        print(f"Hint: Use task name (e.g., 'my-task') or full path (e.g., '{get_workflow_dir_name()}/tasks/01-31-my-task')")
         return 1
 
     # Context-manifest gate (#573): a seeded-but-uncurated implement/check
@@ -233,8 +233,8 @@ def cmd_start(args: argparse.Namespace) -> int:
                 Colors.RED,
             ))
             print("Sub-agents (implement/check) would run with zero spec context.")
-            print(f"  Curate:  python3 .trellis/scripts/task.py add-context {task_input} implement <path> \"<why>\"")
-            print(f"  Verify:  python3 .trellis/scripts/task.py validate {task_input}")
+            print(f"  Curate:  python3 {get_workflow_dir_name()}/scripts/task.py add-context {task_input} implement <path> \"<why>\"")
+            print(f"  Verify:  python3 {get_workflow_dir_name()}/scripts/task.py validate {task_input}")
             print("  Intentionally empty? Re-run start with --allow-empty-context")
             return 1
 
@@ -251,7 +251,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         # an absolute-path fallback) is exactly the pattern that let a `..`
         # ref escape into storage before this fix.
         print(colored(f"Error: Task not found: {task_input}", Colors.RED))
-        print("Hint: Use task name (e.g., 'my-task') or full path (e.g., '.trellis/tasks/01-31-my-task')")
+        print(f"Hint: Use task name (e.g., 'my-task') or full path (e.g., '{get_workflow_dir_name()}/tasks/01-31-my-task')")
         return 1
 
     task_json_path = full_path / FILE_TASK_JSON
@@ -425,7 +425,7 @@ def cmd_list(args: argparse.Namespace) -> int:
             if filter_status and t.status != filter_status:
                 continue
             items.append({
-                "dir": f"{DIR_WORKFLOW}/{DIR_TASKS}/{dir_name}",
+                "dir": f"{get_workflow_dir_name(repo_root)}/{DIR_TASKS}/{dir_name}",
                 "id": t.raw.get("id") or dir_name,
                 "title": t.title,
                 "status": t.status,
@@ -464,7 +464,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         if filter_status and t.status != filter_status:
             return
 
-        relative_path = f"{DIR_WORKFLOW}/{DIR_TASKS}/{dir_name}"
+        relative_path = f"{get_workflow_dir_name(repo_root)}/{DIR_TASKS}/{dir_name}"
         marker = ""
         if relative_path == current_task:
             marker = f" {colored('<- current', Colors.GREEN)}"
@@ -1028,10 +1028,10 @@ Examples:
   python3 task.py create "Add login feature" --description "Email + password sign-in" --slug add-login
   python3 task.py create "Add login feature" --description "Email + password sign-in" --slug add-login --package cli
   python3 task.py create "Add login feature" --description "Email + password sign-in" --meta linear=ENG-123 --meta epic=auth
-  python3 task.py create "Child task" --description "Session cookie handling" --slug child --parent .trellis/tasks/01-21-parent
-  python3 task.py add-context <dir> implement .trellis/spec/cli/backend/auth.md "Auth guidelines"
+  python3 task.py create "Child task" --description "Session cookie handling" --slug child --parent .xioflow/tasks/01-21-parent
+  python3 task.py add-context <dir> implement .xioflow/spec/cli/backend/auth.md "Auth guidelines"
   python3 task.py set-branch <dir> task/add-login
-  python3 task.py start .trellis/tasks/01-21-add-login
+  python3 task.py start .xioflow/tasks/01-21-add-login
   python3 task.py current --source
   python3 task.py finish
   python3 task.py rename add-login add-sso --dry-run  # Preview the change set
@@ -1080,9 +1080,9 @@ def main() -> int:
             "sub-agent-capable platforms and curated by the AI during planning when needed.",
             file=sys.stderr,
         )
-        print("See .trellis/workflow.md planning artifact guidance or run:", file=sys.stderr)
+        print(f"See {get_workflow_dir_name()}/workflow.md planning artifact guidance or run:", file=sys.stderr)
         print(
-            "  python3 ./.trellis/scripts/get_context.py --mode phase --step 1",
+            f"  python3 ./{get_workflow_dir_name()}/scripts/get_context.py --mode phase --step 1",
             file=sys.stderr,
         )
         print(

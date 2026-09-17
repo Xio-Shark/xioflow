@@ -93,19 +93,19 @@ Dual-write the same list under `## Dependencies`. Rules:
 2. For each child pair: shared files/types/tests? Yes → edge or merge; No → parallel candidate.
 3. Prefer a `parallel-plan.v1` JSON + one-shot import (avoids N manual creates):
    ```bash
-   python3 ./.trellis/scripts/task.py plan-import <parent-dir> plan.json        # dry-run
-   python3 ./.trellis/scripts/task.py plan-import <parent-dir> plan.json --yes  # materialize
+   python3 ./.xioflow/scripts/task.py plan-import <parent-dir> plan.json        # dry-run
+   python3 ./.xioflow/scripts/task.py plan-import <parent-dir> plan.json --yes  # materialize
    ```
    Import validates schema / slug collisions / missing deps / cycles (fail-closed, zero writes),
-   dual-writes `## Dependencies`, and pre-creates `git worktree` under `.trellis/worktrees/<dir>`
+   dual-writes `## Dependencies`, and pre-creates `git worktree` under `.xioflow/worktrees/<dir>`
    for `isolation=worktree` (fills `worktree_path` + `branch`).
 4. Or write `depends_on` + `isolation` to `task.json` and dual-write markdown by hand.
 5. Human reviews parallel groups (default). Then:
    ```bash
-   python3 ./.trellis/scripts/task.py ready <parent-dir>
-   python3 ./.trellis/scripts/task.py drift <parent-dir>
-   python3 ./.trellis/scripts/task.py dispatch-ready <parent-dir>        # dry-run plan
-   python3 ./.trellis/scripts/task.py dispatch-ready <parent-dir> --yes  # spawn after confirm
+   python3 ./.xioflow/scripts/task.py ready <parent-dir>
+   python3 ./.xioflow/scripts/task.py drift <parent-dir>
+   python3 ./.xioflow/scripts/task.py dispatch-ready <parent-dir>        # dry-run plan
+   python3 ./.xioflow/scripts/task.py dispatch-ready <parent-dir> --yes  # spawn after confirm
    ```
 6. When all required children complete → `task.py integrate <parent>` (merge + verify). Conflicts → serial fix; do not pretend parallel succeeded.
 
@@ -126,8 +126,8 @@ Failure: failed child does **not** unlock dependents; parent archive/complete is
 Integrate: after all required children complete:
 
 ```bash
-python3 ./.trellis/scripts/task.py integrate <parent-dir>          # merge + verify
-python3 ./.trellis/scripts/task.py integrate <parent-dir> --dry-run
+python3 ./.xioflow/scripts/task.py integrate <parent-dir>          # merge + verify
+python3 ./.xioflow/scripts/task.py integrate <parent-dir> --dry-run
 ```
 
 Conflict → non-zero exit + optional serial fix task stub; never same-cwd multi-writer force-merge.
@@ -164,19 +164,19 @@ Parents with no `isolation=worktree` children: integrate is a successful no-op.
 ## CLI reference
 
 ```bash
-python3 ./.trellis/scripts/task.py ready <parent-dir>
-python3 ./.trellis/scripts/task.py drift <parent-dir>              # warn; may exit non-zero
-python3 ./.trellis/scripts/task.py deps <task-dir>
-python3 ./.trellis/scripts/task.py plan-import <parent-dir> <plan.json> [--yes]
-python3 ./.trellis/scripts/task.py dispatch-ready <parent-dir>     # dry-run plan (default)
-python3 ./.trellis/scripts/task.py dispatch-ready <parent-dir> --yes
-python3 ./.trellis/scripts/task.py integrate <parent-dir>          # L4 merge + verify
-python3 ./.trellis/scripts/task.py integrate <parent-dir> --dry-run
+python3 ./.xioflow/scripts/task.py ready <parent-dir>
+python3 ./.xioflow/scripts/task.py drift <parent-dir>              # warn; may exit non-zero
+python3 ./.xioflow/scripts/task.py deps <task-dir>
+python3 ./.xioflow/scripts/task.py plan-import <parent-dir> <plan.json> [--yes]
+python3 ./.xioflow/scripts/task.py dispatch-ready <parent-dir>     # dry-run plan (default)
+python3 ./.xioflow/scripts/task.py dispatch-ready <parent-dir> --yes
+python3 ./.xioflow/scripts/task.py integrate <parent-dir>          # L4 merge + verify
+python3 ./.xioflow/scripts/task.py integrate <parent-dir> --dry-run
 ```
 
 Ready predicate: every `depends_on` entry is completed/done/archived; child status is actionable (`planning` / `pending` / `in_progress`); no cycle. `failed` children stay skipped and do not unlock dependents.
 
-### Config (`.trellis/config.yaml`)
+### Config (`.xioflow/config.yaml`)
 
 ```yaml
 parallel:

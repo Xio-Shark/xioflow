@@ -52,7 +52,7 @@ Common on platforms that support agent hooks.
 
 The agent file instructs the agent to read after startup:
 
-- `python3 ./.trellis/scripts/task.py current --source`
+- `python3 ./.xioflow/scripts/task.py current --source`
 - `implement.jsonl` or `check.jsonl`
 - spec/research files referenced by JSONL
 - current task `prd.md`
@@ -66,7 +66,7 @@ This mode fits platforms whose hooks cannot reliably rewrite sub-agent prompts.
 | User need | Edit location |
 | --- | --- |
 | Implement agent must follow extra restrictions | The platform's `trellis-implement` agent file. |
-| Check agent must run project-specific commands | `trellis-check` agent file, and `.trellis/spec/` if needed. |
+| Check agent must run project-specific commands | `trellis-check` agent file, and `.xioflow/spec/` if needed. |
 | Research agent must output a fixed format | `trellis-research` agent file. |
 | Agent cannot read task context | Agent prelude or `inject-subagent-context` hook. |
 | Add a project-specific agent | Platform agent directory + related workflow/command/skill entry point. |

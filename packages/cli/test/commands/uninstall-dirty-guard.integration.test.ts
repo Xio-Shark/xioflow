@@ -82,7 +82,7 @@ describe.skipIf(!canRun)("uninstall uncommitted-data guard", () => {
     git(tmpDir, "add", "-A");
     git(tmpDir, "commit", "-q", "-m", "trellis");
 
-    const specFile = path.join(tmpDir, ".trellis", "spec", "my-rules.md");
+    const specFile = path.join(tmpDir, ".xioflow", "spec", "my-rules.md");
     fs.mkdirSync(path.dirname(specFile), { recursive: true });
     fs.writeFileSync(specFile, "my custom spec");
 
@@ -97,7 +97,7 @@ describe.skipIf(!canRun)("uninstall uncommitted-data guard", () => {
   });
 
   it("refuses --yes uninstall while user data is uncommitted, leaving .trellis intact", async () => {
-    const specFile = path.join(tmpDir, ".trellis", "spec", "my-rules.md");
+    const specFile = path.join(tmpDir, ".xioflow", "spec", "my-rules.md");
     fs.mkdirSync(path.dirname(specFile), { recursive: true });
     fs.writeFileSync(specFile, "unsaved work");
 
@@ -111,11 +111,11 @@ describe.skipIf(!canRun)("uninstall uncommitted-data guard", () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
     // Nothing was deleted — the spec and the tree survive.
     expect(fs.existsSync(specFile)).toBe(true);
-    expect(fs.existsSync(path.join(tmpDir, ".trellis"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, ".xioflow"))).toBe(true);
   });
 
   it("TRELLIS_ALLOW_DIRTY_UNINSTALL=1 overrides the guard", async () => {
-    const specFile = path.join(tmpDir, ".trellis", "spec", "my-rules.md");
+    const specFile = path.join(tmpDir, ".xioflow", "spec", "my-rules.md");
     fs.mkdirSync(path.dirname(specFile), { recursive: true });
     fs.writeFileSync(specFile, "unsaved work");
     process.env.TRELLIS_ALLOW_DIRTY_UNINSTALL = "1";
@@ -123,7 +123,7 @@ describe.skipIf(!canRun)("uninstall uncommitted-data guard", () => {
     await uninstall({ yes: true });
 
     // Override honored — the tree is removed.
-    expect(fs.existsSync(path.join(tmpDir, ".trellis"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, ".xioflow"))).toBe(false);
   });
 
   it("committed user data does not block --yes uninstall", async () => {
@@ -132,6 +132,6 @@ describe.skipIf(!canRun)("uninstall uncommitted-data guard", () => {
 
     await uninstall({ yes: true });
 
-    expect(fs.existsSync(path.join(tmpDir, ".trellis"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, ".xioflow"))).toBe(false);
   });
 });

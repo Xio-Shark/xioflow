@@ -22,7 +22,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { PATHS } from "../constants/paths.js";
+import { resolveWorkflowDir } from "../constants/paths.js";
 
 /**
  * Mirror of `SAFE_AGENT_NAME` in `commands/channel/agent-loader.ts`.
@@ -35,7 +35,7 @@ const AGENT_FLAG_RE = new RegExp(
   "g",
 );
 const AGENT_PATH_RE = new RegExp(
-  `\\.trellis/agents/([${SAFE_AGENT_NAME_CHARS}]+)\\.md`,
+  `\\.(?:xioflow|trellis)/agents/([${SAFE_AGENT_NAME_CHARS}]+)\\.md`,
   "g",
 );
 
@@ -66,7 +66,7 @@ export function collectMissingAgents(
 ): string[] {
   const referenced = collectReferencedAgents(workflowContent);
   if (referenced.length === 0) return [];
-  const agentsRoot = path.join(cwd, PATHS.AGENTS);
+  const agentsRoot = path.join(cwd, resolveWorkflowDir(cwd), "agents");
   return referenced.filter((name) => {
     const file = path.join(agentsRoot, `${name}.md`);
     const nested = path.join(agentsRoot, name, "AGENT.md");

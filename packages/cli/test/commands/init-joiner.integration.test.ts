@@ -135,17 +135,17 @@ describe("init() joiner onboarding", () => {
     expect(prd).toContain("bob");
     expect(prd).toContain("You (the AI) are running this task");
     expect(prd).toContain("workflow.md");
-    expect(prd).toContain(".trellis/spec/");
+    expect(prd).toContain(".xioflow/spec/");
     expect(prd).toContain("00-join-bob");
     // Fallback text for empty archive
     expect(prd).toContain("archive is empty");
     const expectedPythonCmd = process.platform === "win32" ? "python" : "python3";
     expect(prd).toContain(
-      `${expectedPythonCmd} ./.trellis/scripts/task.py list --assignee bob`,
+      `${expectedPythonCmd} ./.xioflow/scripts/task.py list --assignee bob`,
     );
-    expect(prd).toContain(`${expectedPythonCmd} ./.trellis/scripts/task.py finish`);
+    expect(prd).toContain(`${expectedPythonCmd} ./.xioflow/scripts/task.py finish`);
     expect(prd).toContain(
-      `${expectedPythonCmd} ./.trellis/scripts/task.py archive 00-join-bob`,
+      `${expectedPythonCmd} ./.xioflow/scripts/task.py archive 00-join-bob`,
     );
 
     // init creates the joiner task but does not set repo-global current-task state.

@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 
 from common.paths import (
-    DIR_WORKFLOW,
+    get_workflow_dir_name,
     FILE_DEVELOPER,
     get_developer,
 )
@@ -38,7 +38,7 @@ def main() -> None:
     if existing:
         print(f"Developer already initialized: {existing}")
         print()
-        print(f"To reinitialize, remove {DIR_WORKFLOW}/{FILE_DEVELOPER} first")
+        print(f"To reinitialize, remove {get_workflow_dir_name()}/{FILE_DEVELOPER} first")
         sys.exit(0)
 
     if init_developer(name):

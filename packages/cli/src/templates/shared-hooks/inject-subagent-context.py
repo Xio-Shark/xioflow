@@ -54,7 +54,15 @@ if sys.platform.startswith("win"):
 # Path Constants (change here to rename directories)
 # =============================================================================
 
-DIR_WORKFLOW = ".trellis"
+DIR_WORKFLOW = ".xioflow"
+DIR_WORKFLOW_LEGACY = ".trellis"
+
+
+def _workflow_dir_name(repo_root) -> str:
+    """Active workflow dir name: .xioflow preferred, .trellis legacy fallback."""
+    if os.path.isdir(os.path.join(str(repo_root), DIR_WORKFLOW)):
+        return DIR_WORKFLOW
+    return DIR_WORKFLOW_LEGACY
 DIR_SPEC = "spec"
 FILE_TASK_JSON = "task.json"
 
@@ -146,7 +154,7 @@ def get_current_task(
     require_existing: bool = False,
 ) -> str | None:
     """Resolve current task directory through the unified active task resolver."""
-    scripts_dir = Path(repo_root) / DIR_WORKFLOW / "scripts"
+    scripts_dir = Path(repo_root) / _workflow_dir_name(repo_root) / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
     try:
@@ -187,7 +195,7 @@ DEFAULT_LIMITS: dict[str, int] = {
 
 def _get_limits(repo_root: str) -> dict[str, int]:
     """Load context-injection byte limits from config.yaml, with safe fallback."""
-    scripts_dir = Path(repo_root) / DIR_WORKFLOW / "scripts"
+    scripts_dir = Path(repo_root) / _workflow_dir_name(repo_root) / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
     try:
@@ -267,7 +275,7 @@ def _read_file_bytes(base_path: str, file_path: str) -> bytes | None:
         root_real = os.path.realpath(base_path)
         # `.trellis` may itself be a symlink into a store outside the repo
         # (#567); its real location is a second legitimate containment base.
-        workflow_real = os.path.realpath(os.path.join(base_path, ".trellis"))
+        workflow_real = os.path.realpath(os.path.join(base_path, _workflow_dir_name(base_path)))
         full_real = os.path.realpath(full_path)
         if not _real_path_contained(root_real, full_real) and not (
             _real_path_contained(workflow_real, full_real)
@@ -501,7 +509,7 @@ def get_agent_context(
         return (
             f"[Trellis] {agent_jsonl} has no curated entries, so no spec/research "
             "context was injected. Before working, read the guidelines relevant "
-            "to the code you will touch under .trellis/spec/, and treat the task "
+            f"to the code you will touch under {_workflow_dir_name(repo_root)}/spec/, and treat the task "
             "artifacts below as the only prepared context."
         )
     return "\n\n".join(blocks)
@@ -1142,7 +1150,7 @@ def main():
             root_real = os.path.realpath(repo_root)
             # `.trellis` may itself be a symlink into a store outside the
             # repo (#567); its real location is a second legitimate base.
-            workflow_real = os.path.realpath(os.path.join(repo_root, ".trellis"))
+            workflow_real = os.path.realpath(os.path.join(repo_root, _workflow_dir_name(repo_root)))
             task_dir_full = os.path.realpath(os.path.join(repo_root, task_dir))
             if not _real_path_contained(root_real, task_dir_full) and not (
                 _real_path_contained(workflow_real, task_dir_full)

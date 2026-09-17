@@ -13,7 +13,7 @@ import {
   WorkflowCommandError,
 } from "../commands/workflow.js";
 import { registerChannelCommand } from "../commands/channel/index.js";
-import { DIR_NAMES } from "../constants/paths.js";
+import { DIR_NAMES, resolveWorkflowDir } from "../constants/paths.js";
 import { PACKAGE_NAME, VERSION } from "../constants/version.js";
 import { compareVersions } from "../utils/compare-versions.js";
 import { getConfiguredPlatforms } from "../configurators/index.js";
@@ -26,7 +26,7 @@ export { VERSION, PACKAGE_NAME };
  * Check if a Trellis update is available (compare project version with CLI version)
  */
 function checkForUpdates(cwd: string): void {
-  const versionFile = path.join(cwd, DIR_NAMES.WORKFLOW, ".version");
+  const versionFile = path.join(cwd, resolveWorkflowDir(cwd), ".version");
 
   if (!fs.existsSync(versionFile)) return;
 
@@ -55,7 +55,10 @@ function checkForUpdates(cwd: string): void {
 
 // Check for updates at CLI startup (only if workflow dir exists)
 const cwd = process.cwd();
-if (fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW)) || fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW_LEGACY))) {
+if (
+  fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW)) ||
+  fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW_LEGACY))
+) {
   checkForUpdates(cwd);
 }
 
@@ -246,9 +249,7 @@ program
 
 program
   .command("restore")
-  .description(
-    "Restore the exact project state saved by `xioflow ablate`",
-  )
+  .description("Restore the exact project state saved by `xioflow ablate`")
   .option("-y, --yes", "Skip confirmation prompt")
   .option("--dry-run", "Preview restoration and check conflicts")
   .action(async (options: Record<string, unknown>) => {

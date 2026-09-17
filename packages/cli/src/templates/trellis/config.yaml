@@ -24,7 +24,7 @@ max_journal_lines: 2000
 # - false: scripts do not touch git. Files (journal-*.md, task archive moves)
 #   are still written to disk; you decide whether to git add / commit.
 #
-# Use `false` if your project's .gitignore intentionally excludes `.trellis/`
+# Use `false` if your project's .gitignore intentionally excludes `.xioflow/`
 # and you want session data kept local-only, or if you prefer to review
 # staged changes manually before each commit.
 #
@@ -92,11 +92,11 @@ max_journal_lines: 2000
 # `max_live_workers: 0` disables the spawn-time budget check.
 #
 # `trusted_context_dirs` extends the `--file`/`--jsonl`/`--agent` containment
-# check beyond the worker cwd — useful when `.trellis/tasks` or
-# `.trellis/workspace` is a symlink to an external directory. Realpaths under
+# check beyond the worker cwd — useful when `.xioflow/tasks` or
+# `.xioflow/workspace` is a symlink to an external directory. Realpaths under
 # any listed dir are accepted in addition to cwd.
 # `auto_trust_trellis_symlinks: false` disables the narrow auto-trust of
-# `.trellis/tasks` / `.trellis/workspace` when either is itself a top-level
+# `.xioflow/tasks` / `.xioflow/workspace` when either is itself a top-level
 # symlink (auto-trust is on by default).
 #
 channel:

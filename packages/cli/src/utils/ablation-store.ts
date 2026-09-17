@@ -287,7 +287,14 @@ export function getAblationStateRoot(): string {
   if (override && override.trim().length > 0) {
     return path.resolve(override);
   }
-  return path.join(os.homedir(), ".trellis", "ablations", "v1");
+  const current = path.join(os.homedir(), ".xioflow", "ablations", "v1");
+  const legacy = path.join(os.homedir(), ".trellis", "ablations", "v1");
+  // Keep reading existing recovery state from the legacy root so `ablate`
+  // backups made before the rename stay restorable; new state goes to
+  // ~/.xioflow only when no legacy state exists.
+  if (fs.existsSync(current)) return current;
+  if (fs.existsSync(legacy)) return legacy;
+  return current;
 }
 
 export function getTransactionPaths(

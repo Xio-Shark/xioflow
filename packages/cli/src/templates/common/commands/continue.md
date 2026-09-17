@@ -1,13 +1,13 @@
 # Continue Current Task
 
-Resume work on the current task — pick up at the right phase/step in `.trellis/workflow.md`.
+Resume work on the current task — pick up at the right phase/step in `.xioflow/workflow.md`.
 
 ---
 
 ## Step 1: Load Current Context
 
 ```bash
-{{PYTHON_CMD}} ./.trellis/scripts/get_context.py
+{{PYTHON_CMD}} ./.xioflow/scripts/get_context.py
 ```
 
 Confirms: current task, git state, recent commits.
@@ -15,7 +15,7 @@ Confirms: current task, git state, recent commits.
 ## Step 2: Load the Phase Index
 
 ```bash
-{{PYTHON_CMD}} ./.trellis/scripts/get_context.py --mode phase
+{{PYTHON_CMD}} ./.xioflow/scripts/get_context.py --mode phase
 ```
 
 Shows the Phase Index (Plan / Execute / Finish) with routing + skill mapping.
@@ -33,7 +33,7 @@ Shows the Phase Index (Plan / Execute / Finish) with routing + skill mapping.
 - `status=in_progress` + check passed → **3.3** (spec update) → **3.4** (commit)
 - `status=completed` (rare; usually archived immediately) → archive flow
 
-Phase rules (full detail in `.trellis/workflow.md`):
+Phase rules (full detail in `.xioflow/workflow.md`):
 
 1. Run steps **in order** within a phase — `[required]` steps must not be skipped
 2. `[once]` steps are already done if the required output exists. `prd.md` alone can be enough only for lightweight tasks; complex tasks also need `design.md` and `implement.md`.
@@ -44,7 +44,7 @@ Phase rules (full detail in `.trellis/workflow.md`):
 Once you know which step to resume at:
 
 ```bash
-{{PYTHON_CMD}} ./.trellis/scripts/get_context.py --mode phase --step <X.X> --platform {{CLI_FLAG}}
+{{PYTHON_CMD}} ./.xioflow/scripts/get_context.py --mode phase --step <X.X> --platform {{CLI_FLAG}}
 ```
 
 Follow the loaded instructions. After each `[required]` step completes, move to the next.
@@ -53,4 +53,4 @@ Follow the loaded instructions. After each `[required]` step completes, move to 
 
 ## Reference
 
-Full workflow and detailed phase steps live in `.trellis/workflow.md`. This command is only an entry point — the canonical guidance is there.
+Full workflow and detailed phase steps live in `.xioflow/workflow.md`. This command is only an entry point — the canonical guidance is there.

@@ -45,6 +45,7 @@ _SKIP_DIR_NAMES = frozenset({
     ".git",
     "node_modules",
     ".trellis",
+    ".xioflow",
     "dist",
     "build",
     ".venv",

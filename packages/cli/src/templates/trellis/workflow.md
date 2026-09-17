@@ -1,7 +1,7 @@
 # Development Workflow
 
-> Trellis keeps work on disk: task artifacts under `.trellis/tasks/`, project
-> guidelines under `.trellis/spec/`, session journals under `.trellis/workspace/`.
+> Trellis keeps work on disk: task artifacts under `.xioflow/tasks/`, project
+> guidelines under `.xioflow/spec/`, session journals under `.xioflow/workspace/`.
 > Chat gets compacted; files don't.
 
 ---
@@ -20,59 +20,59 @@
 ### Developer Identity
 
 ```bash
-python3 ./.trellis/scripts/init_developer.py <your-name>   # first time only
+python3 ./.xioflow/scripts/init_developer.py <your-name>   # first time only
 ```
 
-Creates `.trellis/.developer` (gitignored) + `.trellis/workspace/<your-name>/`.
+Creates `.xioflow/.developer` (gitignored) + `.xioflow/workspace/<your-name>/`.
 
 ### Spec — project coding guidelines
 
-`.trellis/spec/` holds coding guidelines organized by package and layer.
+`.xioflow/spec/` holds coding guidelines organized by package and layer.
 
-- `.trellis/spec/<package>/<layer>/index.md` — entry point; links to the topic files that matter
-- `.trellis/spec/guides/` — cross-cutting thinking guides
+- `.xioflow/spec/<package>/<layer>/index.md` — entry point; links to the topic files that matter
+- `.xioflow/spec/guides/` — cross-cutting thinking guides
 
 Update spec when you find a new pattern, a convention, or a bug worth preventing.
 
 ### Task System
 
-Every task is a directory `.trellis/tasks/{MM-DD-name}/` holding `task.json`, `prd.md`, optional `design.md` / `implement.md` / `research/`, and context manifests (`implement.jsonl`, `check.jsonl`) for sub-agent-capable platforms. Manifests are seeded empty on `create`; `validate` fails and `start` refuses while they hold only the seed row — pass `start --allow-empty-context` when that is intentional.
+Every task is a directory `.xioflow/tasks/{MM-DD-name}/` holding `task.json`, `prd.md`, optional `design.md` / `implement.md` / `research/`, and context manifests (`implement.jsonl`, `check.jsonl`) for sub-agent-capable platforms. Manifests are seeded empty on `create`; `validate` fails and `start` refuses while they hold only the seed row — pass `start --allow-empty-context` when that is intentional.
 
 ```bash
-python3 ./.trellis/scripts/task.py create "<title>" [--slug <name>] [--parent <dir>]
-python3 ./.trellis/scripts/task.py start <name>          # set active task (planning → in_progress)
-python3 ./.trellis/scripts/task.py current --source      # show active task
-python3 ./.trellis/scripts/task.py finish                # clear the active-task pointer
-python3 ./.trellis/scripts/task.py archive <name>        # mark completed, move to archive/
-python3 ./.trellis/scripts/task.py list [--mine] [--status <s>]
+python3 ./.xioflow/scripts/task.py create "<title>" [--slug <name>] [--parent <dir>]
+python3 ./.xioflow/scripts/task.py start <name>          # set active task (planning → in_progress)
+python3 ./.xioflow/scripts/task.py current --source      # show active task
+python3 ./.xioflow/scripts/task.py finish                # clear the active-task pointer
+python3 ./.xioflow/scripts/task.py archive <name>        # mark completed, move to archive/
+python3 ./.xioflow/scripts/task.py list [--mine] [--status <s>]
 
-python3 ./.trellis/scripts/task.py add-context <dir> implement|check <path> <reason>
-python3 ./.trellis/scripts/task.py list-context <dir> [implement|check]
-python3 ./.trellis/scripts/task.py validate <dir>
-python3 ./.trellis/scripts/task.py list-archive
-python3 ./.trellis/scripts/task.py ready <parent>        # parallel deps: ready / blocked children
-python3 ./.trellis/scripts/task.py drift <parent>        # json vs ## Dependencies mismatch
-python3 ./.trellis/scripts/task.py dispatch-ready <parent> [--yes] [--integrate]
-python3 ./.trellis/scripts/task.py integrate <parent> [--dry-run]
-python3 ./.trellis/scripts/task.py --help                # authoritative full list
+python3 ./.xioflow/scripts/task.py add-context <dir> implement|check <path> <reason>
+python3 ./.xioflow/scripts/task.py list-context <dir> [implement|check]
+python3 ./.xioflow/scripts/task.py validate <dir>
+python3 ./.xioflow/scripts/task.py list-archive
+python3 ./.xioflow/scripts/task.py ready <parent>        # parallel deps: ready / blocked children
+python3 ./.xioflow/scripts/task.py drift <parent>        # json vs ## Dependencies mismatch
+python3 ./.xioflow/scripts/task.py dispatch-ready <parent> [--yes] [--integrate]
+python3 ./.xioflow/scripts/task.py integrate <parent> [--dry-run]
+python3 ./.xioflow/scripts/task.py --help                # authoritative full list
 ```
 
-`create` auto-sets the per-session active-task pointer when session identity is available; `start` flips status to `in_progress`; `finish` clears the pointer; `archive` writes `status=completed` and moves the directory. State lives under `.trellis/.runtime/sessions/`.
+`create` auto-sets the per-session active-task pointer when session identity is available; `start` flips status to `in_progress`; `finish` clears the pointer; `archive` writes `status=completed` and moves the directory. State lives under `.xioflow/.runtime/sessions/`.
 
 ### Workspace Journal
 
 ```bash
-python3 ./.trellis/scripts/add_session.py --title "Title" --commit "<hash>" --summary "..."
+python3 ./.xioflow/scripts/add_session.py --title "Title" --commit "<hash>" --summary "..."
 ```
 
-Appends the session to `.trellis/workspace/<dev>/journal-N.md` (rotates at `max_journal_lines`, default 2000) and updates the index.
+Appends the session to `.xioflow/workspace/<dev>/journal-N.md` (rotates at `max_journal_lines`, default 2000) and updates the index.
 
 ### Context Script
 
 ```bash
-python3 ./.trellis/scripts/get_context.py                              # full session context
-python3 ./.trellis/scripts/get_context.py --mode packages              # packages + spec layers
-python3 ./.trellis/scripts/get_context.py --mode phase [--step <X.Y>]  # phase index / step detail
+python3 ./.xioflow/scripts/get_context.py                              # full session context
+python3 ./.xioflow/scripts/get_context.py --mode packages              # packages + spec layers
+python3 ./.xioflow/scripts/get_context.py --mode phase [--step <X.Y>]  # phase index / step detail
 ```
 
 ---
@@ -107,9 +107,9 @@ Use a parent task when one request contains several independently verifiable del
 Tree ≠ dependency graph. Sibling ordering and parallel waves use `task.json` fields on each child — `depends_on` (sibling directory names) and `isolation` (`worktree` for code changes, `shared` ok for docs/readonly) — dual-written as a `## Dependencies` section in the child's `prd.md` / `implement.md`.
 
 ```bash
-python3 ./.trellis/scripts/task.py create "<title>" --slug <name> --parent <parent-dir>
-python3 ./.trellis/scripts/task.py add-subtask <parent> <child>
-python3 ./.trellis/scripts/task.py ready <parent-dir>
+python3 ./.xioflow/scripts/task.py create "<title>" --slug <name> --parent <parent-dir>
+python3 ./.xioflow/scripts/task.py add-subtask <parent> <child>
+python3 ./.xioflow/scripts/task.py ready <parent-dir>
 ```
 
 Review the ready set (`task.py ready <parent>`), dispatch ready children (`dispatch-ready --yes`, concurrency ≤ `parallel.max_concurrency`), then `task.py integrate <parent>` to merge. Do not start the parent just because children exist — start the child that owns the next independently verifiable deliverable.
@@ -212,8 +212,8 @@ Inside an active task, route by intent first, then load the detailed step if nee
 ### Loading Step Detail
 
 ```bash
-python3 ./.trellis/scripts/get_context.py --mode phase --step <X.Y>
-# e.g. python3 ./.trellis/scripts/get_context.py --mode phase --step 1.1
+python3 ./.xioflow/scripts/get_context.py --mode phase --step <X.Y>
+# e.g. python3 ./.xioflow/scripts/get_context.py --mode phase --step 1.1
 ```
 
 ---
@@ -225,7 +225,7 @@ Goal: turn the request into reviewed planning artifacts.
 #### 1.0 Create task `[required · once]`
 
 ```bash
-python3 ./.trellis/scripts/task.py create "<task title>" --slug <name>
+python3 ./.xioflow/scripts/task.py create "<task title>" --slug <name>
 ```
 
 `--slug` is the name only — `create` adds the `MM-DD-` prefix. Creates the task directory with `task.json` (status `planning`) and a starter `prd.md`, and auto-targets it when session identity is available. Skip if `task.py current` already points at this work. Do not run `start` yet — that flips status before artifacts are reviewed.
@@ -262,7 +262,7 @@ Research in the main session directly and write findings into `research/`.
 
 Curate `implement.jsonl` and `check.jsonl` — one `{"file": "<path>", "reason": "..."}` per line, paths repo-root relative:
 
-- **In**: `.trellis/spec/...` indexes/guidelines and `{TASK_DIR}/research/*.md` the Phase 2 sub-agents need
+- **In**: `.xioflow/spec/...` indexes/guidelines and `{TASK_DIR}/research/*.md` the Phase 2 sub-agents need
 - **Out**: code files and files you're about to modify — sub-agents read those themselves
 - `implement.jsonl` → what the implement agent needs to write code; `check.jsonl` → what the check agent needs to review
 
@@ -279,7 +279,7 @@ Skip — Phase 2 loads context through `trellis-before-dev`.
 #### 1.4 Activate task `[required · once]`
 
 ```bash
-python3 ./.trellis/scripts/task.py start <task-dir>
+python3 ./.xioflow/scripts/task.py start <task-dir>
 ```
 
 Runs after artifact review and flips status to `in_progress`. If it fails with a session-identity message, set `TRELLIS_CONTEXT_ID` (or follow the printed hint) and retry. Runtime consumers tolerate missing or seed-only manifests for compatibility, but that tolerance is not a planning-ready state.

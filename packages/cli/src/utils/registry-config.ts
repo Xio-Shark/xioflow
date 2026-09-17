@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { DIR_NAMES } from "../constants/paths.js";
+import { resolveWorkflowDir } from "../constants/paths.js";
 import { writeFileAtomic } from "./atomic-write.js";
 import { toPosix } from "./posix.js";
 
@@ -11,7 +11,7 @@ export interface SpecRegistryConfig {
 }
 
 function configPath(cwd: string): string {
-  return path.join(cwd, DIR_NAMES.WORKFLOW, "config.yaml");
+  return path.join(cwd, resolveWorkflowDir(cwd), "config.yaml");
 }
 
 function stripYamlScalar(value: string): string {

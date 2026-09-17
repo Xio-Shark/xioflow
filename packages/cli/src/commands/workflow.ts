@@ -23,7 +23,11 @@ import path from "node:path";
 import chalk from "chalk";
 import inquirer from "inquirer";
 
-import { DIR_NAMES, PATHS } from "../constants/paths.js";
+import {
+  DIR_NAMES,
+  FILE_NAMES,
+  resolveWorkflowDir,
+} from "../constants/paths.js";
 import { collectMissingAgents } from "../utils/agent-refs.js";
 import { replacePythonCommandLiterals } from "../configurators/shared.js";
 import {
@@ -49,8 +53,12 @@ export interface WorkflowCommandOptions {
   createNew?: boolean;
 }
 
+function workflowRelPath(cwd: string): string {
+  return `${resolveWorkflowDir(cwd)}/${FILE_NAMES.WORKFLOW_GUIDE}`;
+}
+
 function workflowFilePath(cwd: string): string {
-  return path.join(cwd, PATHS.WORKFLOW_GUIDE_FILE);
+  return path.join(cwd, workflowRelPath(cwd));
 }
 
 function isInteractive(): boolean {
@@ -94,7 +102,7 @@ function classifyExistingWorkflow(
     return { kind: "identical" };
   }
   const hashes = loadHashes(cwd);
-  const storedHash = hashes[PATHS.WORKFLOW_GUIDE_FILE];
+  const storedHash = hashes[workflowRelPath(cwd)];
   if (storedHash && storedHash === computeHash(current)) {
     return { kind: "pristine" };
   }
@@ -119,19 +127,18 @@ async function chooseTemplateInteractively(
   return id;
 }
 
-async function confirmOverwriteInteractively(): Promise<
-  "overwrite" | "skip" | "create-new"
-> {
+async function confirmOverwriteInteractively(
+  cwd: string,
+): Promise<"overwrite" | "skip" | "create-new"> {
   const { action } = await inquirer.prompt<{ action: string }>([
     {
       type: "list",
       name: "action",
-      message:
-        "Your .trellis/workflow.md has local edits. What do you want to do?",
+      message: `Your ${resolveWorkflowDir(cwd)}/workflow.md has local edits. What do you want to do?`,
       choices: [
         { name: "Overwrite (replace local edits)", value: "overwrite" },
         {
-          name: "Write to .trellis/workflow.md.new and keep current",
+          name: `Write to ${resolveWorkflowDir(cwd)}/workflow.md.new and keep current`,
           value: "create-new",
         },
         { name: "Skip (no changes)", value: "skip" },
@@ -142,7 +149,7 @@ async function confirmOverwriteInteractively(): Promise<
 }
 
 function applyHashContract(cwd: string, templateId: string): void {
-  const relPath = PATHS.WORKFLOW_GUIDE_FILE;
+  const relPath = workflowRelPath(cwd);
   if (templateId === NATIVE_WORKFLOW_ID) {
     const filePath = workflowFilePath(cwd);
     const current = fs.readFileSync(filePath, "utf-8");
@@ -186,7 +193,7 @@ async function writeWorkflow(
   if (classification.kind === "identical") {
     console.log(
       chalk.gray(
-        `  ○ ${PATHS.WORKFLOW_GUIDE_FILE} already matches "${template.id}" — refreshing hash entry`,
+        `  ○ ${workflowRelPath(cwd)} already matches "${template.id}" — refreshing hash entry`,
       ),
     );
     applyHashContract(cwd, template.id);
@@ -197,10 +204,10 @@ async function writeWorkflow(
     const explicitTemplate = Boolean(options.template);
     if (explicitTemplate || !isInteractive()) {
       throw new WorkflowCommandError(
-        `${PATHS.WORKFLOW_GUIDE_FILE} has local edits. Re-run with --force to overwrite or --create-new to write ${PATHS.WORKFLOW_GUIDE_FILE}.new.`,
+        `${workflowRelPath(cwd)} has local edits. Re-run with --force to overwrite or --create-new to write ${workflowRelPath(cwd)}.new.`,
       );
     }
-    const action = await confirmOverwriteInteractively();
+    const action = await confirmOverwriteInteractively(cwd);
     if (action === "skip") {
       console.log(chalk.gray("  ○ Skipped"));
       return;
@@ -220,9 +227,7 @@ async function writeWorkflow(
 
   fs.writeFileSync(filePath, finalContent, "utf-8");
   console.log(
-    chalk.green(
-      `  ✓ Replaced ${PATHS.WORKFLOW_GUIDE_FILE} with "${template.id}"`,
-    ),
+    chalk.green(`  ✓ Replaced ${workflowRelPath(cwd)} with "${template.id}"`),
   );
   applyHashContract(cwd, template.id);
 }
@@ -242,9 +247,12 @@ export async function runWorkflowCommand(
   options: WorkflowCommandOptions,
 ): Promise<void> {
   const cwd = process.cwd();
-  if (!fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW))) {
+  if (
+    !fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW)) &&
+    !fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW_LEGACY))
+  ) {
     throw new WorkflowCommandError(
-      "No .trellis/ directory found. Run `trellis init` first.",
+      "No .xioflow/ or .trellis/ directory found. Run `xioflow init` first.",
     );
   }
 
@@ -308,10 +316,10 @@ function warnAboutMissingAgents(cwd: string, workflowContent: string): void {
   if (missing.length === 0) return;
   process.stderr.write(
     chalk.yellow(
-      `\n⚠ The selected workflow references .trellis/agents/{${missing.join(",")}}.md, but those files are not on disk.\n`,
+      `\n⚠ The selected workflow references ${resolveWorkflowDir(cwd)}/agents/{${missing.join(",")}}.md, but those files are not on disk.\n`,
     ) +
       chalk.yellow(
-        `  Run \`trellis update\` to backfill the bundled agent definitions, or create them under ${PATHS.AGENTS}/.\n`,
+        `  Run \`xioflow update\` to backfill the bundled agent definitions, or create them under ${resolveWorkflowDir(cwd)}/agents/.\n`,
       ),
   );
 }

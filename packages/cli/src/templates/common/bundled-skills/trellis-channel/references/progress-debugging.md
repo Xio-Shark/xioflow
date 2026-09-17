@@ -56,7 +56,7 @@ Triage order:
 
    ```bash
    trellis channel list --all --all-projects
-   CHAN=~/.trellis/channels/<bucket>/<channel>
+   CHAN=~/.xioflow/channels/<bucket>/<channel>
    ```
 
 2. **Confirm the supervisor and worker PIDs are alive.**
@@ -206,7 +206,7 @@ diffing against `<worker>.inbox-cursor` while debugging the supervisor.
 ## Storage Layout
 
 ```text
-~/.trellis/channels/
+~/.xioflow/channels/
 └── <bucket>/
     └── <channel-name>/
         ├── events.jsonl

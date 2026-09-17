@@ -18,11 +18,7 @@ import {
   scrubOpencodePackageJson,
   type ScrubResult,
 } from "./uninstall-scrubbers.js";
-import {
-  cleanupEmptyDirs,
-  TRELLIS_BLOCK_END,
-  TRELLIS_BLOCK_START,
-} from "./managed-paths.js";
+import { cleanupEmptyDirs, MANAGED_BLOCK_MARKERS } from "./managed-paths.js";
 
 export interface StructuredFileSpec {
   /** Manifest path (POSIX). */
@@ -157,9 +153,7 @@ export function assertSafeManagedPath(
  */
 export function buildStructuredFileSpecs(): Map<string, StructuredFileSpec> {
   const specs: StructuredFileSpec[] = [
-    ...(
-      [".claude/settings.json", ".codex/hooks.json"] as const
-    ).map(
+    ...([".claude/settings.json", ".codex/hooks.json"] as const).map(
       (posixPath): StructuredFileSpec => ({
         posixPath,
         reason: "Strip trellis hooks; preserve user fields",
@@ -188,12 +182,19 @@ export function buildStructuredFileSpecs(): Map<string, StructuredFileSpec> {
     {
       posixPath: FILE_NAMES.AGENTS,
       reason: "Strip Trellis managed block; preserve user instructions",
-      scrub: (content) =>
-        scrubManagedMarkdownBlock(
-          content,
-          TRELLIS_BLOCK_START,
-          TRELLIS_BLOCK_END,
-        ),
+      scrub: (content) => {
+        // Scrub whichever managed-block marker pair is present (xioflow
+        // canonical or trellis legacy).
+        let result: ScrubResult = { content, fullyEmpty: false };
+        for (const [start, end] of MANAGED_BLOCK_MARKERS) {
+          const next = scrubManagedMarkdownBlock(result.content, start, end);
+          result = {
+            content: next.content,
+            fullyEmpty: next.fullyEmpty || result.fullyEmpty,
+          };
+        }
+        return result;
+      },
     },
   ];
 
@@ -302,10 +303,12 @@ export function executeManagedRemovalPlan(
 
   let deletedDirs = 0;
   if (plan.removeTrellisDir) {
-    const trellisDir = path.join(cwd, DIR_NAMES.WORKFLOW);
-    if (lstatIfPresent(trellisDir)) {
-      fs.rmSync(trellisDir, { recursive: true, force: true });
-      deletedDirs += 1;
+    for (const dirName of [DIR_NAMES.WORKFLOW, DIR_NAMES.WORKFLOW_LEGACY]) {
+      const trellisDir = path.join(cwd, dirName);
+      if (lstatIfPresent(trellisDir)) {
+        fs.rmSync(trellisDir, { recursive: true, force: true });
+        deletedDirs += 1;
+      }
     }
   }
 
@@ -315,7 +318,9 @@ export function executeManagedRemovalPlan(
   }
 
   const sortedManagedDirs = [...ALL_MANAGED_DIRS]
-    .filter((dir) => dir !== DIR_NAMES.WORKFLOW)
+    .filter(
+      (dir) => dir !== DIR_NAMES.WORKFLOW && dir !== DIR_NAMES.WORKFLOW_LEGACY,
+    )
     .sort((left, right) => right.split("/").length - left.split("/").length);
   for (const managedDir of sortedManagedDirs) {
     const abs = path.join(cwd, ...managedDir.split("/"));

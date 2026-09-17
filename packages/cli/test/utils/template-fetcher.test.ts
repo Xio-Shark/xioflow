@@ -24,7 +24,7 @@ afterEach(() => {
 describe("getInstallPath", () => {
   it("returns spec path for 'spec' type", () => {
     const result = getInstallPath("/project", "spec");
-    expect(result).toBe(path.join("/project", ".trellis/spec"));
+    expect(result).toBe(path.join("/project", ".xioflow/spec"));
   });
 
   it("returns skill path for 'skill' type", () => {
@@ -44,12 +44,12 @@ describe("getInstallPath", () => {
 
   it("falls back to spec path for unknown type", () => {
     const result = getInstallPath("/project", "unknown-type");
-    expect(result).toBe(path.join("/project", ".trellis/spec"));
+    expect(result).toBe(path.join("/project", ".xioflow/spec"));
   });
 
   it("works with different cwd values", () => {
     const result = getInstallPath("/home/user/my-project", "spec");
-    expect(result).toBe(path.join("/home/user/my-project", ".trellis/spec"));
+    expect(result).toBe(path.join("/home/user/my-project", ".xioflow/spec"));
   });
 });
 
@@ -672,7 +672,7 @@ gitDescribe("git-backed registry backend", () => {
         expect(result.success).toBe(true);
         expect(
           fs.readFileSync(
-            path.join(cwd, ".trellis", "spec", "rules.md"),
+            path.join(cwd, ".xioflow", "spec", "rules.md"),
             "utf-8",
           ),
         ).toBe("remote rules\n");
@@ -726,7 +726,7 @@ gitDescribe("git-backed registry backend", () => {
         expect(result.success).toBe(true);
         expect(
           fs.readFileSync(
-            path.join(cwd, ".trellis", "spec", "rules.md"),
+            path.join(cwd, ".xioflow", "spec", "rules.md"),
             "utf-8",
           ),
         ).toBe("remote rules\n");

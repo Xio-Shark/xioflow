@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { DIR_NAMES, PATHS } from "../constants/paths.js";
+import { DIR_NAMES, resolveWorkflowDir } from "../constants/paths.js";
 import { copyTrellisDir } from "../templates/extract.js";
 
 // Import trellis templates (generic, not project-specific)
@@ -39,7 +39,10 @@ import {
 } from "../templates/markdown/index.js";
 
 import { writeFile, ensureDir } from "../utils/file-writer.js";
-import { replacePythonCommandLiterals } from "./shared.js";
+import {
+  replacePythonCommandLiterals,
+  retargetWorkflowDirContent,
+} from "./shared.js";
 import {
   sanitizePkgName,
   type ProjectType,
@@ -49,6 +52,21 @@ import {
 interface DocDefinition {
   name: string;
   content: string;
+}
+
+/**
+ * writeFile wrapper that retargets canonical `.xioflow` doc references when
+ * the project's active workflow dir is the legacy `.trellis`.
+ */
+async function writeWorkflowDoc(
+  filePath: string,
+  content: string,
+  workflowDirName: string,
+): Promise<void> {
+  await writeFile(
+    filePath,
+    retargetWorkflowDirContent(content, workflowDirName),
+  );
 }
 
 /**
@@ -95,9 +113,15 @@ const JOURNAL_MERGE_UNION_PATTERN = /journal-\*\.md\s+merge=union/;
  */
 export function ensureGitattributes(cwd: string): void {
   const targetPath = path.join(cwd, ".gitattributes");
+  // The bundled rule names the canonical dir; retarget it so a legacy
+  // `.trellis/` project gets a rule that covers its actual workspace.
+  const template = retargetWorkflowDirContent(
+    gitattributesTemplate,
+    resolveWorkflowDir(cwd),
+  );
 
   if (!fs.existsSync(targetPath)) {
-    fs.writeFileSync(targetPath, gitattributesTemplate);
+    fs.writeFileSync(targetPath, template);
     return;
   }
 
@@ -107,7 +131,7 @@ export function ensureGitattributes(cwd: string): void {
   }
 
   const separator = existing.endsWith("\n") ? "\n" : "\n\n";
-  fs.writeFileSync(targetPath, existing + separator + gitattributesTemplate);
+  fs.writeFileSync(targetPath, existing + separator + template);
 }
 
 /**
@@ -132,32 +156,31 @@ export async function createWorkflowStructure(
   const packages = options?.packages;
   const remoteSpecPackages = options?.remoteSpecPackages;
   const workflowMd = options?.workflowMdOverride ?? workflowMdTemplate;
+  // Re-init on a legacy .trellis/ project keeps writing into .trellis/;
+  // fresh installs get .xioflow/.
+  const wf = resolveWorkflowDir(cwd);
+  const wfPath = (...parts: string[]): string => path.join(cwd, wf, ...parts);
 
-  // Create base .trellis directory
-  ensureDir(path.join(cwd, DIR_NAMES.WORKFLOW));
+  // Create base workflow directory
+  ensureDir(wfPath());
 
   // Copy scripts/ directory from templates
-  await copyTrellisDir("scripts", path.join(cwd, PATHS.SCRIPTS), {
+  await copyTrellisDir("scripts", wfPath(DIR_NAMES.SCRIPTS), {
     executable: true,
   });
 
   // Copy workflow.md (native bundled template or selected marketplace variant)
-  await writeFile(
-    path.join(cwd, PATHS.WORKFLOW_GUIDE_FILE),
+  await writeWorkflowDoc(
+    wfPath("workflow.md"),
     replacePythonCommandLiterals(workflowMd),
+    wf,
   );
 
   // Copy .gitignore from templates
-  await writeFile(
-    path.join(cwd, DIR_NAMES.WORKFLOW, ".gitignore"),
-    gitignoreTemplate,
-  );
+  await writeWorkflowDoc(wfPath(".gitignore"), gitignoreTemplate, wf);
 
   // Copy config.yaml from templates
-  await writeFile(
-    path.join(cwd, DIR_NAMES.WORKFLOW, "config.yaml"),
-    configYamlTemplate,
-  );
+  await writeWorkflowDoc(wfPath("config.yaml"), configYamlTemplate, wf);
 
   // Ensure project-root .gitattributes carries the journal merge=union rule
   // (additive-only — never overwrites a user's existing file wholesale).
@@ -169,20 +192,21 @@ export async function createWorkflowStructure(
   // dispatched on every init regardless of selected workflow because the user
   // can switch to a channel-driven workflow at any time via `trellis workflow
   // --template`.
-  ensureDir(path.join(cwd, PATHS.AGENTS));
+  ensureDir(wfPath(DIR_NAMES.AGENTS));
   for (const [agentFile, content] of getAllAgents()) {
-    await writeFile(path.join(cwd, PATHS.AGENTS, agentFile), content);
+    await writeWorkflowDoc(wfPath(DIR_NAMES.AGENTS, agentFile), content, wf);
   }
 
   // Create workspace/ with index.md
-  ensureDir(path.join(cwd, PATHS.WORKSPACE));
-  await writeFile(
-    path.join(cwd, PATHS.WORKSPACE, "index.md"),
+  ensureDir(wfPath(DIR_NAMES.WORKSPACE));
+  await writeWorkflowDoc(
+    wfPath(DIR_NAMES.WORKSPACE, "index.md"),
     replacePythonCommandLiterals(agentProgressIndexContent),
+    wf,
   );
 
   // Create tasks/ directory
-  ensureDir(path.join(cwd, PATHS.TASKS));
+  ensureDir(wfPath(DIR_NAMES.TASKS));
 
   // Create spec templates based on project type
   // These are NOT dogfooded - they are generic templates for new projects
@@ -198,7 +222,10 @@ export async function createWorkflowStructure(
 /**
  * Write backend spec docs into a target spec directory.
  */
-async function writeBackendDocs(specBase: string): Promise<void> {
+async function writeBackendDocs(
+  specBase: string,
+  workflowDirName: string,
+): Promise<void> {
   const backendDir = path.join(specBase, "backend");
   ensureDir(backendDir);
   const docs: DocDefinition[] = [
@@ -216,14 +243,21 @@ async function writeBackendDocs(specBase: string): Promise<void> {
     { name: "error-handling.md", content: backendErrorHandlingContent },
   ];
   for (const doc of docs) {
-    await writeFile(path.join(backendDir, doc.name), doc.content);
+    await writeWorkflowDoc(
+      path.join(backendDir, doc.name),
+      doc.content,
+      workflowDirName,
+    );
   }
 }
 
 /**
  * Write frontend spec docs into a target spec directory.
  */
-async function writeFrontendDocs(specBase: string): Promise<void> {
+async function writeFrontendDocs(
+  specBase: string,
+  workflowDirName: string,
+): Promise<void> {
   const frontendDir = path.join(specBase, "frontend");
   ensureDir(frontendDir);
   const docs: DocDefinition[] = [
@@ -245,7 +279,11 @@ async function writeFrontendDocs(specBase: string): Promise<void> {
     { name: "state-management.md", content: frontendStateManagementContent },
   ];
   for (const doc of docs) {
-    await writeFile(path.join(frontendDir, doc.name), doc.content);
+    await writeWorkflowDoc(
+      path.join(frontendDir, doc.name),
+      doc.content,
+      workflowDirName,
+    );
   }
 }
 
@@ -255,12 +293,13 @@ async function writeFrontendDocs(specBase: string): Promise<void> {
 async function writeSpecForType(
   specBase: string,
   projectType: ProjectType,
+  workflowDirName: string,
 ): Promise<void> {
   if (projectType !== "frontend") {
-    await writeBackendDocs(specBase);
+    await writeBackendDocs(specBase, workflowDirName);
   }
   if (projectType !== "backend") {
-    await writeFrontendDocs(specBase);
+    await writeFrontendDocs(specBase, workflowDirName);
   }
 }
 
@@ -270,11 +309,14 @@ async function createSpecTemplates(
   packages?: DetectedPackage[],
   remoteSpecPackages?: Set<string>,
 ): Promise<void> {
+  const workflowDir = resolveWorkflowDir(cwd);
+  const specRoot = path.join(cwd, workflowDir, DIR_NAMES.SPEC);
+
   // Ensure spec directory exists
-  ensureDir(path.join(cwd, PATHS.SPEC));
+  ensureDir(specRoot);
 
   // Guides - always created regardless of mode
-  const guidesDir = path.join(cwd, `${PATHS.SPEC}/guides`);
+  const guidesDir = path.join(specRoot, "guides");
   ensureDir(guidesDir);
   const guidesDocs: DocDefinition[] = [
     { name: "index.md", content: guidesIndexContent },
@@ -292,7 +334,11 @@ async function createSpecTemplates(
     },
   ];
   for (const doc of guidesDocs) {
-    await writeFile(path.join(guidesDir, doc.name), doc.content);
+    await writeWorkflowDoc(
+      path.join(guidesDir, doc.name),
+      doc.content,
+      workflowDir,
+    );
   }
 
   if (packages && packages.length > 0) {
@@ -300,13 +346,13 @@ async function createSpecTemplates(
     for (const pkg of packages) {
       const dirName = sanitizePkgName(pkg.name);
       if (remoteSpecPackages?.has(dirName)) continue;
-      const pkgSpecBase = path.join(cwd, `${PATHS.SPEC}/${dirName}`);
+      const pkgSpecBase = path.join(specRoot, dirName);
       ensureDir(pkgSpecBase);
       const pkgType = pkg.type === "unknown" ? "fullstack" : pkg.type;
-      await writeSpecForType(pkgSpecBase, pkgType);
+      await writeSpecForType(pkgSpecBase, pkgType, workflowDir);
     }
   } else {
     // Single-repo mode
-    await writeSpecForType(path.join(cwd, PATHS.SPEC), projectType);
+    await writeSpecForType(specRoot, projectType, workflowDir);
   }
 }

@@ -39,12 +39,13 @@ describe("CONFIG_DIRS", () => {
 });
 
 describe("ALL_MANAGED_DIRS", () => {
-  it("starts with .trellis", () => {
-    expect(ALL_MANAGED_DIRS[0]).toBe(".trellis");
+  it("starts with .xioflow", () => {
+    expect(ALL_MANAGED_DIRS[0]).toBe(".xioflow");
   });
 
-  it("contains .trellis plus all managed dirs", () => {
+  it("contains .xioflow and legacy .trellis plus all managed dirs", () => {
     expect(ALL_MANAGED_DIRS).toEqual([
+      ".xioflow",
       ".trellis",
       ...new Set(PLATFORM_MANAGED_DIRS),
     ]);

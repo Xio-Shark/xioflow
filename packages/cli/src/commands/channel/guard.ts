@@ -23,7 +23,7 @@ import {
   type WorkerState,
 } from "@xioflow/core/channel";
 
-import { DIR_NAMES } from "../../constants/paths.js";
+import { resolveWorkflowDir } from "../../constants/paths.js";
 
 import {
   channelDir,
@@ -160,7 +160,7 @@ interface ProjectGuardConfig {
 export function loadWorkerGuardConfig(
   cwd: string,
 ): ProjectGuardConfig | undefined {
-  const configPath = path.join(cwd, DIR_NAMES.WORKFLOW, "config.yaml");
+  const configPath = path.join(cwd, resolveWorkflowDir(cwd), "config.yaml");
   if (!fs.existsSync(configPath)) return undefined;
   let content: string;
   try {
@@ -643,7 +643,7 @@ export function formatBudgetOverflowError(args: {
     `  trellis channel kill <channel> --as <worker>`,
     "Or override per spawn:",
     `  trellis channel spawn ... --max-live-workers ${live.length + 1}`,
-    "Or raise the default in .trellis/config.yaml under channel.worker_guard.max_live_workers.",
+    "Or raise the default in .xioflow/config.yaml (.trellis/ on legacy projects) under channel.worker_guard.max_live_workers.",
   ].join("\n");
   return [header, rows, hint].join("\n");
 }

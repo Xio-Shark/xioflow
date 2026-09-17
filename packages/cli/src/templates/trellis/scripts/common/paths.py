@@ -46,7 +46,7 @@ ENV_DEVELOPER_LEGACY = "TRELLIS_DEVELOPER"
 # Appended to every "no developer set" error so the two non-obvious sources are
 # discoverable from the failure itself.
 DEVELOPER_HINT = (
-    f"  Or set {ENV_DEVELOPER}=<your-name> in the environment.\n"
+    f"  Or set {ENV_DEVELOPER}=<your-name> (legacy {ENV_DEVELOPER_LEGACY} also works) in the environment.\n"
     f"  A linked git worktree inherits {DIR_WORKFLOW}/{FILE_DEVELOPER} from its "
     f"main checkout — run init_developer.py there to cover every worktree."
 )
@@ -274,7 +274,7 @@ def count_lines(file_path: Path) -> int:
 # Current Task Management
 # =============================================================================
 
-def normalize_task_ref(task_ref: str) -> str:
+def normalize_task_ref(task_ref: str, repo_root: Path | None = None) -> str:
     """Normalize a task ref for stable runtime storage.
 
     Stored refs should prefer repo-relative POSIX paths like
@@ -294,7 +294,7 @@ def normalize_task_ref(task_ref: str) -> str:
         normalized = normalized[2:]
 
     if normalized.startswith(f"{DIR_TASKS}/"):
-        return f"{DIR_WORKFLOW}/{normalized}"
+        return f"{get_workflow_dir_name(repo_root)}/{normalized}"
 
     return normalized
 
@@ -322,7 +322,7 @@ def resolve_task_ref(task_ref: str, repo_root: Path | None = None) -> Path | Non
     if repo_root is None:
         repo_root = get_repo_root()
 
-    normalized = normalize_task_ref(task_ref)
+    normalized = normalize_task_ref(task_ref, repo_root)
     if not normalized:
         return None
 
@@ -331,20 +331,23 @@ def resolve_task_ref(task_ref: str, repo_root: Path | None = None) -> Path | Non
     except OSError:
         return None
 
+    wf_name = get_workflow_dir_name(root)
     path_obj = Path(normalized)
     if path_obj.is_absolute():
         candidate = path_obj
-    elif normalized.startswith(f"{DIR_WORKFLOW}/"):
+    elif normalized.startswith(f"{DIR_WORKFLOW}/") or normalized.startswith(
+        f"{DIR_WORKFLOW_LEGACY}/"
+    ):
         candidate = root / path_obj
     else:
-        candidate = root / DIR_WORKFLOW / DIR_TASKS / path_obj
+        candidate = root / wf_name / DIR_TASKS / path_obj
 
     # resolve() collapses `..` and follows symlinks, so a task directory that
     # links outside the repo is refused too. Both sides are resolved because
     # repo_root itself may sit behind a symlink (/tmp on macOS does).
     try:
         resolved = candidate.resolve()
-        workflow_real = (root / DIR_WORKFLOW).resolve()
+        workflow_real = (root / wf_name).resolve()
     except OSError:
         return None
 
@@ -366,7 +369,7 @@ def resolve_task_ref(task_ref: str, repo_root: Path | None = None) -> Path | Non
 
     # Map back to the in-repo (lexical) form so callers store the same
     # repo-relative ref as in the non-symlinked layout.
-    return root / DIR_WORKFLOW / rel
+    return root / wf_name / rel
 
 
 def get_current_task(
@@ -524,7 +527,7 @@ def get_spec_dir(package: str | None = None, repo_root: Path | None = None) -> P
     from .config import get_spec_base
 
     base = get_spec_base(package, repo_root)
-    return repo_root / DIR_WORKFLOW / base
+    return get_workflow_dir(repo_root) / base
 
 
 def get_package_path(package: str, repo_root: Path | None = None) -> Path | None:

@@ -22,8 +22,8 @@ from .git import run_git
 from .io import read_json, write_json
 from .log import Colors, colored
 from .paths import (
-    DIR_WORKFLOW,
     FILE_TASK_JSON,
+    get_workflow_dir_name,
     generate_task_date_prefix,
     get_developer,
     get_repo_root,
@@ -301,7 +301,7 @@ def build_import_plan(
         worktree_rel: str | None = None
         if child.isolation == "worktree":
             branch = f"trellis/{dir_name}"
-            worktree_rel = f"{DIR_WORKFLOW}/worktrees/{dir_name}"
+            worktree_rel = f"{get_workflow_dir_name(repo_root)}/worktrees/{dir_name}"
             wt_abs = repo_root / worktree_rel
             if wt_abs.exists():
                 plan.errors.append(f"worktree path already exists: {worktree_rel}")
@@ -518,9 +518,10 @@ def materialize_import_plan(
         _info(f"  ✓ {child.dir_name}{extra}")
     _info("")
     _info("Next:")
-    _info(f"  python3 ./.trellis/scripts/task.py ready {parent_dir.name}")
-    _info(f"  python3 ./.trellis/scripts/task.py drift {parent_dir.name}")
-    _info(f"  python3 ./.trellis/scripts/task.py dispatch-ready {parent_dir.name}")
+    wf = get_workflow_dir_name(repo_root)
+    _info(f"  python3 ./{wf}/scripts/task.py ready {parent_dir.name}")
+    _info(f"  python3 ./{wf}/scripts/task.py drift {parent_dir.name}")
+    _info(f"  python3 ./{wf}/scripts/task.py dispatch-ready {parent_dir.name}")
     return 0
 
 

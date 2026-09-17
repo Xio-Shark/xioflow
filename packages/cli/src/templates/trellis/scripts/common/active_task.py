@@ -20,7 +20,8 @@ from typing import Any
 
 from .io import read_json as _io_read_json, write_json as _io_write_json
 
-DIR_WORKFLOW = ".trellis"
+DIR_WORKFLOW = ".xioflow"
+DIR_WORKFLOW_LEGACY = ".trellis"
 DIR_TASKS = "tasks"
 DIR_RUNTIME = ".runtime"
 DIR_SESSIONS = "sessions"
@@ -179,7 +180,19 @@ class ActiveTask:
         return self.source_type
 
 
-def normalize_task_ref(task_ref: str) -> str:
+def _workflow_dir_name(repo_root: Path | None = None) -> str:
+    """Active workflow dir name: prefer .xioflow, fall back to .trellis."""
+    if repo_root is None:
+        repo_root = _find_repo_root_from_cwd()
+    if repo_root is not None:
+        if (repo_root / DIR_WORKFLOW).is_dir():
+            return DIR_WORKFLOW
+        if (repo_root / DIR_WORKFLOW_LEGACY).is_dir():
+            return DIR_WORKFLOW_LEGACY
+    return DIR_WORKFLOW
+
+
+def normalize_task_ref(task_ref: str, repo_root: Path | None = None) -> str:
     """Normalize a task ref for stable storage and comparison."""
     normalized = task_ref.strip()
     if not normalized:
@@ -194,7 +207,7 @@ def normalize_task_ref(task_ref: str) -> str:
         normalized = normalized[2:]
 
     if normalized.startswith(f"{DIR_TASKS}/"):
-        return f"{DIR_WORKFLOW}/{normalized}"
+        return f"{_workflow_dir_name(repo_root)}/{normalized}"
 
     return normalized
 
@@ -206,7 +219,7 @@ def resolve_task_ref(task_ref: str, repo_root: Path) -> Path | None:
     rather than imported because this module is loaded standalone — hooks add
     it to `sys.path` directly — so it stays zero-relative-import on purpose.
     """
-    normalized = normalize_task_ref(task_ref)
+    normalized = normalize_task_ref(task_ref, repo_root)
     if not normalized:
         return None
 
@@ -215,20 +228,23 @@ def resolve_task_ref(task_ref: str, repo_root: Path) -> Path | None:
     except OSError:
         return None
 
+    wf_name = _workflow_dir_name(root)
     path_obj = Path(normalized)
     if path_obj.is_absolute():
         candidate = path_obj
-    elif normalized.startswith(f"{DIR_WORKFLOW}/"):
+    elif normalized.startswith(f"{DIR_WORKFLOW}/") or normalized.startswith(
+        f"{DIR_WORKFLOW_LEGACY}/"
+    ):
         candidate = root / path_obj
     else:
-        candidate = root / DIR_WORKFLOW / DIR_TASKS / path_obj
+        candidate = root / wf_name / DIR_TASKS / path_obj
 
     # Both sides are resolved because repo_root itself may sit behind a
     # symlink (/tmp on macOS does), and resolve() is what collapses `..`
     # instead of leaving it for a lexical relative_to() to wave through.
     try:
         resolved = candidate.resolve()
-        workflow_real = (root / DIR_WORKFLOW).resolve()
+        workflow_real = (root / wf_name).resolve()
     except OSError:
         return None
 
@@ -247,11 +263,11 @@ def resolve_task_ref(task_ref: str, repo_root: Path) -> Path | None:
     except ValueError:
         return None
 
-    return root / DIR_WORKFLOW / rel
+    return root / wf_name / rel
 
 
 def _runtime_sessions_dir(repo_root: Path) -> Path:
-    return repo_root / DIR_WORKFLOW / DIR_RUNTIME / DIR_SESSIONS
+    return repo_root / _workflow_dir_name(repo_root) / DIR_RUNTIME / DIR_SESSIONS
 
 
 def _sanitize_key(raw: str) -> str:
@@ -373,13 +389,15 @@ def _find_repo_root_from_cwd() -> Path | None:
     while True:
         if (current / DIR_WORKFLOW).is_dir():
             return current
+        if (current / DIR_WORKFLOW_LEGACY).is_dir():
+            return current
         if current == current.parent:
             return None
         current = current.parent
 
 
 def _shell_ticket_dirs(repo_root: Path) -> tuple[Path, ...]:
-    runtime_dir = repo_root / DIR_WORKFLOW / DIR_RUNTIME
+    runtime_dir = repo_root / _workflow_dir_name(repo_root) / DIR_RUNTIME
     return (
         runtime_dir / DIR_SHELL_TICKETS,
         runtime_dir / DIR_LEGACY_CURSOR_SHELL_TICKETS,
@@ -401,7 +419,7 @@ def _task_refs_match(left: str | None, right: str | None, repo_root: Path) -> bo
     right_path = resolve_task_ref(right, repo_root)
     if left_path is not None and right_path is not None:
         return left_path == right_path
-    return normalize_task_ref(left) == normalize_task_ref(right)
+    return normalize_task_ref(left, repo_root) == normalize_task_ref(right, repo_root)
 
 
 def _pending_ticket_matches_args(ticket: dict[str, Any], repo_root: Path) -> bool:
@@ -600,7 +618,7 @@ def _relative_task_ref(task_path: str, repo_root: Path) -> str:
     directory that has been moved away. Rename needs to name both sides of the
     move, one of which is always absent.
     """
-    normalized = normalize_task_ref(task_path)
+    normalized = normalize_task_ref(task_path, repo_root)
     if not normalized:
         return ""
     candidate = Path(normalized)
@@ -609,7 +627,7 @@ def _relative_task_ref(task_path: str, repo_root: Path) -> str:
     try:
         resolved = candidate.resolve()
         root = repo_root.resolve()
-        workflow_real = (root / DIR_WORKFLOW).resolve()
+        workflow_real = (root / _workflow_dir_name(root)).resolve()
     except OSError:
         return ""
     try:
@@ -623,7 +641,7 @@ def _relative_task_ref(task_path: str, repo_root: Path) -> str:
         rel = resolved.relative_to(workflow_real)
     except ValueError:
         return ""
-    return (Path(DIR_WORKFLOW) / rel).as_posix()
+    return (Path(_workflow_dir_name(root)) / rel).as_posix()
 
 
 def _active_from_ref(

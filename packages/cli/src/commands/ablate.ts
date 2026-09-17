@@ -10,7 +10,7 @@ import {
   ALL_MANAGED_DIRS,
   getConfiguredPlatforms,
 } from "../configurators/index.js";
-import { DIR_NAMES } from "../constants/paths.js";
+import { DIR_NAMES, resolveWorkflowDir } from "../constants/paths.js";
 import {
   ABLATION_STATE_ROOT_ENV,
   assertExternalStateRoot,
@@ -55,9 +55,8 @@ export interface RestoreOptions {
 }
 
 function isTrellisPath(relativePath: string): boolean {
-  return (
-    relativePath === DIR_NAMES.WORKFLOW ||
-    relativePath.startsWith(`${DIR_NAMES.WORKFLOW}/`)
+  return [DIR_NAMES.WORKFLOW, DIR_NAMES.WORKFLOW_LEGACY].some(
+    (dir) => relativePath === dir || relativePath.startsWith(`${dir}/`),
   );
 }
 
@@ -95,6 +94,7 @@ function renderAblatePlan(
   plan: ManagedRemovalPlan,
   prunableDirectories: readonly string[],
   transactionDir: string,
+  workflowDir: string,
 ): void {
   const deletions = plan.deletions.filter(
     (entry) => !entry.missing && !isTrellisPath(entry.posixPath),
@@ -107,7 +107,7 @@ function renderAblatePlan(
   );
   for (const entry of deletions)
     console.log(`  ${chalk.red("-")} ${entry.posixPath}`);
-  console.log(`  ${chalk.red("-")} ${DIR_NAMES.WORKFLOW}/`);
+  console.log(`  ${chalk.red("-")} ${workflowDir}/`);
   if (plan.modifications.length > 0) {
     console.log(
       chalk.yellow.bold(
@@ -155,7 +155,9 @@ function isManagedDirectoryTerritory(relativeDir: string): boolean {
     return false;
   }
   return ALL_MANAGED_DIRS.filter(
-    (managedDir) => managedDir !== DIR_NAMES.WORKFLOW,
+    (managedDir) =>
+      managedDir !== DIR_NAMES.WORKFLOW &&
+      managedDir !== DIR_NAMES.WORKFLOW_LEGACY,
   ).some(
     (root) =>
       relativeDir === root ||
@@ -280,10 +282,15 @@ function buildAblationEntries(
     );
   }
 
-  const trellisPath = path.join(projectRoot, DIR_NAMES.WORKFLOW);
-  addEntry(entries, seen, DIR_NAMES.WORKFLOW, fingerprintPath(trellisPath), {
-    kind: "absent",
-  });
+  // Back up every workflow dir that exists, not just the active one — a
+  // stray legacy `.trellis/` next to `.xioflow/` still holds user data, and
+  // the delete phase removes both.
+  for (const dirName of [DIR_NAMES.WORKFLOW, DIR_NAMES.WORKFLOW_LEGACY]) {
+    const dirPath = path.join(projectRoot, dirName);
+    const pre = fingerprintPath(dirPath);
+    if (pre.kind === "absent") continue;
+    addEntry(entries, seen, dirName, pre, { kind: "absent" });
+  }
   return entries;
 }
 
@@ -315,12 +322,14 @@ function applyAblationPlan(
     fs.unlinkSync(deletion.absPath);
   }
 
-  const trellisPath = path.join(projectRoot, DIR_NAMES.WORKFLOW);
-  const trellisStat = lstatIfPresent(trellisPath);
-  if (trellisStat?.isSymbolicLink()) {
-    fs.unlinkSync(trellisPath);
-  } else if (trellisStat) {
-    fs.rmSync(trellisPath, { recursive: true, force: false });
+  for (const dirName of [DIR_NAMES.WORKFLOW, DIR_NAMES.WORKFLOW_LEGACY]) {
+    const trellisPath = path.join(projectRoot, dirName);
+    const trellisStat = lstatIfPresent(trellisPath);
+    if (trellisStat?.isSymbolicLink()) {
+      fs.unlinkSync(trellisPath);
+    } else if (trellisStat) {
+      fs.rmSync(trellisPath, { recursive: true, force: false });
+    }
   }
 
   for (const relativeDir of prunableDirectories) {
@@ -366,9 +375,12 @@ export async function ablate(options: AblateOptions = {}): Promise<void> {
     );
   }
 
-  const trellisPath = path.join(projectRoot, DIR_NAMES.WORKFLOW);
-  if (!lstatIfPresent(trellisPath)) {
-    console.log(chalk.gray("Trellis is not installed in this project."));
+  const trellisPath = path.join(projectRoot, resolveWorkflowDir(projectRoot));
+  const hasAnyWorkflowDir =
+    lstatIfPresent(trellisPath) ??
+    lstatIfPresent(path.join(projectRoot, DIR_NAMES.WORKFLOW_LEGACY));
+  if (!hasAnyWorkflowDir) {
+    console.log(chalk.gray("xioflow is not installed in this project."));
     return;
   }
   const hashes = loadHashes(projectRoot);
@@ -403,7 +415,12 @@ export async function ablate(options: AblateOptions = {}): Promise<void> {
     );
   }
   const prunableDirectories = collectPrunableDirectories(projectRoot, plan);
-  renderAblatePlan(plan, prunableDirectories, transactionPaths.transactionDir);
+  renderAblatePlan(
+    plan,
+    prunableDirectories,
+    transactionPaths.transactionDir,
+    resolveWorkflowDir(projectRoot),
+  );
   if (options.dryRun) {
     console.log(
       chalk.gray("Dry run — no files or recovery state were modified."),

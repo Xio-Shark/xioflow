@@ -385,7 +385,7 @@ describe("update() integration", () => {
     const targetFull = path.join(tmpDir, targetRelative);
     const templateContent = fs.readFileSync(targetFull, "utf-8");
 
-    // User has a hand-written AGENTS.md with no TRELLIS:START/END markers at
+    // User has a hand-written AGENTS.md with no managed-block markers at
     // all (predates 0.5.0-beta.18 or was authored by hand). Pre-fix behavior
     // would clobber this content; post-fix should append the managed block.
     const userContent = "# Project notes\n\nThings the team agreed on.\n";
@@ -396,11 +396,11 @@ describe("update() integration", () => {
     const result = fs.readFileSync(targetFull, "utf-8");
     expect(result).toContain("# Project notes");
     expect(result).toContain("Things the team agreed on.");
-    expect(result).toContain("<!-- TRELLIS:START -->");
-    expect(result).toContain("<!-- TRELLIS:END -->");
+    expect(result).toContain("<!-- XIOFLOW:START -->");
+    expect(result).toContain("<!-- XIOFLOW:END -->");
     // Managed block should sit AFTER the user content, not replace it.
     expect(result.indexOf("# Project notes")).toBeLessThan(
-      result.indexOf("<!-- TRELLIS:START -->"),
+      result.indexOf("<!-- XIOFLOW:START -->"),
     );
     // Tail equals the canonical template (force-applied managed block).
     expect(result.endsWith(templateContent.trimEnd() + "\n")).toBe(true);
@@ -815,7 +815,7 @@ describe("update() integration", () => {
     await update({ force: true });
 
     const content = fs.readFileSync(gitattributesPath, "utf-8");
-    expect(content).toContain(".trellis/workspace/*/journal-*.md merge=union");
+    expect(content).toContain(".xioflow/workspace/*/journal-*.md merge=union");
   });
 
   it("#15b does not duplicate an existing user journal merge=union rule (#415)", async () => {

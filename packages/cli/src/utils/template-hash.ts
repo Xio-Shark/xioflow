@@ -17,7 +17,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { DIR_NAMES, FILE_NAMES } from "../constants/paths.js";
+import { FILE_NAMES, resolveWorkflowDir } from "../constants/paths.js";
 import type { TemplateHashes } from "../types/migration.js";
 import { writeFileAtomic } from "./atomic-write.js";
 import { toPosix } from "./posix.js";
@@ -49,7 +49,7 @@ export function computeHash(content: string): string {
  * Get path to the hashes file
  */
 function getHashesPath(cwd: string): string {
-  return path.join(cwd, DIR_NAMES.WORKFLOW, HASHES_FILE);
+  return path.join(cwd, resolveWorkflowDir(cwd), HASHES_FILE);
 }
 
 /**
@@ -110,10 +110,17 @@ export function loadHashes(cwd: string): TemplateHashes {
  */
 export function saveHashes(cwd: string, hashes: TemplateHashes): void {
   const hashesPath = getHashesPath(cwd);
+  const normalized = normalizeHashKeys(hashes);
   const payload: StoredHashesV2 = {
     __version: HASHES_SCHEMA_VERSION,
-    hashes: normalizeHashKeys(hashes),
+    // Sorted keys keep the manifest byte-stable across writers: init's
+    // insertion order differs from update's merged order, and without a
+    // canonical order a no-op update still dirties the file.
+    hashes: Object.fromEntries(
+      Object.entries(normalized).sort(([a], [b]) => a.localeCompare(b)),
+    ),
   };
+  fs.mkdirSync(path.dirname(hashesPath), { recursive: true });
   writeFileAtomic(hashesPath, JSON.stringify(payload, null, 2));
 }
 
@@ -269,8 +276,10 @@ const EXCLUDE_FROM_HASH = [
   "workspace/", // Workspace files (user data)
   "tasks/", // Task files (user data)
   ".current-task", // Current task marker (file, not directory)
-  ".trellis/spec/", // User-customized spec files
+  ".xioflow/spec/", // User-customized spec files
+  ".trellis/spec/", // Same, on legacy workflow dir
   ".backup-", // Backup directories
+  "__pycache__/", // Python bytecode caches created when scripts run during init
 ];
 
 /**
@@ -361,12 +370,17 @@ export function initializeHashes(
 ): number {
   const { trackedPaths, merge = false } = options;
   const hashes: TemplateHashes = merge ? loadHashes(cwd) : {};
+  const workflowDir = resolveWorkflowDir(cwd);
+  const workflowPrefix = `${workflowDir}/`;
 
   // Platform + root files: hash only paths actually written this run.
   if (trackedPaths) {
     for (const relativePath of trackedPaths) {
-      // `.trellis/` paths are handled by the walk below — don't double-track.
-      if (relativePath.startsWith(".trellis/") || relativePath === ".trellis") {
+      // Workflow-dir paths are handled by the walk below — don't double-track.
+      if (
+        relativePath.startsWith(workflowPrefix) ||
+        relativePath === workflowDir
+      ) {
         continue;
       }
       const fullPath = path.join(cwd, ...relativePath.split("/"));
@@ -380,11 +394,11 @@ export function initializeHashes(
     }
   }
 
-  // .trellis/ workflow tree: still walked recursively. Accuracy here is for
-  // `trellis update`'s 3-way merge of workflow.md / config.yaml / scripts;
-  // uninstall removes .trellis/ wholesale so it does not matter for the
-  // data-loss bug this contract addresses.
-  const files = collectFiles(cwd, ".trellis");
+  // Workflow tree: still walked recursively. Accuracy here is for
+  // `xioflow update`'s 3-way merge of workflow.md / config.yaml / scripts;
+  // uninstall removes the workflow dir wholesale so it does not matter for
+  // the data-loss bug this contract addresses.
+  const files = collectFiles(cwd, workflowDir);
   for (const relativePath of files) {
     const fullPath = path.join(cwd, relativePath);
     try {

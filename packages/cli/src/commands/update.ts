@@ -4,7 +4,11 @@ import path from "node:path";
 import chalk from "chalk";
 import inquirer from "inquirer";
 
-import { DIR_NAMES, FILE_NAMES, PATHS } from "../constants/paths.js";
+import {
+  DIR_NAMES,
+  FILE_NAMES,
+  resolveWorkflowDir,
+} from "../constants/paths.js";
 import type { AITool } from "../types/ai-tools.js";
 import { VERSION, PACKAGE_NAME } from "../constants/version.js";
 import {
@@ -65,11 +69,13 @@ import {
   downloadTemplateById,
   type RegistrySource,
 } from "../utils/template-fetcher.js";
+import { retargetWorkflowDirContent } from "../configurators/shared.js";
 import { loadSpecRegistryConfig } from "../utils/registry-config.js";
 import {
   cleanupEmptyDirs,
-  TRELLIS_BLOCK_END,
-  TRELLIS_BLOCK_START,
+  MANAGED_BLOCK_MARKERS,
+  XIOFLOW_BLOCK_END,
+  XIOFLOW_BLOCK_START,
 } from "../utils/managed-paths.js";
 
 export {
@@ -116,13 +122,15 @@ const LEGACY_UNTRACKED_AGENTS_MD_BLOCK_HASHES = new Set<string>([
 
 // Paths that should never be touched (true user data)
 // spec/ is user-customized content created during init; update should never modify it
-const PROTECTED_PATHS = [
-  `${DIR_NAMES.WORKFLOW}/${DIR_NAMES.WORKSPACE}`, // workspace/
-  `${DIR_NAMES.WORKFLOW}/${DIR_NAMES.TASKS}`, // tasks/
-  `${DIR_NAMES.WORKFLOW}/${DIR_NAMES.SPEC}`, // spec/
-  `${DIR_NAMES.WORKFLOW}/.developer`,
-  `${DIR_NAMES.WORKFLOW}/.current-task`,
-];
+const PROTECTED_PATHS = [DIR_NAMES.WORKFLOW, DIR_NAMES.WORKFLOW_LEGACY].flatMap(
+  (dir) => [
+    `${dir}/${DIR_NAMES.WORKSPACE}`, // workspace/
+    `${dir}/${DIR_NAMES.TASKS}`, // tasks/
+    `${dir}/${DIR_NAMES.SPEC}`, // spec/
+    `${dir}/.developer`,
+    `${dir}/.current-task`,
+  ],
+);
 
 function getManagedBlock(
   content: string,
@@ -143,7 +151,11 @@ function getManagedBlock(
 }
 
 function getTrellisManagedBlock(content: string): string | null {
-  return getManagedBlock(content, TRELLIS_BLOCK_START, TRELLIS_BLOCK_END);
+  for (const [start, end] of MANAGED_BLOCK_MARKERS) {
+    const block = getManagedBlock(content, start, end);
+    if (block !== null) return block;
+  }
+  return null;
 }
 
 function replaceManagedBlock(
@@ -152,30 +164,31 @@ function replaceManagedBlock(
   startMarker: string,
   endMarker: string,
 ): string | null {
-  const existingStart = existingContent.indexOf(startMarker);
-  if (existingStart === -1) {
-    return null;
-  }
-
-  const existingEnd = existingContent.indexOf(endMarker, existingStart);
-  if (existingEnd === -1) {
-    return null;
-  }
-
-  const templateBlock = getManagedBlock(
-    templateContent,
-    startMarker,
-    endMarker,
-  );
+  // The template block is always canonical (XIOFLOW markers); the existing
+  // file may carry either marker pair — TRELLIS-era files get upgraded.
+  const templateBlock =
+    getManagedBlock(templateContent, startMarker, endMarker) ??
+    getTrellisManagedBlock(templateContent);
   if (!templateBlock) {
     return null;
   }
 
-  return (
-    existingContent.slice(0, existingStart) +
-    templateBlock +
-    existingContent.slice(existingEnd + endMarker.length)
-  );
+  for (const [start, end] of MANAGED_BLOCK_MARKERS) {
+    const existingStart = existingContent.indexOf(start);
+    if (existingStart === -1) {
+      continue;
+    }
+    const existingEnd = existingContent.indexOf(end, existingStart);
+    if (existingEnd === -1) {
+      continue;
+    }
+    return (
+      existingContent.slice(0, existingStart) +
+      templateBlock +
+      existingContent.slice(existingEnd + end.length)
+    );
+  }
+  return null;
 }
 
 function mergeManagedBlockContent(
@@ -194,11 +207,9 @@ function mergeManagedBlockContent(
     return replaced;
   }
 
-  const templateBlock = getManagedBlock(
-    templateContent,
-    startMarker,
-    endMarker,
-  );
+  const templateBlock =
+    getManagedBlock(templateContent, startMarker, endMarker) ??
+    getTrellisManagedBlock(templateContent);
   if (!templateBlock) {
     return templateContent;
   }
@@ -233,8 +244,8 @@ function buildAgentsMdTemplate(cwd: string): string {
     cwd,
     FILE_NAMES.AGENTS,
     agentsMdContent,
-    TRELLIS_BLOCK_START,
-    TRELLIS_BLOCK_END,
+    XIOFLOW_BLOCK_START,
+    XIOFLOW_BLOCK_END,
   );
 }
 
@@ -427,6 +438,37 @@ function executeSafeFileDeletes(
 }
 
 /**
+ * Rewrite a manifest-recorded path onto the project's active workflow dir.
+ * Migration manifests were authored against the legacy `.trellis/` layout;
+ * a `.xioflow` project must apply the same migration at `.xioflow/…`.
+ * Non-workflow paths (`.windsurf/`, `.claude/`, …) pass through untouched.
+ */
+function retargetManifestPath(
+  relativePath: string,
+  workflowDir: string,
+): string {
+  if (relativePath === DIR_NAMES.WORKFLOW_LEGACY) return workflowDir;
+  const legacyPrefix = `${DIR_NAMES.WORKFLOW_LEGACY}/`;
+  if (relativePath.startsWith(legacyPrefix)) {
+    return `${workflowDir}/${relativePath.slice(legacyPrefix.length)}`;
+  }
+  return relativePath;
+}
+
+function retargetMigration<T extends { from?: string; to?: string }>(
+  item: T,
+  workflowDir: string,
+): T {
+  return {
+    ...item,
+    ...(item.from
+      ? { from: retargetManifestPath(item.from, workflowDir) }
+      : {}),
+    ...(item.to ? { to: retargetManifestPath(item.to, workflowDir) } : {}),
+  };
+}
+
+/**
  * Load update.skip paths from .trellis/config.yaml
  *
  * Parses simple YAML structure:
@@ -438,7 +480,7 @@ function executeSafeFileDeletes(
  * @internal Exported for testing only
  */
 export function loadUpdateSkipPaths(cwd: string): string[] {
-  const configPath = path.join(cwd, DIR_NAMES.WORKFLOW, "config.yaml");
+  const configPath = path.join(cwd, resolveWorkflowDir(cwd), "config.yaml");
   if (!fs.existsSync(configPath)) return [];
 
   try {
@@ -563,13 +605,15 @@ export function applyConfigSectionsAdded(
 ): { appended: number } {
   const seen = new Set<string>();
   let appended = 0;
+  const workflowDir = resolveWorkflowDir(cwd);
 
   for (const entry of entries) {
     const dedupeKey = `${entry.file}::${entry.sentinel}`;
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
 
-    const targetPath = path.join(cwd, entry.file);
+    const file = retargetManifestPath(entry.file, workflowDir);
+    const targetPath = path.join(cwd, file);
     if (!fs.existsSync(targetPath)) continue;
 
     let userContent: string;
@@ -580,7 +624,7 @@ export function applyConfigSectionsAdded(
     }
     if (userContent.includes(entry.sentinel)) continue;
 
-    const template = bundledTemplates.get(entry.file);
+    const template = bundledTemplates.get(file);
     if (!template) continue;
 
     const section = extractConfigSection(template, entry.sectionHeading);
@@ -719,6 +763,8 @@ async function collectRegistrySpecTemplates(
 ): Promise<Map<string, string>> {
   const config = loadSpecRegistryConfig(cwd);
   if (!config) return new Map();
+  const workflowDir = resolveWorkflowDir(cwd);
+  const specPrefix = `${workflowDir}/${DIR_NAMES.SPEC}`;
 
   let registry: RegistrySource;
   try {
@@ -768,7 +814,7 @@ async function collectRegistrySpecTemplates(
         "overwrite",
         template,
         registry,
-        undefined,
+        path.join(tempRoot, DIR_NAMES.WORKFLOW_LEGACY, DIR_NAMES.SPEC),
         probe.backend,
       );
       if (!result.success) {
@@ -779,7 +825,10 @@ async function collectRegistrySpecTemplates(
         );
         return new Map();
       }
-      return collectDirectoryFiles(path.join(tempRoot, PATHS.SPEC), PATHS.SPEC);
+      return collectDirectoryFiles(
+        path.join(tempRoot, DIR_NAMES.WORKFLOW_LEGACY, DIR_NAMES.SPEC),
+        specPrefix,
+      );
     } finally {
       await removeDirectory(tempRoot);
     }
@@ -804,7 +853,16 @@ async function collectRegistrySpecTemplates(
     );
     return new Map();
   }
-  return result.files;
+  // Registry packs are keyed under the legacy `.trellis/spec` layout; retarget
+  // them at the project's actual workflow dir.
+  const remapped = new Map<string, string>();
+  for (const [key, content] of result.files) {
+    remapped.set(
+      key.replace(`${DIR_NAMES.WORKFLOW_LEGACY}/${DIR_NAMES.SPEC}`, specPrefix),
+      content,
+    );
+  }
+  return remapped;
 }
 
 async function collectTemplateFiles(
@@ -827,26 +885,27 @@ async function collectTemplateFiles(
       platforms.add(p);
     }
   }
+  const workflowDir = resolveWorkflowDir(cwd);
 
   // Python scripts (single source of truth: getAllScripts())
   for (const [scriptPath, content] of getAllScripts()) {
-    files.set(`${PATHS.SCRIPTS}/${scriptPath}`, content);
+    files.set(`${workflowDir}/${DIR_NAMES.SCRIPTS}/${scriptPath}`, content);
   }
 
   // Channel runtime agent definitions (single source of truth: getAllAgents()).
-  // Backfilled by `trellis update` if missing so users who installed before the
+  // Backfilled by `xioflow update` if missing so users who installed before the
   // bundled agents existed pick them up. Edited files take the standard
   // modified-file prompt path.
   for (const [agentFile, content] of getAllAgents()) {
-    files.set(`${PATHS.AGENTS}/${agentFile}`, content);
+    files.set(`${workflowDir}/${DIR_NAMES.AGENTS}/${agentFile}`, content);
   }
 
   // Configuration
   files.set(
-    `${DIR_NAMES.WORKFLOW}/config.yaml`,
+    `${workflowDir}/config.yaml`,
     preserveExistingRegistryConfig(cwd, configYamlTemplate),
   );
-  files.set(`${DIR_NAMES.WORKFLOW}/.gitignore`, gitignoreTemplate);
+  files.set(`${workflowDir}/.gitignore`, gitignoreTemplate);
   // workflow.md is included here because it is runtime-parsed by
   // get_context.py and shared hooks. Keep it on the normal template update
   // path: if the installed file still matches the tracked hash, update the
@@ -854,7 +913,7 @@ async function collectTemplateFiles(
   // --force behavior applies. Partial tag-block merging is unsafe because
   // platform routing markers outside [workflow-state:*] blocks are also
   // script-consumed.
-  files.set(`${DIR_NAMES.WORKFLOW}/workflow.md`, workflowMdTemplate);
+  files.set(`${workflowDir}/workflow.md`, workflowMdTemplate);
   // workspace/index.md stays excluded — it's runtime-appended by add_session.py
   // (journal index) and has no script-parsed structure.
   files.set(FILE_NAMES.AGENTS, buildAgentsMdTemplate(cwd));
@@ -902,9 +961,14 @@ async function collectTemplateFiles(
     }
   }
 
-  // Apply python3→python replacement for Windows consistency with init-time writes
+  // Retarget canonical `.xioflow` doc references for legacy `.trellis`
+  // projects (scripts excluded — they resolve both dirs at runtime), then
+  // apply python3→python replacement for Windows consistency with init.
   for (const [filePath, content] of files) {
-    files.set(filePath, replacePythonCommandLiterals(content));
+    const doc = filePath.endsWith(".py")
+      ? content
+      : retargetWorkflowDirContent(content, workflowDir);
+    files.set(filePath, replacePythonCommandLiterals(doc));
   }
 
   return files;
@@ -1176,7 +1240,7 @@ async function promptConflictResolution(
  */
 function createBackupDirPath(cwd: string): string {
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-  return path.join(cwd, DIR_NAMES.WORKFLOW, `.backup-${timestamp}`);
+  return path.join(cwd, resolveWorkflowDir(cwd), `.backup-${timestamp}`);
 }
 
 /**
@@ -1294,7 +1358,7 @@ function createFullBackup(cwd: string): string | null {
  * Update version file
  */
 function updateVersionFile(cwd: string): void {
-  const versionPath = path.join(cwd, DIR_NAMES.WORKFLOW, ".version");
+  const versionPath = path.join(cwd, resolveWorkflowDir(cwd), ".version");
   fs.writeFileSync(versionPath, VERSION);
 }
 
@@ -1302,7 +1366,7 @@ function updateVersionFile(cwd: string): void {
  * Get current installed version
  */
 function getInstalledVersion(cwd: string): string {
-  const versionPath = path.join(cwd, DIR_NAMES.WORKFLOW, ".version");
+  const versionPath = path.join(cwd, resolveWorkflowDir(cwd), ".version");
   if (fs.existsSync(versionPath)) {
     return fs.readFileSync(versionPath, "utf-8").trim();
   }
@@ -2038,10 +2102,13 @@ export function renameTracesToJournal(workspaceDir: string): {
 export async function update(options: UpdateOptions): Promise<void> {
   const cwd = process.cwd();
 
-  // Check if Trellis is initialized
-  if (!fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW))) {
-    console.log(chalk.red("Error: Trellis not initialized in this directory."));
-    console.log(chalk.gray("Run 'trellis init' first."));
+  // Check if xioflow is initialized (either current or legacy workflow dir)
+  if (
+    !fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW)) &&
+    !fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW_LEGACY))
+  ) {
+    console.log(chalk.red("Error: xioflow not initialized in this directory."));
+    console.log(chalk.gray("Run 'xioflow init' first."));
     return;
   }
 
@@ -2193,7 +2260,12 @@ export async function update(options: UpdateOptions): Promise<void> {
 
   // Collect safe-file-delete items from ALL manifests (hash match is the safety net)
   // This runs regardless of version — unknown version still gets safe cleanup
-  const allMigrations = getAllMigrations();
+  // Manifest paths are authored against `.trellis/`; retarget onto the
+  // project's actual workflow dir (no-op for legacy `.trellis` projects).
+  const updateWorkflowDir = resolveWorkflowDir(cwd);
+  const allMigrations = getAllMigrations().map((item) =>
+    retargetMigration(item, updateWorkflowDir),
+  );
   const safeFileDeletes = collectSafeFileDeletes(
     allMigrations,
     cwd,
@@ -2207,7 +2279,9 @@ export async function update(options: UpdateOptions): Promise<void> {
   // Check for pending regular migrations (skip if unknown version)
   let pendingMigrations = isUnknownVersion
     ? []
-    : getMigrationsForVersion(projectVersion, cliVersion);
+    : getMigrationsForVersion(projectVersion, cliVersion).map((item) =>
+        retargetMigration(item, updateWorkflowDir),
+      );
 
   // Also check for "orphaned" migrations - where source still exists but version says we shouldn't migrate
   // This handles cases where version was updated but migrations weren't applied
@@ -2521,7 +2595,11 @@ export async function update(options: UpdateOptions): Promise<void> {
     // traces-*.md files are in .trellis/workspace/{developer}/ with variable developer names
     // and variable file numbers (traces-1.md, traces-2.md, etc.), so we can't enumerate them
     // in the migration manifest. This is a one-time migration for the 0.2.0 naming redesign.
-    const workspaceDir = path.join(cwd, PATHS.WORKSPACE);
+    const workspaceDir = path.join(
+      cwd,
+      resolveWorkflowDir(cwd),
+      DIR_NAMES.WORKSPACE,
+    );
     const { renamed: journalRenamed, skipped: journalSkipped } =
       renameTracesToJournal(workspaceDir);
     if (journalRenamed > 0) {
@@ -2724,7 +2802,7 @@ export async function update(options: UpdateOptions): Promise<void> {
       const monthDay = `${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
       const taskSlug = `migrate-to-${cliVersion}`;
       const taskDirName = `${monthDay}-${taskSlug}`;
-      const tasksDir = path.join(cwd, DIR_NAMES.WORKFLOW, DIR_NAMES.TASKS);
+      const tasksDir = path.join(cwd, resolveWorkflowDir(cwd), DIR_NAMES.TASKS);
       const taskDir = path.join(tasksDir, taskDirName);
 
       // Check if task already exists
@@ -2740,7 +2818,11 @@ export async function update(options: UpdateOptions): Promise<void> {
         // the assignee field, producing bogus assignees like
         // "name=suyuan\ninitialized_at=2026-04-07T23:41:21.978312" that
         // later break session-start task rendering.
-        const developerFile = path.join(cwd, DIR_NAMES.WORKFLOW, ".developer");
+        const developerFile = path.join(
+          cwd,
+          resolveWorkflowDir(cwd),
+          ".developer",
+        );
         let currentDeveloper = "unknown";
         if (fs.existsSync(developerFile)) {
           const raw = fs.readFileSync(developerFile, "utf-8");
@@ -2808,7 +2890,7 @@ export async function update(options: UpdateOptions): Promise<void> {
         );
         console.log(
           chalk.white(
-            `   ${DIR_NAMES.WORKFLOW}/${DIR_NAMES.TASKS}/${taskDirName}/`,
+            `   ${resolveWorkflowDir(cwd)}/${DIR_NAMES.TASKS}/${taskDirName}/`,
           ),
         );
         console.log("");

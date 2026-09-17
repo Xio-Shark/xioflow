@@ -8,7 +8,7 @@ skill-loader tool.
 | --- | --- |
 | Skills (`.agents/skills/trellis-*/SKILL.md`) | Works — dsh discovers this shared root natively |
 | Entry skills (`.dsh/skills/trellis-*/SKILL.md`) | Works — dsh's own project skill root (highest rank) |
-| Context hooks | None — pull-based: skills read `.trellis/` files directly |
+| Context hooks | None — pull-based: skills read `.xioflow/` files directly |
 | Sub-agents | None shipped — implement/check/research run inline via the workflow skills |
 
 ## Quick start
@@ -22,7 +22,7 @@ In dsh:
 
 1. Open a session in the project root and describe the work in natural
    language. For a new task the agent should load the `trellis-start` skill,
-   which reads the current task state from `.trellis/` and routes to
+   which reads the current task state from `.xioflow/` and routes to
    `trellis-brainstorm` (unclear requirements), `trellis-before-dev` (about to
    write code), `trellis-check` (done coding), or `trellis-update-spec`
    (learned something worth capturing).
@@ -41,7 +41,7 @@ In dsh:
   to Codex / Gemini CLI / Pi / Kimi writes into the same shared root.
 - `.dsh/skills/` — dsh-private entry skills (`trellis-start` /
   `trellis-continue` / `trellis-finish-work`).
-- `.trellis/` — specs, tasks, workspace memory, and the shared scripts the
+- `.xioflow/` — specs, tasks, workspace memory, and the shared scripts the
   skills invoke (`get_context.py`, `task.py`, ...).
 
 ## Notes

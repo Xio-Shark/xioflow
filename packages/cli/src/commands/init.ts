@@ -18,7 +18,11 @@ import {
   setResolvedPythonCommand,
 } from "../configurators/shared.js";
 import { AI_TOOLS, type CliFlag } from "../types/ai-tools.js";
-import { DIR_NAMES, FILE_NAMES, PATHS } from "../constants/paths.js";
+import {
+  DIR_NAMES,
+  FILE_NAMES,
+  resolveWorkflowDir,
+} from "../constants/paths.js";
 import { VERSION } from "../constants/version.js";
 import { agentsMdContent } from "../templates/markdown/index.js";
 import {
@@ -72,7 +76,7 @@ const MIN_PYTHON_MINOR = 9;
 const PYTHON_VERSION_RE = /Python (\d+)\.(\d+)/;
 
 function collectSpecPaths(cwd: string): Set<string> {
-  const specRoot = path.join(cwd, PATHS.SPEC);
+  const specRoot = path.join(cwd, resolveWorkflowDir(cwd), DIR_NAMES.SPEC);
   const paths = new Set<string>();
   if (!fs.existsSync(specRoot)) return paths;
 
@@ -322,7 +326,12 @@ function writeTaskSkeleton(
   taskJson: TaskJson,
   prdContent: string,
 ): boolean {
-  const taskDir = path.join(cwd, PATHS.TASKS, taskName);
+  const taskDir = path.join(
+    cwd,
+    resolveWorkflowDir(cwd),
+    DIR_NAMES.TASKS,
+    taskName,
+  );
   if (fs.existsSync(taskDir)) return true; // idempotent
 
   try {
@@ -380,23 +389,25 @@ function getBootstrapChecklistItems(
 
 function getBootstrapRelatedFiles(
   projectType: ProjectType,
+  wf: string,
   packages?: DetectedPackage[],
 ): string[] {
   if (packages && packages.length > 0) {
-    return packages.map((pkg) => `.trellis/spec/${sanitizePkgName(pkg.name)}/`);
+    return packages.map((pkg) => `${wf}/spec/${sanitizePkgName(pkg.name)}/`);
   }
   if (projectType === "frontend") {
-    return [".trellis/spec/frontend/"];
+    return [`${wf}/spec/frontend/`];
   }
   if (projectType === "backend") {
-    return [".trellis/spec/backend/"];
+    return [`${wf}/spec/backend/`];
   }
-  return [".trellis/spec/backend/", ".trellis/spec/frontend/"];
+  return [`${wf}/spec/backend/`, `${wf}/spec/frontend/`];
 }
 
 function getBootstrapPrdContent(
   projectType: ProjectType,
   pythonCmd: string,
+  wf: string,
   packages?: DetectedPackage[],
 ): string {
   const checklistItems = getBootstrapChecklistItems(projectType, packages);
@@ -409,11 +420,11 @@ function getBootstrapPrdContent(
 **You (the AI) are running this task. The developer does not read this file.**
 
 The developer just ran \`trellis init\` on this project for the first time.
-\`.trellis/\` now exists with empty spec scaffolding, and this bootstrap task
-exists under \`.trellis/tasks/\`. When they want to work on it, they should start
+\`${wf}/\` now exists with empty spec scaffolding, and this bootstrap task
+exists under \`${wf}/tasks/\`. When they want to work on it, they should start
 this task from a session that provides Trellis session identity.
 
-**Your job**: help them populate \`.trellis/spec/\` with the team's real
+**Your job**: help them populate \`${wf}/spec/\` with the team's real
 coding conventions. Every future AI session — this project's
 \`trellis-implement\` and \`trellis-check\` sub-agents — auto-loads spec files
 listed in per-task jsonl manifests. Empty spec = sub-agents write generic
@@ -440,11 +451,11 @@ ${checklistMarkdown}
 
 | File | What to document |
 |------|------------------|
-| \`.trellis/spec/backend/directory-structure.md\` | Where different file types go (routes, services, utils) |
-| \`.trellis/spec/backend/database-guidelines.md\` | ORM, migrations, query patterns, naming conventions |
-| \`.trellis/spec/backend/error-handling.md\` | How errors are caught, logged, and returned |
-| \`.trellis/spec/backend/logging-guidelines.md\` | Log levels, format, what to log |
-| \`.trellis/spec/backend/quality-guidelines.md\` | Code review standards, testing requirements |
+| \`${wf}/spec/backend/directory-structure.md\` | Where different file types go (routes, services, utils) |
+| \`${wf}/spec/backend/database-guidelines.md\` | ORM, migrations, query patterns, naming conventions |
+| \`${wf}/spec/backend/error-handling.md\` | How errors are caught, logged, and returned |
+| \`${wf}/spec/backend/logging-guidelines.md\` | Log levels, format, what to log |
+| \`${wf}/spec/backend/quality-guidelines.md\` | Code review standards, testing requirements |
 `;
 
   const frontendSection = `
@@ -453,19 +464,19 @@ ${checklistMarkdown}
 
 | File | What to document |
 |------|------------------|
-| \`.trellis/spec/frontend/directory-structure.md\` | Component/page/hook organization |
-| \`.trellis/spec/frontend/component-guidelines.md\` | Component patterns, props conventions |
-| \`.trellis/spec/frontend/hook-guidelines.md\` | Custom hook naming, patterns |
-| \`.trellis/spec/frontend/state-management.md\` | State library, patterns, what goes where |
-| \`.trellis/spec/frontend/type-safety.md\` | TypeScript conventions, type organization |
-| \`.trellis/spec/frontend/quality-guidelines.md\` | Linting, testing, accessibility |
+| \`${wf}/spec/frontend/directory-structure.md\` | Component/page/hook organization |
+| \`${wf}/spec/frontend/component-guidelines.md\` | Component patterns, props conventions |
+| \`${wf}/spec/frontend/hook-guidelines.md\` | Custom hook naming, patterns |
+| \`${wf}/spec/frontend/state-management.md\` | State library, patterns, what goes where |
+| \`${wf}/spec/frontend/type-safety.md\` | TypeScript conventions, type organization |
+| \`${wf}/spec/frontend/quality-guidelines.md\` | Linting, testing, accessibility |
 `;
 
   const footer = `
 
 ### Thinking guides (already populated)
 
-\`.trellis/spec/guides/\` contains general thinking guides pre-filled with
+\`${wf}/spec/guides/\` contains general thinking guides pre-filled with
 best practices. Customize only if something clearly doesn't fit this project.
 
 ---
@@ -475,7 +486,7 @@ best practices. Customize only if something clearly doesn't fit this project.
 ### Step 1: Import from existing convention files first (preferred)
 
 Search the repo for existing convention docs. If any exist, read them and
-extract the relevant rules into the matching \`.trellis/spec/\` files —
+extract the relevant rules into the matching \`${wf}/spec/\` files —
 usually much faster than documenting from scratch.
 
 | File / Directory | Tool |
@@ -520,7 +531,7 @@ is a separate conversation, not a bootstrap concern.
 - The platform hook auto-injects those spec files + the task's \`prd.md\`
   into every sub-agent prompt, so the sub-agent codes/reviews per team
   conventions without anyone pasting them manually.
-- Source of truth: \`.trellis/spec/\`. That's why filling it well now pays
+- Source of truth: \`${wf}/spec/\`. That's why filling it well now pays
   off forever.
 
 ---
@@ -531,8 +542,8 @@ When the developer confirms the checklist items above are done with real
 examples (not placeholders), guide them to run:
 
 \`\`\`bash
-${pythonCmd} ./.trellis/scripts/task.py finish
-${pythonCmd} ./.trellis/scripts/task.py archive 00-bootstrap-guidelines
+${pythonCmd} ./${wf}/scripts/task.py finish
+${pythonCmd} ./${wf}/scripts/task.py archive 00-bootstrap-guidelines
 \`\`\`
 
 After archive, every new developer who joins this project will get a
@@ -558,10 +569,10 @@ etc.) I can pull from, or should I scan the codebase from scratch?"
       const specName = sanitizePkgName(pkg.name);
       content += `\n### Package: ${pkg.name} (\`spec/${specName}/\`)\n`;
       if (pkgType !== "frontend") {
-        content += `\n- Backend guidelines: \`.trellis/spec/${specName}/backend/\`\n`;
+        content += `\n- Backend guidelines: \`${wf}/spec/${specName}/backend/\`\n`;
       }
       if (pkgType !== "backend") {
-        content += `\n- Frontend guidelines: \`.trellis/spec/${specName}/frontend/\`\n`;
+        content += `\n- Frontend guidelines: \`${wf}/spec/${specName}/frontend/\`\n`;
       }
     }
   } else if (projectType === "frontend") {
@@ -581,10 +592,11 @@ etc.) I can pull from, or should I scan the codebase from scratch?"
 function getBootstrapTaskJson(
   developer: string,
   projectType: ProjectType,
+  wf: string,
   packages?: DetectedPackage[],
 ): TaskJson {
   const today = new Date().toISOString().split("T")[0];
-  const relatedFiles = getBootstrapRelatedFiles(projectType, packages);
+  const relatedFiles = getBootstrapRelatedFiles(projectType, wf, packages);
 
   // Canonical 24-field shape via emptyTaskJson factory.
   // Checklist items (previously stored as structured `subtasks`) are now
@@ -616,8 +628,14 @@ function createBootstrapTask(
   projectType: ProjectType,
   packages?: DetectedPackage[],
 ): boolean {
-  const taskJson = getBootstrapTaskJson(developer, projectType, packages);
-  const prdContent = getBootstrapPrdContent(projectType, pythonCmd, packages);
+  const wf = resolveWorkflowDir(cwd);
+  const taskJson = getBootstrapTaskJson(developer, projectType, wf, packages);
+  const prdContent = getBootstrapPrdContent(
+    projectType,
+    pythonCmd,
+    wf,
+    packages,
+  );
   return writeTaskSkeleton(cwd, BOOTSTRAP_TASK_NAME, taskJson, prdContent);
 }
 
@@ -653,7 +671,11 @@ function getJoinerTaskJson(developer: string, taskName: string): TaskJson {
  * PRD content for joiner onboarding. Kept concise (~80 lines) — deeper
  * guidance lives in skills and docs.
  */
-function getJoinerPrdContent(developer: string, pythonCmd: string): string {
+function getJoinerPrdContent(
+  developer: string,
+  pythonCmd: string,
+  wf: string,
+): string {
   const slug = slugifyDeveloperName(developer);
   return `# Joiner Onboarding Task
 
@@ -661,7 +683,7 @@ function getJoinerPrdContent(developer: string, pythonCmd: string): string {
 
 \`${developer}\` just ran \`trellis init\` on a fresh clone, saw "Developer
 initialized", and will now start asking you questions in chat. This joiner task
-exists under \`.trellis/tasks/\`; when they want to work on it, they should
+exists under \`${wf}/tasks/\`; when they want to work on it, they should
 start it from a session that provides Trellis session identity.
 
 Your job is to orient them to Trellis. Don't dump all of this at them — open
@@ -679,9 +701,9 @@ agents consistent with project-specific conventions instead of writing generic
 code every session.
 
 - **Three phases**: Plan (brainstorm → \`prd.md\`) → Execute (code + check) →
-  Finish (capture + wrap). Full reference: \`.trellis/workflow.md\`.
+  Finish (capture + wrap). Full reference: \`${wf}/workflow.md\`.
 - **Task lifecycle**: planning → in_progress → done → archive, under
-  \`.trellis/tasks/\`.
+  \`${wf}/tasks/\`.
 - **Core slash commands**:
   - \`/trellis:continue\` — resume the current session's active task
   - \`/trellis:finish-work\` — wrap up a finished task
@@ -706,17 +728,17 @@ code every session.
   — reviews changes against specs, auto-fixes issues, runs lint/typecheck.
 
 File layout (mention when they ask "where does what live"):
-- \`.trellis/.runtime/sessions/<session>.json\` — session active-task state, gitignored
-- \`.trellis/tasks/<task>/{implement,check}.jsonl\` — per-task context manifests
-- \`.trellis/spec/\` — project-wide conventions (source of truth)
-- \`.trellis/workspace/${developer}/journal-*.md\` — their session log,
+- \`${wf}/.runtime/sessions/<session>.json\` — session active-task state, gitignored
+- \`${wf}/tasks/<task>/{implement,check}.jsonl\` — per-task context manifests
+- \`${wf}/spec/\` — project-wide conventions (source of truth)
+- \`${wf}/workspace/${developer}/journal-*.md\` — their session log,
   rotated at ~2000 lines
 
 ### 3. This project's actual conventions
 
-- Summarize \`.trellis/spec/\` for them — what coding conventions this
+- Summarize \`${wf}/spec/\` for them — what coding conventions this
   specific team enforces.
-- Point at the last 5 entries in \`.trellis/tasks/archive/\` as a rhythm
+- Point at the last 5 entries in \`${wf}/tasks/archive/\` as a rhythm
   example of how people actually work here. **If archive is empty** (the
   project just started), skip this — don't invent examples.
 - Not your job in this onboarding to teach them the business code itself —
@@ -724,9 +746,9 @@ File layout (mention when they ask "where does what live"):
 
 ### 4. Their assigned work
 
-- Check if \`.trellis/workspace/${developer}/\` already exists — if yes, it's
+- Check if \`${wf}/workspace/${developer}/\` already exists — if yes, it's
   their journal from another machine and worth mentioning.
-- Run \`${pythonCmd} ./.trellis/scripts/task.py list --assignee ${developer}\` to
+- Run \`${pythonCmd} ./${wf}/scripts/task.py list --assignee ${developer}\` to
   show tasks assigned to them. (Quote the name if it contains spaces.)
 - Remind them that the "My Tasks" section appears in the SessionStart context
   on every new session.
@@ -747,8 +769,8 @@ When they feel oriented (or after you've covered the four topics with
 reasonable back-and-forth), guide them to run:
 
 \`\`\`bash
-${pythonCmd} ./.trellis/scripts/task.py finish
-${pythonCmd} ./.trellis/scripts/task.py archive 00-join-${slug}
+${pythonCmd} ./${wf}/scripts/task.py finish
+${pythonCmd} ./${wf}/scripts/task.py archive 00-join-${slug}
 \`\`\`
 
 ---
@@ -775,7 +797,11 @@ function createJoinerOnboardingTask(
   const slug = slugifyDeveloperName(developer);
   const taskName = `00-join-${slug}`;
   const taskJson = getJoinerTaskJson(developer, taskName);
-  const prdContent = getJoinerPrdContent(developer, pythonCmd);
+  const prdContent = getJoinerPrdContent(
+    developer,
+    pythonCmd,
+    resolveWorkflowDir(cwd),
+  );
   return writeTaskSkeleton(cwd, taskName, taskJson, prdContent);
 }
 
@@ -942,11 +968,16 @@ async function handleReinit(
     // init_developer.py, this checkout had no identity → treat as a new
     // joiner onboarding onto an existing Trellis project.
     const hadDeveloperFileBefore = fs.existsSync(
-      path.join(cwd, DIR_NAMES.WORKFLOW, FILE_NAMES.DEVELOPER),
+      path.join(cwd, resolveWorkflowDir(cwd), FILE_NAMES.DEVELOPER),
     );
 
     try {
-      const scriptPath = path.join(cwd, PATHS.SCRIPTS, "init_developer.py");
+      const scriptPath = path.join(
+        cwd,
+        resolveWorkflowDir(cwd),
+        DIR_NAMES.SCRIPTS,
+        "init_developer.py",
+      );
       execSync(`${pythonCmd} "${scriptPath}" "${devName}"`, {
         cwd,
         stdio: "pipe",
@@ -958,7 +989,7 @@ async function handleReinit(
       );
       console.log(
         chalk.gray(
-          `  ${pythonCmd} .trellis/scripts/init_developer.py ${devName}`,
+          `  ${pythonCmd} ${resolveWorkflowDir(cwd)}/scripts/init_developer.py ${devName}`,
         ),
       );
     }
@@ -1048,7 +1079,7 @@ const _cliFlagCheck: _AssertCliFlagsInOptions = true;
  * Appends packages: and default_package: without disturbing existing config.
  */
 function writeMonorepoConfig(cwd: string, packages: DetectedPackage[]): void {
-  const configPath = path.join(cwd, DIR_NAMES.WORKFLOW, "config.yaml");
+  const configPath = path.join(cwd, resolveWorkflowDir(cwd), "config.yaml");
   let content = "";
 
   try {
@@ -1112,12 +1143,14 @@ export async function init(options: InitOptions): Promise<void> {
   }
 
   const cwd = process.cwd();
-  const isFirstInit = !fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW));
+  const isFirstInit =
+    !fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW)) &&
+    !fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW_LEGACY));
   // Captured here (before createWorkflowStructure + init_developer run) so
   // the three-branch dispatch at the bottom can tell "fresh clone joiner"
   // (.trellis/ exists, .developer missing) apart from "creator first init".
   const hadDeveloperFileAtStart = fs.existsSync(
-    path.join(cwd, DIR_NAMES.WORKFLOW, FILE_NAMES.DEVELOPER),
+    path.join(cwd, resolveWorkflowDir(cwd), FILE_NAMES.DEVELOPER),
   );
 
   // Generate ASCII art banner dynamically using FIGlet "Rebel" font
@@ -1182,7 +1215,11 @@ export async function init(options: InitOptions): Promise<void> {
   // empty, the previous init never reached bootstrap creation. Fall through
   // to the full flow so the main-dispatch tasksEmpty fallback fires —
   // handleReinit's joiner branch would otherwise mis-route the recovery.
-  const tasksDirEarly = path.join(cwd, PATHS.TASKS);
+  const tasksDirEarly = path.join(
+    cwd,
+    resolveWorkflowDir(cwd),
+    DIR_NAMES.TASKS,
+  );
   const tasksEmptyEarly =
     !fs.existsSync(tasksDirEarly) || fs.readdirSync(tasksDirEarly).length === 0;
   const hasTemplateRequest = !!options.template || !!options.registry;
@@ -1209,7 +1246,7 @@ export async function init(options: InitOptions): Promise<void> {
     console.log(
       chalk.gray(
         "\nTrellis supports team collaboration - each developer has their own\n" +
-          `workspace directory (${PATHS.WORKSPACE}/{name}/) to track AI sessions.\n` +
+          `workspace directory (${resolveWorkflowDir(cwd)}/workspace/{name}/) to track AI sessions.\n` +
           "Tip: Usually this is your git username (git config user.name).\n",
       ),
     );
@@ -1276,7 +1313,9 @@ export async function init(options: InitOptions): Promise<void> {
       console.log(chalk.gray("  ✗ .gitmodules"));
       console.log(chalk.gray("  ✗ sibling .git directories (need ≥ 2)"));
       console.log("");
-      console.log("To configure manually, add to .trellis/config.yaml:");
+      console.log(
+        `To configure manually, add to ${resolveWorkflowDir(cwd)}/config.yaml:`,
+      );
       console.log("");
       console.log(chalk.cyan("  packages:"));
       console.log(chalk.cyan("    frontend:"));
@@ -1350,7 +1389,8 @@ export async function init(options: InitOptions): Promise<void> {
               // Use existing template download flow, targeting spec/<name>/
               const destDir = path.join(
                 cwd,
-                PATHS.SPEC,
+                resolveWorkflowDir(cwd),
+                DIR_NAMES.SPEC,
                 sanitizePkgName(pkg.name),
               );
               console.log(chalk.blue(`📦 Select template for ${pkg.name}...`));
@@ -1403,7 +1443,8 @@ export async function init(options: InitOptions): Promise<void> {
           for (const pkg of detected) {
             const destDir = path.join(
               cwd,
-              PATHS.SPEC,
+              resolveWorkflowDir(cwd),
+              DIR_NAMES.SPEC,
               sanitizePkgName(pkg.name),
             );
             const result = await downloadTemplateById(
@@ -1647,7 +1688,11 @@ export async function init(options: InitOptions): Promise<void> {
                 selectedTemplate = customAnswer.template;
 
                 // Check if spec directory already exists and ask what to do
-                const specDir = path.join(cwd, PATHS.SPEC);
+                const specDir = path.join(
+                  cwd,
+                  resolveWorkflowDir(cwd),
+                  DIR_NAMES.SPEC,
+                );
                 if (
                   fs.existsSync(specDir) &&
                   !options.overwrite &&
@@ -1659,7 +1704,7 @@ export async function init(options: InitOptions): Promise<void> {
                     {
                       type: "list",
                       name: "action",
-                      message: `Directory ${PATHS.SPEC} already exists. What do you want to do?`,
+                      message: `Directory ${resolveWorkflowDir(cwd)}/spec already exists. What do you want to do?`,
                       choices: [
                         { name: "Skip (keep existing)", value: "skip" },
                         {
@@ -1707,7 +1752,11 @@ export async function init(options: InitOptions): Promise<void> {
             selectedTemplate = templateAnswer.template;
 
             // Check if spec directory already exists and ask what to do
-            const specDir = path.join(cwd, PATHS.SPEC);
+            const specDir = path.join(
+              cwd,
+              resolveWorkflowDir(cwd),
+              DIR_NAMES.SPEC,
+            );
             if (
               fs.existsSync(specDir) &&
               !options.overwrite &&
@@ -1719,7 +1768,7 @@ export async function init(options: InitOptions): Promise<void> {
                 {
                   type: "list",
                   name: "action",
-                  message: `Directory ${PATHS.SPEC} already exists. What do you want to do?`,
+                  message: `Directory ${resolveWorkflowDir(cwd)}/spec already exists. What do you want to do?`,
                   choices: [
                     { name: "Skip (keep existing)", value: "skip" },
                     { name: "Overwrite (replace all)", value: "overwrite" },
@@ -1823,7 +1872,7 @@ export async function init(options: InitOptions): Promise<void> {
 
     // Ask about existing spec dir in interactive mode
     if (!options.yes && !options.overwrite && !options.append) {
-      const specDir = path.join(cwd, PATHS.SPEC);
+      const specDir = path.join(cwd, resolveWorkflowDir(cwd), DIR_NAMES.SPEC);
       if (fs.existsSync(specDir)) {
         const actionAnswer = await inquirer.prompt<{
           action: TemplateStrategy;
@@ -1831,7 +1880,7 @@ export async function init(options: InitOptions): Promise<void> {
           {
             type: "list",
             name: "action",
-            message: `Directory ${PATHS.SPEC} already exists. What do you want to do?`,
+            message: `Directory ${resolveWorkflowDir(cwd)}/spec already exists. What do you want to do?`,
             choices: [
               { name: "Skip (keep existing)", value: "skip" },
               { name: "Overwrite (replace all)", value: "overwrite" },
@@ -1923,7 +1972,7 @@ export async function init(options: InitOptions): Promise<void> {
     }
 
     // Write version file for update tracking
-    const versionPath = path.join(cwd, DIR_NAMES.WORKFLOW, ".version");
+    const versionPath = path.join(cwd, resolveWorkflowDir(cwd), ".version");
     fs.writeFileSync(versionPath, VERSION);
 
     // Configure selected tools by copying entire directories (dogfooding)
@@ -1985,13 +2034,18 @@ export async function init(options: InitOptions): Promise<void> {
   // modified and does not silently restore native bytes. See design.md
   // "Durable-state contract".
   if (workflowMdOverride !== undefined && workflowId !== NATIVE_WORKFLOW_ID) {
-    removeHash(cwd, PATHS.WORKFLOW_GUIDE_FILE);
+    removeHash(cwd, `${resolveWorkflowDir(cwd)}/workflow.md`);
   }
 
   // Initialize developer identity (silent - no output)
   if (developerName) {
     try {
-      const scriptPath = path.join(cwd, PATHS.SCRIPTS, "init_developer.py");
+      const scriptPath = path.join(
+        cwd,
+        resolveWorkflowDir(cwd),
+        DIR_NAMES.SCRIPTS,
+        "init_developer.py",
+      );
       execSync(`${pythonCmd} "${scriptPath}" "${developerName}"`, {
         cwd,
         stdio: "pipe", // Silent
@@ -2015,7 +2069,7 @@ export async function init(options: InitOptions): Promise<void> {
     // Runs OUTSIDE the init_developer try/catch (which uses stdio: "pipe")
     // so joiner failures surface as warnings instead of being silently
     // swallowed.
-    const tasksDir = path.join(cwd, PATHS.TASKS);
+    const tasksDir = path.join(cwd, resolveWorkflowDir(cwd), DIR_NAMES.TASKS);
     const tasksEmpty =
       !fs.existsSync(tasksDir) || fs.readdirSync(tasksDir).length === 0;
 

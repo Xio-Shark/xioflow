@@ -506,8 +506,8 @@ describe("regression: Windows path separator (beta.12)", () => {
 // =============================================================================
 
 describe("regression: task directory paths (0.2.14, 0.2.15, beta.13)", () => {
-  it("[0.2.15] PATHS.TASKS is .trellis/tasks (not .trellis/workspace/*/tasks)", () => {
-    expect(PATHS.TASKS).toBe(".trellis/tasks");
+  it("[0.2.15] PATHS.TASKS is .xioflow/tasks (not .xioflow/workspace/*/tasks)", () => {
+    expect(PATHS.TASKS).toBe(".xioflow/tasks");
     expect(PATHS.TASKS).not.toContain("workspace");
   });
 
@@ -538,8 +538,8 @@ describe("regression: task directory paths (0.2.14, 0.2.15, beta.13)", () => {
 
 describe("regression: resolve_task_dir path handling", () => {
   it("[beta.12] resolve_task_dir handles .trellis prefix", () => {
-    // The function should recognize .trellis-prefixed paths as relative paths
-    expect(commonTaskUtils).toContain('.startswith(".trellis")');
+    // The function should recognize workflow-dir-prefixed paths as relative paths
+    expect(commonTaskUtils).toContain('normalized.startswith((".xioflow", ".trellis"))');
   });
 
   it("[current-task] resolve_task_dir normalizes backslash separators before path classification", () => {
@@ -7567,7 +7567,7 @@ print(len(entries))
 
     expect(output).toContain("## Phase Index");
     expect(output).toContain("### Request Triage");
-    expect(output).toContain("### Planning Artifacts");
+    expect(output).toContain("### Planning & Execution Artifacts");
     expect(output).toContain("### Loading Step Detail");
     expect(output).not.toMatch(/^## Phase 1: Plan/m);
     expect(output).not.toContain("#### 1.1 Requirement exploration");
@@ -7739,7 +7739,7 @@ print(len(entries))
 
     expect(workflowBlock).toContain("## Phase Index");
     expect(workflowBlock).toContain("### Request Triage");
-    expect(workflowBlock).toContain("### Planning Artifacts");
+    expect(workflowBlock).toContain("### Planning & Execution Artifacts");
     expect(workflowBlock).toContain("### Loading Step Detail");
     expect(workflowBlock).not.toMatch(/^## Phase 1: Plan/m);
     expect(workflowBlock).not.toContain("#### 1.1 Requirement exploration");
@@ -8348,7 +8348,13 @@ print(len(entries))
 
     // Simulate a bare "origin" remote whose default branch is main, while
     // the local checkout stays on a feature branch (#399 item 1 repro).
-    const remotePath = path.join(tmpDir, "..", "origin-bare.git");
+    // Unique name per run — a fixed "origin-bare.git" leaks state between
+    // runs when a previous test died before its cleanup.
+    const remotePath = path.join(
+      tmpDir,
+      "..",
+      `${path.basename(tmpDir)}-origin-bare.git`,
+    );
     execSync(`git init -q --bare ${JSON.stringify(remotePath)}`, {
       cwd: tmpDir,
     });

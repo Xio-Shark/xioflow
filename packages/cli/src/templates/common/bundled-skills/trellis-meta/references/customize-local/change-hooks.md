@@ -6,9 +6,9 @@ Hooks are the automation layer that connects a platform to Trellis. When the use
 
 1. Target platform settings/config, such as `.claude/settings.json`, `.codex/hooks.json`, `.cursor/hooks.json`, `.trae/hooks.json`
 2. Target platform hooks directory
-3. `.trellis/scripts/common/active_task.py`
-4. `.trellis/scripts/common/session_context.py`
-5. `.trellis/workflow.md`
+3. `.xioflow/scripts/common/active_task.py`
+4. `.xioflow/scripts/common/session_context.py`
+5. `.xioflow/workflow.md`
 
 ## Common Hook Types
 
@@ -23,9 +23,9 @@ Hooks are the automation layer that connects a platform to Trellis. When the use
 
 1. Find the hook registration in settings/config.
 2. Confirm the registered script path exists.
-3. Read the hook script and identify inputs, outputs, and called `.trellis/scripts/`.
+3. Read the hook script and identify inputs, outputs, and called `.xioflow/scripts/`.
 4. Modify hook behavior.
-5. If the hook depends on workflow content, synchronize `.trellis/workflow.md`.
+5. If the hook depends on workflow content, synchronize `.xioflow/workflow.md`.
 
 ## Example: Change New-Session Injection Content
 
@@ -36,15 +36,15 @@ First find the session-start hook:
 .claude/hooks/session-start.py
 ```
 
-If the hook ultimately calls `.trellis/scripts/get_context.py` or `session_context.py`, editing the local script is usually more robust than hard-coding content in the hook.
+If the hook ultimately calls `.xioflow/scripts/get_context.py` or `session_context.py`, editing the local script is usually more robust than hard-coding content in the hook.
 
 ## Example: Agent Did Not Read JSONL
 
 First confirm:
 
 ```bash
-python3 ./.trellis/scripts/task.py current --source
-python3 ./.trellis/scripts/task.py validate <task>
+python3 ./.xioflow/scripts/task.py current --source
+python3 ./.xioflow/scripts/task.py validate <task>
 ```
 
 If the task and JSONL are correct, determine whether the platform uses hook push or agent pull. For hook push, edit `inject-subagent-context`; for agent pull, edit the agent file.
@@ -53,5 +53,5 @@ If the task and JSONL are correct, determine whether the platform uses hook push
 
 - Settings handle registration, hook scripts handle behavior; inspect both together.
 - Different platforms support different hook events. Do not directly copy another platform's settings.
-- Hooks should read project-local `.trellis/`; they should not depend on Trellis upstream source paths.
+- Hooks should read project-local `.xioflow/`; they should not depend on Trellis upstream source paths.
 - Hook failures should produce visible errors so AI does not silently lose context.

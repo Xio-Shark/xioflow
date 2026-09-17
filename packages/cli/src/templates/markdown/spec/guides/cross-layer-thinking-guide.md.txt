@@ -141,7 +141,7 @@ In Trellis, command templates (e.g., `record-session.md`) exist in **multiple pl
 ## Generated Runtime Template Upgrade Consistency
 
 Some generated files are both documentation and runtime input. In Trellis,
-`.trellis/workflow.md` is parsed by `get_context.py`, `workflow_phase.py`,
+`.xioflow/workflow.md` is parsed by `get_context.py`, `workflow_phase.py`,
 SessionStart filters, and per-turn hooks. Template changes must be validated
 against both fresh init and upgrade paths.
 
@@ -152,7 +152,7 @@ against both fresh init and upgrade paths.
 - [ ] Check whether relevant syntax lives outside obvious managed regions
       such as tag blocks
 - [ ] Verify fresh `init` output and a versioned `update` scenario that writes
-      the older `.trellis/.version`
+      the older `.xioflow/.version`
 - [ ] Add an upgrade regression using an older pristine template fixture, then
       assert the installed file reaches the current packaged shape
 - [ ] Update the backend spec that owns the runtime contract
@@ -238,7 +238,7 @@ In Trellis, command templates (e.g., `record-session.md`) exist in **multiple pl
 ## Generated Runtime Template Upgrade Consistency
 
 Some generated files are both documentation and runtime input. In Trellis,
-`.trellis/workflow.md` is parsed by `get_context.py`, `workflow_phase.py`,
+`.xioflow/workflow.md` is parsed by `get_context.py`, `workflow_phase.py`,
 SessionStart filters, and per-turn hooks. Template changes must be validated
 against both fresh init and upgrade paths.
 
@@ -249,7 +249,7 @@ against both fresh init and upgrade paths.
 - [ ] Check whether relevant syntax lives outside obvious managed regions
   such as tag blocks
 - [ ] Verify fresh `init` output and a versioned `update` scenario that writes
-  the older `.trellis/.version`
+  the older `.xioflow/.version`
 - [ ] Add an upgrade regression using an older pristine template fixture, then
   assert the installed file reaches the current packaged shape
 - [ ] Update the backend spec that owns the runtime contract

@@ -13,9 +13,9 @@ Use after fixing a bug — especially one that took multiple attempts — to kee
 
 Update the file that would have prevented it:
 
-- Cross-layer issue → `.trellis/spec/guides/cross-layer-thinking-guide.md`
+- Cross-layer issue → `.xioflow/spec/guides/cross-layer-thinking-guide.md`
 - Cross-platform issue → `cross-platform-thinking-guide.md`
 - Reuse issue → `code-reuse-thinking-guide.md`
-- Domain issue → `.trellis/spec/<package>/<layer>/*.md`
+- Domain issue → `.xioflow/spec/<package>/<layer>/*.md`
 
 The analysis is worthless if it stays in chat — the spec update is the deliverable. Commit it with the fix.

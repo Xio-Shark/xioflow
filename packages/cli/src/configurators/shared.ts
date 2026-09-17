@@ -75,6 +75,23 @@ export function getPythonCommandForPlatform(
  * No-op when the resolved command is `python3` (the template default).
  * Idempotent: running it twice produces the same result.
  */
+/**
+ * Retarget canonical `.xioflow` path references inside generated doc content
+ * to the project's actual workflow directory. Templates are authored against
+ * `.xioflow`; on legacy `.trellis` projects the text is rewritten so agents
+ * reading the generated docs get paths that exist.
+ *
+ * Not applied to Python scripts — they implement the dual-directory
+ * resolution themselves and must keep both literals.
+ */
+export function retargetWorkflowDirContent(
+  content: string,
+  workflowDirName: string,
+): string {
+  if (workflowDirName === ".xioflow") return content;
+  return content.replaceAll(".xioflow", workflowDirName);
+}
+
 export function replacePythonCommandLiterals(content: string): string {
   const target = getPythonCommandForPlatform();
   if (target === "python3") return content;
@@ -306,12 +323,13 @@ export function wrapWithCommandFrontmatter(
   )}\n---\n\n${content}`;
 }
 
-
 // ---------------------------------------------------------------------------
 // Shared configurator helpers
 // ---------------------------------------------------------------------------
 
 import path from "node:path";
+
+import { resolveWorkflowDir } from "../constants/paths.js";
 import { ensureDir, writeFile } from "../utils/file-writer.js";
 import {
   type CommonTemplate,
@@ -521,10 +539,16 @@ export async function writeTemplateMap(
   cwd: string,
   files: Map<string, string>,
 ): Promise<void> {
+  const workflowDir = resolveWorkflowDir(cwd);
   for (const [relPath, content] of renderTemplateMap(files)) {
     const absPath = path.join(cwd, ...relPath.split("/"));
     ensureDir(path.dirname(absPath));
-    await writeFile(absPath, content);
+    await writeFile(
+      absPath,
+      relPath.endsWith(".py")
+        ? content
+        : retargetWorkflowDirContent(content, workflowDir),
+    );
   }
 }
 
@@ -566,4 +590,3 @@ export function collectBothTemplates(
   }
   return files;
 }
-

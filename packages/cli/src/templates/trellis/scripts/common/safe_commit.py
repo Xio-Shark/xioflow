@@ -39,22 +39,22 @@ from .git import run_git, run_git_retry_index_lock
 from .paths import (
     DIR_ARCHIVE,
     DIR_TASKS,
-    DIR_WORKFLOW,
     DIR_WORKSPACE,
     FILE_JOURNAL_PREFIX,
     get_developer,
+    get_workflow_dir_name,
 )
 
 
-# Paths under .trellis/ that must NEVER be auto-staged. Listed here so the
-# warning to the user can show concrete subpaths to ignore individually
-# instead of ignoring the whole `.trellis/` tree.
-TRELLIS_IGNORED_SUBPATHS = (
-    ".trellis/.backup-*",
-    ".trellis/worktrees/",
-    ".trellis/.template-hashes.json",
-    ".trellis/.runtime/",
-    ".trellis/.cache/",
+# Subpaths under the workflow dir that must NEVER be auto-staged. Listed here
+# so the warning to the user can show concrete subpaths to ignore individually
+# instead of ignoring the whole workflow tree.
+WORKFLOW_IGNORED_SUBPATH_SUFFIXES = (
+    ".backup-*",
+    "worktrees/",
+    ".template-hashes.json",
+    ".runtime/",
+    ".cache/",
 )
 
 
@@ -90,24 +90,25 @@ def safe_trellis_paths_to_add(
     should always pass ``task_name``.
     """
     paths: list[str] = []
+    wf = get_workflow_dir_name(repo_root)
 
     # Workspace journal files + index.md
     developer = get_developer(repo_root)
     if developer:
-        ws = repo_root / DIR_WORKFLOW / DIR_WORKSPACE / developer
+        ws = repo_root / wf / DIR_WORKSPACE / developer
         if ws.is_dir():
             for f in sorted(ws.glob(f"{FILE_JOURNAL_PREFIX}*.md")):
                 if f.is_file():
                     paths.append(
-                        f"{DIR_WORKFLOW}/{DIR_WORKSPACE}/{developer}/{f.name}"
+                        f"{wf}/{DIR_WORKSPACE}/{developer}/{f.name}"
                     )
             index_md = ws / "index.md"
             if index_md.is_file():
                 paths.append(
-                    f"{DIR_WORKFLOW}/{DIR_WORKSPACE}/{developer}/index.md"
+                    f"{wf}/{DIR_WORKSPACE}/{developer}/index.md"
                 )
 
-    tasks_dir = repo_root / DIR_WORKFLOW / DIR_TASKS
+    tasks_dir = repo_root / wf / DIR_TASKS
     if not tasks_dir.is_dir():
         return paths
 
@@ -117,11 +118,11 @@ def safe_trellis_paths_to_add(
         # leak into the session auto-commit.
         active_task = tasks_dir / task_name
         if active_task.is_dir():
-            paths.append(f"{DIR_WORKFLOW}/{DIR_TASKS}/{task_name}")
+            paths.append(f"{wf}/{DIR_TASKS}/{task_name}")
         archived_task = tasks_dir / DIR_ARCHIVE / task_name
         if archived_task.is_dir():
             paths.append(
-                f"{DIR_WORKFLOW}/{DIR_TASKS}/{DIR_ARCHIVE}/{task_name}"
+                f"{wf}/{DIR_TASKS}/{DIR_ARCHIVE}/{task_name}"
             )
         return paths
 
@@ -132,11 +133,11 @@ def safe_trellis_paths_to_add(
             continue
         if child.name == DIR_ARCHIVE:
             continue
-        paths.append(f"{DIR_WORKFLOW}/{DIR_TASKS}/{child.name}")
+        paths.append(f"{wf}/{DIR_TASKS}/{child.name}")
 
     archive_dir = tasks_dir / DIR_ARCHIVE
     if archive_dir.is_dir():
-        paths.append(f"{DIR_WORKFLOW}/{DIR_TASKS}/{DIR_ARCHIVE}")
+        paths.append(f"{wf}/{DIR_TASKS}/{DIR_ARCHIVE}")
 
     return paths
 
@@ -167,7 +168,8 @@ def safe_archive_paths_to_add(
     callers should always pass `task_name`.
     """
     paths: list[str] = []
-    tasks_dir = repo_root / DIR_WORKFLOW / DIR_TASKS
+    wf = get_workflow_dir_name(repo_root)
+    tasks_dir = repo_root / wf / DIR_TASKS
     if not tasks_dir.is_dir():
         return paths
 
@@ -180,22 +182,22 @@ def safe_archive_paths_to_add(
         # explicitly.
         if archive_dir.is_dir():
             paths.append(
-                f"{DIR_WORKFLOW}/{DIR_TASKS}/{DIR_ARCHIVE}"
+                f"{wf}/{DIR_TASKS}/{DIR_ARCHIVE}"
             )
         for child_name in modified_children or []:
-            paths.append(f"{DIR_WORKFLOW}/{DIR_TASKS}/{child_name}")
+            paths.append(f"{wf}/{DIR_TASKS}/{child_name}")
         return paths
 
     # Legacy wide scope (no task_name): preserve old behavior so callers
     # that have not been updated keep working.
     if archive_dir.is_dir():
-        paths.append(f"{DIR_WORKFLOW}/{DIR_TASKS}/{DIR_ARCHIVE}")
+        paths.append(f"{wf}/{DIR_TASKS}/{DIR_ARCHIVE}")
     for child in sorted(tasks_dir.iterdir()):
         if not child.is_dir():
             continue
         if child.name == DIR_ARCHIVE:
             continue
-        paths.append(f"{DIR_WORKFLOW}/{DIR_TASKS}/{child.name}")
+        paths.append(f"{wf}/{DIR_TASKS}/{child.name}")
     return paths
 
 
@@ -239,15 +241,19 @@ def safe_git_add(
     return False, False, err
 
 
-def print_gitignore_warning(paths: list[str]) -> None:
+def print_gitignore_warning(
+    paths: list[str], repo_root: Path | None = None
+) -> None:
     """Explain to the user (and any AI reading the log) what to do.
 
     CRITICAL: includes the negative example
-    ``Do NOT use `git add -f .trellis/``` — agents reading the warning are
-    known to invent that command, which fans out to ignored caches/backups.
+    ``Do NOT use `git add -f <workflow-dir>/``` — agents reading the warning
+    are known to invent that command, which fans out to ignored
+    caches/backups.
     """
+    wf = get_workflow_dir_name(repo_root)
     print(
-        "[WARN] git add failed because .trellis/ paths are ignored by your .gitignore.",
+        f"[WARN] git add failed because {wf}/ paths are ignored by your .gitignore.",
         file=sys.stderr,
     )
     print(
@@ -268,35 +274,35 @@ def print_gitignore_warning(paths: list[str]) -> None:
             print(f"[WARN]   {p}", file=sys.stderr)
     else:
         print(
-            "[WARN]   .trellis/workspace/<developer>/{journal-*.md,index.md}",
+            f"[WARN]   {wf}/workspace/<developer>/{{journal-*.md,index.md}}",
             file=sys.stderr,
         )
         print(
-            "[WARN]   .trellis/tasks/<task-dir>/",
+            f"[WARN]   {wf}/tasks/<task-dir>/",
             file=sys.stderr,
         )
         print(
-            "[WARN]   .trellis/tasks/archive/",
+            f"[WARN]   {wf}/tasks/archive/",
             file=sys.stderr,
         )
     print("[WARN]", file=sys.stderr)
     print(
-        "[WARN] Recommended: change your .gitignore from `.trellis/` to specific",
+        f"[WARN] Recommended: change your .gitignore from `{wf}/` to specific",
         file=sys.stderr,
     )
     print(
         "[WARN] subpaths that should remain ignored, e.g.:",
         file=sys.stderr,
     )
-    for sub in TRELLIS_IGNORED_SUBPATHS:
-        print(f"[WARN]   {sub}", file=sys.stderr)
+    for sub in WORKFLOW_IGNORED_SUBPATH_SUFFIXES:
+        print(f"[WARN]   {wf}/{sub}", file=sys.stderr)
     print("[WARN]", file=sys.stderr)
     print(
-        "[WARN] Or, if you intentionally keep .trellis/ local-only, set in",
+        f"[WARN] Or, if you intentionally keep {wf}/ local-only, set in",
         file=sys.stderr,
     )
     print(
-        "[WARN] .trellis/config.yaml:",
+        f"[WARN] {wf}/config.yaml:",
         file=sys.stderr,
     )
     print(
@@ -313,7 +319,7 @@ def print_gitignore_warning(paths: list[str]) -> None:
     )
     print("[WARN]", file=sys.stderr)
     print(
-        "[WARN] Do NOT use `git add -f .trellis/` — it pulls in backups, worktrees,",
+        f"[WARN] Do NOT use `git add -f {wf}/` — it pulls in backups, worktrees,",
         file=sys.stderr,
     )
     print(

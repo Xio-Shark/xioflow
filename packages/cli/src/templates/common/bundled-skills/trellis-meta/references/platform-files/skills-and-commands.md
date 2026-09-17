@@ -60,11 +60,11 @@ References hold longer explanations so the entry file does not contain everythin
 Commands, prompts, and workflows are usually single files. Their content should include:
 
 - When to use it.
-- Which `.trellis/` files to read.
+- Which `.xioflow/` files to read.
 - Which scripts to run.
 - How to report after completion.
 
-They should not store task state; task state belongs in `.trellis/tasks/` and `.trellis/.runtime/`.
+They should not store task state; task state belongs in `.xioflow/tasks/` and `.xioflow/.runtime/`.
 
 ## Local Change Scenarios
 
@@ -83,4 +83,4 @@ They should not store task state; task state belongs in `.trellis/tasks/` and `.
 3. **Keep the same semantics consistent across platforms**. File formats can differ, but behavior descriptions should match.
 4. **Put project-specific capabilities in local skills**. Do not put team-private flows into public `trellis-meta`.
 
-If the user only wants local AI to know one more project rule, usually create a project-local skill or update `.trellis/spec/` instead of changing a Trellis built-in workflow skill.
+If the user only wants local AI to know one more project rule, usually create a project-local skill or update `.xioflow/spec/` instead of changing a Trellis built-in workflow skill.

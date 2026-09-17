@@ -33,9 +33,19 @@ export const DIR_NAMES = {
  * preferring .xioflow, falling back to legacy .trellis.
  */
 export function resolveWorkflowDir(root: string = process.cwd()): string {
-  if (fs.existsSync(path.join(root, DIR_NAMES.WORKFLOW))) return DIR_NAMES.WORKFLOW;
-  if (fs.existsSync(path.join(root, DIR_NAMES.WORKFLOW_LEGACY))) return DIR_NAMES.WORKFLOW_LEGACY;
+  if (fs.existsSync(path.join(root, DIR_NAMES.WORKFLOW)))
+    return DIR_NAMES.WORKFLOW;
+  if (fs.existsSync(path.join(root, DIR_NAMES.WORKFLOW_LEGACY)))
+    return DIR_NAMES.WORKFLOW_LEGACY;
   return DIR_NAMES.WORKFLOW;
+}
+
+/**
+ * Join a path inside the project's active workflow directory.
+ * `workflowPath(cwd, "spec")` => "<cwd>/.xioflow/spec" (or .trellis).
+ */
+export function workflowPath(root: string, ...parts: string[]): string {
+  return path.join(root, resolveWorkflowDir(root), ...parts);
 }
 
 // File names

@@ -44,7 +44,7 @@ describe("journal-*.md merge=union gitattributes rule", () => {
 
     fs.copyFileSync(GITATTRIBUTES_TEMPLATE, path.join(tmp, ".gitattributes"));
 
-    const workspaceDir = path.join(tmp, ".trellis", "workspace", "tester");
+    const workspaceDir = path.join(tmp, ".xioflow", "workspace", "tester");
     fs.mkdirSync(workspaceDir, { recursive: true });
     fs.writeFileSync(
       path.join(workspaceDir, "journal-1.md"),
@@ -65,14 +65,14 @@ describe("journal-*.md merge=union gitattributes rule", () => {
 
   it("does not apply merge=union to index.md", () => {
     const content = fs.readFileSync(path.join(tmp, ".gitattributes"), "utf-8");
-    expect(content).toContain(".trellis/workspace/*/journal-*.md merge=union");
+    expect(content).toContain(".xioflow/workspace/*/journal-*.md merge=union");
     expect(content).not.toMatch(/index\.md.*merge=union/);
   });
 
   it("merges two branches' appended journal sessions cleanly (no conflict markers)", () => {
     const journalPath = path.join(
       tmp,
-      ".trellis",
+      ".xioflow",
       "workspace",
       "tester",
       "journal-1.md",
@@ -100,7 +100,7 @@ describe("journal-*.md merge=union gitattributes rule", () => {
   it("still produces a normal git conflict on index.md for the same parallel-edit scenario", () => {
     const indexPath = path.join(
       tmp,
-      ".trellis",
+      ".xioflow",
       "workspace",
       "tester",
       "index.md",

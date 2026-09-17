@@ -25,15 +25,15 @@ Look for the `<!-- trellis-hook-injected -->` marker in your input above.
 ## Context
 
 Before implementing, read:
-- `.trellis/workflow.md` - Project workflow
-- `.trellis/spec/` - Development guidelines
+- `.xioflow/workflow.md` - Project workflow
+- `.xioflow/spec/` - Development guidelines
 - Task `prd.md` - Requirements document
 - Task `design.md` - Technical design (if exists)
 - Task `implement.md` - Execution plan (if exists)
 
 ## Core Responsibilities
 
-1. **Understand specs** - Read relevant spec files in `.trellis/spec/`
+1. **Understand specs** - Read relevant spec files in `.xioflow/spec/`
 2. **Understand task artifacts** - Read prd.md, design.md if present, and implement.md if present
 3. **Implement features** - Write code following specs and task artifacts
 4. **Self-check** - Ensure code quality
@@ -55,8 +55,8 @@ Before implementing, read:
 
 Read relevant specs based on task type:
 
-- Spec layers: `.trellis/spec/<package>/<layer>/`
-- Shared guides: `.trellis/spec/guides/`
+- Spec layers: `.xioflow/spec/<package>/<layer>/`
+- Shared guides: `.xioflow/spec/guides/`
 
 ### 2. Understand Requirements
 

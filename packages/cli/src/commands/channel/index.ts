@@ -280,7 +280,7 @@ export function registerChannelCommand(program: Command): void {
     .option("--scope <scope>", "channel scope: project | global")
     .option(
       "--agent <agent-name>",
-      "load .trellis/agents/<name>.md (sets default --provider / --model / system prompt)",
+      "load .xioflow/agents/<name>.md (sets default --provider / --model / system prompt)",
     )
     .option(
       "--provider <provider>",
@@ -396,7 +396,7 @@ export function registerChannelCommand(program: Command): void {
     )
     .option(
       "--agent <agent-name>",
-      "load .trellis/agents/<name>.md (sets default --provider / --as / system prompt)",
+      "load .xioflow/agents/<name>.md (sets default --provider / --as / system prompt)",
     )
     .option(
       "--provider <provider>",
@@ -541,7 +541,7 @@ export function registerChannelCommand(program: Command): void {
   channel
     .command("list")
     .description(
-      "List channels in ~/.trellis/channels/ with worker / activity summary",
+      "List channels in ~/.xioflow/channels/ with worker / activity summary",
     )
     .option("--scope <scope>", "channel scope: project | global")
     .option("--json", "emit JSON instead of a formatted table")

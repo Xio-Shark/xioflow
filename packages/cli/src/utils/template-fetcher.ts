@@ -10,6 +10,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { downloadTemplate } from "giget";
+
+import { DIR_NAMES, resolveWorkflowDir } from "../constants/paths.js";
 import { toPosix } from "./posix.js";
 
 // =============================================================================
@@ -23,7 +25,6 @@ const TEMPLATE_REPO = "gh:mindfold-ai/marketplace";
 
 /** Map template type to installation path */
 const INSTALL_PATHS: Record<string, string> = {
-  spec: ".trellis/spec",
   skill: ".agents/skills",
   command: ".claude/commands",
   full: ".", // Entire project root
@@ -870,7 +871,9 @@ export async function findTemplate(
  * Get the installation path for a template type
  */
 export function getInstallPath(cwd: string, templateType: string): string {
-  const relativePath = INSTALL_PATHS[templateType] || INSTALL_PATHS.spec;
+  // Unknown types historically landed under the workflow spec dir.
+  const specPath = path.join(resolveWorkflowDir(cwd), DIR_NAMES.SPEC);
+  const relativePath = INSTALL_PATHS[templateType] || specPath;
   return path.join(cwd, relativePath);
 }
 
@@ -1372,12 +1375,15 @@ export async function fetchRegistrySpecTemplates(
   const tempRoot = await fs.promises.mkdtemp(
     path.join(os.tmpdir(), "trellis-registry-spec-"),
   );
+  // Downloads must land under the legacy `.trellis/spec` layout — the caller
+  // remaps those keys onto the project's actual workflow dir.
+  const specDir = path.join(tempRoot, ".trellis", "spec");
   try {
     const result = await downloadRegistryDirect(
       tempRoot,
       registry,
       "overwrite",
-      undefined,
+      specDir,
       registryBackend,
     );
     if (!result.success) {
@@ -1385,10 +1391,7 @@ export async function fetchRegistrySpecTemplates(
     }
     return {
       success: true,
-      files: collectDirectoryFiles(
-        path.join(tempRoot, ".trellis", "spec"),
-        ".trellis/spec",
-      ),
+      files: collectDirectoryFiles(specDir, ".trellis/spec"),
     };
   } finally {
     await removeDirectory(tempRoot);

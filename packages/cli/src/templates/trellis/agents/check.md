@@ -16,7 +16,7 @@ Read in this order:
 
 1. `<task-path>/check.jsonl` if present — read every listed spec/research file
 2. `<task-path>/prd.md` → `design.md` / `implement.md` if present
-3. `.trellis/spec/` — only what is relevant to the diff under review
+3. `.xioflow/spec/` — only what is relevant to the diff under review
 
 ## Workflow
 

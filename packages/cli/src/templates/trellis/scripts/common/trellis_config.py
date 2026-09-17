@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Optional
 
 
-CONFIG_REL_PATH = ".trellis/config.yaml"
+CONFIG_REL_PATH = ".xioflow/config.yaml"
+CONFIG_REL_PATH_LEGACY = ".trellis/config.yaml"
 
 
 def _unquote(value: str) -> str:
@@ -225,9 +226,14 @@ def parse_simple_yaml(content: str, source: str = "config.yaml") -> dict:
 
 
 def read_trellis_config(repo_root: Optional[Path] = None) -> dict:
-    """Read .trellis/config.yaml. Returns {} on missing or malformed file."""
+    """Read the project's workflow config. Returns {} on missing/malformed.
+
+    Prefers .xioflow/config.yaml; falls back to legacy .trellis/config.yaml.
+    """
     root = repo_root or Path.cwd()
     config_file = root / CONFIG_REL_PATH
+    if not config_file.is_file() and (root / CONFIG_REL_PATH_LEGACY).is_file():
+        config_file = root / CONFIG_REL_PATH_LEGACY
     try:
         content = config_file.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError):

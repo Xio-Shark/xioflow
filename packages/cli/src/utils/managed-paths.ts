@@ -5,6 +5,14 @@ import { isManagedPath, isManagedRootDir } from "../configurators/index.js";
 
 export const TRELLIS_BLOCK_START = "<!-- TRELLIS:START -->";
 export const TRELLIS_BLOCK_END = "<!-- TRELLIS:END -->";
+export const XIOFLOW_BLOCK_START = "<!-- XIOFLOW:START -->";
+export const XIOFLOW_BLOCK_END = "<!-- XIOFLOW:END -->";
+
+/** Managed-block marker pairs, canonical first then legacy. */
+export const MANAGED_BLOCK_MARKERS: readonly (readonly [string, string])[] = [
+  [XIOFLOW_BLOCK_START, XIOFLOW_BLOCK_END],
+  [TRELLIS_BLOCK_START, TRELLIS_BLOCK_END],
+];
 
 /** Remove empty managed parents without deleting a managed root directory. */
 export function cleanupEmptyDirs(cwd: string, dirPath: string): void {

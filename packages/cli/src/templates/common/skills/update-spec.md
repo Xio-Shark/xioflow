@@ -4,8 +4,8 @@ Use after implementing, debugging, or making a design decision worth keeping.
 
 ## What Goes Where
 
-- `.trellis/spec/<package>/<layer>/*.md` — **how to write the code**: signatures, contracts, conventions, error behavior
-- `.trellis/spec/guides/*.md` — **what to think about**: checklists, questions, pointers to specs
+- `.xioflow/spec/<package>/<layer>/*.md` — **how to write the code**: signatures, contracts, conventions, error behavior
+- `.xioflow/spec/guides/*.md` — **what to think about**: checklists, questions, pointers to specs
 
 Rule: "how to implement" → layer file; "what to consider" → guide.
 

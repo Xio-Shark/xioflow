@@ -29,7 +29,7 @@ Conversations get compacted; files don't. Every research output MUST end up as a
 
 ### Step 1: Resolve Current Task
 
-Run `python3 ./.trellis/scripts/task.py current --source` → active task path. If no active task is set, ask the user where to write output; do NOT guess.
+Run `python3 ./.xioflow/scripts/task.py current --source` → active task path. If no active task is set, ask the user where to write output; do NOT guess.
 
 Ensure `{TASK_DIR}/research/` exists:
 
@@ -71,8 +71,8 @@ Do NOT paste full research content into the reply. The files are the contract.
 ### Write FORBIDDEN
 
 - Code files (`src/`, `lib/`, …)
-- Spec files (`.trellis/spec/`) — main agent should use `update-spec` skill instead
-- `.trellis/scripts/`, `.trellis/workflow.md`, platform config (`.claude/`, `.cursor/`, etc.)
+- Spec files (`.xioflow/spec/`) — main agent should use `update-spec` skill instead
+- `.xioflow/scripts/`, `.xioflow/workflow.md`, platform config (`.claude/`, `.cursor/`, etc.)
 - Other task directories
 - Any git operation (commit / push / branch / merge)
 
@@ -110,7 +110,7 @@ Each `{TASK_DIR}/research/<topic>.md` should follow:
 
 ### Related Specs
 
-- `.trellis/spec/xxx.md` — <description>
+- `.xioflow/spec/xxx.md` — <description>
 
 ## Caveats / Not Found
 

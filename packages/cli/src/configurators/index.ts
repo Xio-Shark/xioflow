@@ -93,8 +93,12 @@ export const PLATFORM_MANAGED_DIRS = PLATFORM_IDS.flatMap((id) =>
   getManagedPaths(id),
 );
 
-/** All directories managed by Trellis (including .trellis itself) */
-export const ALL_MANAGED_DIRS = [".trellis", ...new Set(PLATFORM_MANAGED_DIRS)];
+/** All directories managed by xioflow (workflow dirs + platform dirs) */
+export const ALL_MANAGED_DIRS = [
+  ".xioflow",
+  ".trellis",
+  ...new Set(PLATFORM_MANAGED_DIRS),
+];
 
 /**
  * Detect platforms from Trellis-owned templates, not native config directories.

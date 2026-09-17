@@ -39,7 +39,7 @@ import { FILE_NAMES } from "../constants/paths.js";
 import { getAllMigrations } from "../migrations/index.js";
 import { saveHashes } from "./template-hash.js";
 import { toPosix } from "./posix.js";
-import { TRELLIS_BLOCK_END, TRELLIS_BLOCK_START } from "./managed-paths.js";
+import { MANAGED_BLOCK_MARKERS } from "./managed-paths.js";
 import type { AITool } from "../types/ai-tools.js";
 import type { TemplateHashes } from "../types/migration.js";
 
@@ -91,9 +91,8 @@ function shouldKeepAgentsMd(cwd: string): boolean {
   }
   try {
     const content = fs.readFileSync(fullPath, "utf-8");
-    return (
-      content.includes(TRELLIS_BLOCK_START) &&
-      content.includes(TRELLIS_BLOCK_END)
+    return MANAGED_BLOCK_MARKERS.some(
+      ([start, end]) => content.includes(start) && content.includes(end),
     );
   } catch {
     return true;
@@ -133,10 +132,15 @@ export function pruneOrphanManifestKeys(
 
   for (const [rawKey, value] of Object.entries(hashes)) {
     const key = toPosix(rawKey);
-    // Always preserve .trellis/ entries — they're for the workflow tree
+    // Always preserve workflow-dir entries — they're for the workflow tree
     // which uninstall removes wholesale and which update needs for
     // modified-file detection.
-    if (key.startsWith(".trellis/") || key === ".trellis") {
+    if (
+      key.startsWith(".xioflow/") ||
+      key === ".xioflow" ||
+      key.startsWith(".trellis/") ||
+      key === ".trellis"
+    ) {
       kept[key] = value;
       continue;
     }

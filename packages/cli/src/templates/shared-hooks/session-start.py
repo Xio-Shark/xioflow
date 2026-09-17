@@ -392,7 +392,7 @@ def run_script(script_path: Path, context_key: str | None = None) -> str:
         return "No context available"
 
 
-def _normalize_task_ref(task_ref: str) -> str:
+def _normalize_task_ref(task_ref: str, wf_name: str = ".xioflow") -> str:
     normalized = task_ref.strip()
     if not normalized:
         return ""
@@ -406,17 +406,17 @@ def _normalize_task_ref(task_ref: str) -> str:
         normalized = normalized[2:]
 
     if normalized.startswith("tasks/"):
-        return f".trellis/{normalized}"
+        return f"{wf_name}/{normalized}"
 
     return normalized
 
 
 def _resolve_task_dir(trellis_dir: Path, task_ref: str) -> Path:
-    normalized = _normalize_task_ref(task_ref)
+    normalized = _normalize_task_ref(task_ref, trellis_dir.name)
     path_obj = Path(normalized)
     if path_obj.is_absolute():
         return path_obj
-    if normalized.startswith(".trellis/"):
+    if normalized.startswith((".xioflow/", ".trellis/")):
         return trellis_dir.parent / path_obj
     return trellis_dir / "tasks" / path_obj
 
@@ -438,7 +438,7 @@ def _get_task_status(trellis_dir: Path, input_data: dict) -> str:
     if active.stale or not task_dir.is_dir():
         return (
             f"Status: STALE POINTER\nTask: {task_ref}\n"
-            f"Next-Action: Run `python3 ./.trellis/scripts/task.py finish` to clear the stale pointer, "
+            f"Next-Action: Run `python3 ./{trellis_dir.name}/scripts/task.py finish` to clear the stale pointer, "
             "then ask the user what to work on next."
         )
 
@@ -667,7 +667,7 @@ def _collect_spec_index_paths(trellis_dir: Path, allowed_pkgs: set | None) -> li
     paths: list[str] = []
     guides_index = trellis_dir / "spec" / "guides" / "index.md"
     if guides_index.is_file():
-        paths.append(".trellis/spec/guides/index.md")
+        paths.append(f"{trellis_dir.name}/spec/guides/index.md")
 
     spec_dir = trellis_dir / "spec"
     if not spec_dir.is_dir():
@@ -679,7 +679,7 @@ def _collect_spec_index_paths(trellis_dir: Path, allowed_pkgs: set | None) -> li
 
         index_file = sub / "index.md"
         if index_file.is_file():
-            paths.append(f".trellis/spec/{sub.name}/index.md")
+            paths.append(f"{trellis_dir.name}/spec/{sub.name}/index.md")
             continue
 
         if allowed_pkgs is not None and sub.name not in allowed_pkgs:
@@ -689,7 +689,7 @@ def _collect_spec_index_paths(trellis_dir: Path, allowed_pkgs: set | None) -> li
                 continue
             nested_index = nested / "index.md"
             if nested_index.is_file():
-                paths.append(f".trellis/spec/{sub.name}/{nested.name}/index.md")
+                paths.append(f"{trellis_dir.name}/spec/{sub.name}/{nested.name}/index.md")
 
     return paths
 
@@ -736,7 +736,7 @@ def _build_compact_current_state(
         try:
             task_count = sum(1 for _ in iter_active_tasks(get_tasks_dir(repo_root)))
             lines.append(
-                f"Active tasks: {task_count} total. Use `python3 ./.trellis/scripts/task.py list --mine` only if needed."
+                f"Active tasks: {task_count} total. Use `python3 ./{trellis_dir.name}/scripts/task.py list --mine` only if needed."
             )
         except Exception:
             pass  # Optional task summary; keep compact state available.
@@ -808,7 +808,7 @@ def _build_workflow_overview(workflow_path: Path) -> str:
 
     out_lines = [
         "# Development Workflow - Session Summary",
-        "Full guide: .trellis/workflow.md. Step detail: `python3 ./.trellis/scripts/get_context.py --mode phase --step <X.Y>`.",
+        f"Full guide: {workflow_path.parent.name}/workflow.md. Step detail: `python3 ./{workflow_path.parent.name}/scripts/get_context.py --mode phase --step <X.Y>`.",
         "",
     ]
 
@@ -852,7 +852,11 @@ def main():
     if project_dir is None:
         project_dir = Path(_normalize_windows_shell_path(hook_input.get("cwd", "."))).resolve()
 
-    trellis_dir = project_dir / ".trellis"
+    trellis_dir = (
+        project_dir / ".xioflow"
+        if (project_dir / ".xioflow").is_dir()
+        else project_dir / ".trellis"
+    )
     context_key = _resolve_context_key(trellis_dir, hook_input)
     _persist_context_key_for_bash(context_key)
 
@@ -903,7 +907,7 @@ Trellis compact SessionStart context. Use it to orient the session; load details
 
     output.write(
         "Discover more via: "
-        "`python3 ./.trellis/scripts/get_context.py --mode packages`\n"
+        f"`python3 ./{trellis_dir.name}/scripts/get_context.py --mode packages`\n"
     )
     output.write("</guidelines>\n\n")
 

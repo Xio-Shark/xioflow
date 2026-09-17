@@ -187,7 +187,7 @@ describe("init + uninstall: manifest accuracy + homedir guard", () => {
     // Sanity: Trellis tracked it and wrote the managed block.
     expect(loadHashes(tmpDir)).toHaveProperty("AGENTS.md");
     const written = fs.readFileSync(agentsPath, "utf-8");
-    expect(written).toContain("<!-- TRELLIS:START -->");
+    expect(written).toContain("<!-- XIOFLOW:START -->");
 
     const userSection = "\n## My project rules\n\nAlways rebase.\n";
     fs.writeFileSync(agentsPath, written + userSection);
@@ -196,8 +196,8 @@ describe("init + uninstall: manifest accuracy + homedir guard", () => {
 
     expect(fs.existsSync(agentsPath)).toBe(true);
     const after = fs.readFileSync(agentsPath, "utf-8");
-    expect(after).not.toContain("<!-- TRELLIS:START -->");
-    expect(after).not.toContain("<!-- TRELLIS:END -->");
+    expect(after).not.toContain("<!-- XIOFLOW:START -->");
+    expect(after).not.toContain("<!-- XIOFLOW:END -->");
     expect(after).toContain("## My project rules");
     expect(after).toContain("Always rebase.");
   });
@@ -351,7 +351,7 @@ describe("init + uninstall: manifest accuracy + homedir guard", () => {
       expect(exitSpy).toHaveBeenCalledWith(1);
 
       // No .trellis dir was created.
-      expect(fs.existsSync(path.join(fakeHome, ".trellis"))).toBe(false);
+      expect(fs.existsSync(path.join(fakeHome, ".xioflow"))).toBe(false);
     } finally {
       fs.rmSync(fakeHome, { recursive: true, force: true });
     }
@@ -375,7 +375,7 @@ describe("init + uninstall: manifest accuracy + homedir guard", () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
 
     // Project is unchanged.
-    expect(fs.existsSync(path.join(tmpDir, ".trellis"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, ".xioflow"))).toBe(true);
   });
 
   it("#R2.3 TRELLIS_ALLOW_HOMEDIR=1 bypasses the guard for init", async () => {
@@ -388,7 +388,7 @@ describe("init + uninstall: manifest accuracy + homedir guard", () => {
         await init({ yes: true, claude: true, force: true });
       });
 
-      expect(fs.existsSync(path.join(fakeHome, ".trellis"))).toBe(true);
+      expect(fs.existsSync(path.join(fakeHome, ".xioflow"))).toBe(true);
     } finally {
       fs.rmSync(fakeHome, { recursive: true, force: true });
     }
@@ -406,7 +406,7 @@ describe("init + uninstall: manifest accuracy + homedir guard", () => {
         await init({ yes: true, claude: true, force: true });
       });
 
-      expect(fs.existsSync(path.join(subDir, ".trellis"))).toBe(true);
+      expect(fs.existsSync(path.join(subDir, ".xioflow"))).toBe(true);
     } finally {
       fs.rmSync(fakeHome, { recursive: true, force: true });
     }

@@ -48,12 +48,12 @@ from .paths import (
     DEVELOPER_HINT,
     DIR_ARCHIVE,
     DIR_TASKS,
-    DIR_WORKFLOW,
     FILE_TASK_JSON,
     generate_task_date_prefix,
     get_developer,
     get_repo_root,
     get_tasks_dir,
+    get_workflow_dir_name,
 )
 from .safe_commit import (
     print_gitignore_warning,
@@ -229,7 +229,7 @@ def _restore_child_links(unlinked: dict[Path, str | None]) -> None:
         print(
             colored(
                 f"Warning: could not restore the parent link on: {', '.join(broken)}. "
-                "Re-link each one with `python3 .trellis/scripts/task.py "
+                f"Re-link each one with `python3 {get_workflow_dir_name()}/scripts/task.py "
                 "add-subtask <parent> <child>`.",
                 Colors.RED,
             ),
@@ -737,14 +737,14 @@ def cmd_create(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         print(
-            "      list available specs: python3 .trellis/scripts/get_context.py --mode packages",
+            f"      list available specs: python3 {get_workflow_dir_name(repo_root)}/scripts/get_context.py --mode packages",
             file=sys.stderr,
         )
     print("  - Use /trellis:continue or phase context to decide the next step", file=sys.stderr)
     print("", file=sys.stderr)
 
     # Output relative path for script chaining
-    print(f"{DIR_WORKFLOW}/{DIR_TASKS}/{dir_name}")
+    print(f"{get_workflow_dir_name(repo_root)}/{DIR_TASKS}/{dir_name}")
 
     run_task_hooks("after_create", task_json_path, repo_root)
     return 0
@@ -948,7 +948,7 @@ def _plan_reported_refs(
         r"(?<![0-9A-Za-z_-])" + re.escape(old_name) + r"(?![0-9A-Za-z_-])"
     )
     hits: list[tuple[Path, int]] = []
-    trellis_dir = repo_root / DIR_WORKFLOW
+    trellis_dir = repo_root / get_workflow_dir_name(repo_root)
     sessions_dir = _runtime_sessions_dir(repo_root)
     if not trellis_dir.is_dir():
         return hits
@@ -1194,7 +1194,7 @@ def cmd_rename(args: argparse.Namespace) -> int:
     if plan.reported:
         print(
             colored(
-                f"{len(plan.reported)} reference(s) elsewhere under {DIR_WORKFLOW}/ "
+                f"{len(plan.reported)} reference(s) elsewhere under {get_workflow_dir_name(repo_root)}/ "
                 "still name the old task; they are listed above and were not rewritten.",
                 Colors.YELLOW,
             ),
@@ -1236,7 +1236,7 @@ def _validate_branch_metadata(
     """
     branch = _task_branch_field(data, "branch")
     base_branch = _task_branch_field(data, "base_branch")
-    task_py = f"python3 {DIR_WORKFLOW}/scripts/task.py"
+    task_py = f"python3 {get_workflow_dir_name(repo_root)}/scripts/task.py"
 
     if branch and not branch_exists_locally(branch, repo_root):
         print(
@@ -1499,7 +1499,7 @@ def cmd_archive(args: argparse.Namespace) -> int:
                 return 1
 
         # Return the archive path
-        print(f"{DIR_WORKFLOW}/{DIR_TASKS}/{DIR_ARCHIVE}/{year_month}/{dir_name}")
+        print(f"{get_workflow_dir_name(repo_root)}/{DIR_TASKS}/{DIR_ARCHIVE}/{year_month}/{dir_name}")
 
         # Run hooks with the archived path
         archived_json = archive_dest / FILE_TASK_JSON
@@ -1537,7 +1537,7 @@ def _auto_commit_archive(
         )
         return True
 
-    source_rel = f"{DIR_WORKFLOW}/{DIR_TASKS}/{task_name}"
+    source_rel = f"{get_workflow_dir_name(repo_root)}/{DIR_TASKS}/{task_name}"
     rc, tracked_out, _ = run_git(
         ["ls-files", "--", source_rel],
         cwd=repo_root,
@@ -1554,7 +1554,7 @@ def _auto_commit_archive(
     success, _, err = safe_git_add(paths, repo_root, retry_on_index_lock=True)
     if not success:
         if err and "ignored by" in err.lower():
-            print_gitignore_warning(paths)
+            print_gitignore_warning(paths, repo_root)
         elif stderr_indicates_index_lock(err):
             _print_index_lock_warning(
                 "git add", task_name, repo_root, [*paths, source_rel]

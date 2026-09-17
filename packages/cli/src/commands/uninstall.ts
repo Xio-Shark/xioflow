@@ -24,7 +24,7 @@ import readline from "node:readline";
 import chalk from "chalk";
 import inquirer from "inquirer";
 
-import { DIR_NAMES } from "../constants/paths.js";
+import { DIR_NAMES, resolveWorkflowDir } from "../constants/paths.js";
 import { loadHashes } from "../utils/template-hash.js";
 import { getConfiguredPlatforms } from "../configurators/index.js";
 import { pruneOrphanManifestKeys } from "../utils/manifest-prune.js";
@@ -50,7 +50,8 @@ type UninstallPlan = ManagedRemovalPlan;
  * Render the two-column uninstall plan to stdout.
  */
 function renderPlan(cwd: string, plan: UninstallPlan): void {
-  const trellisDir = path.join(cwd, DIR_NAMES.WORKFLOW);
+  const workflowDir = resolveWorkflowDir(cwd);
+  const trellisDir = path.join(cwd, workflowDir);
 
   console.log(chalk.bold("\nTrellis uninstall plan\n"));
 
@@ -66,7 +67,7 @@ function renderPlan(cwd: string, plan: UninstallPlan): void {
   }
   if (plan.removeTrellisDir && fs.existsSync(trellisDir)) {
     console.log(
-      `  ${chalk.red("-")} ${DIR_NAMES.WORKFLOW}/  ${chalk.gray(
+      `  ${chalk.red("-")} ${workflowDir}/  ${chalk.gray(
         "(entire directory — including your specs, task PRDs, journals, and memory)",
       )}`,
     );
@@ -126,12 +127,13 @@ async function promptContinue(): Promise<boolean> {
  * not a git repo or git is unavailable (nothing we can check).
  */
 export function collectUncommittedTrellisData(cwd: string): string[] {
-  const w = DIR_NAMES.WORKFLOW;
-  const userDataDirs = [
-    `${w}/${DIR_NAMES.SPEC}`,
-    `${w}/${DIR_NAMES.TASKS}`,
-    `${w}/${DIR_NAMES.WORKSPACE}`,
-  ];
+  const userDataDirs = [DIR_NAMES.WORKFLOW, DIR_NAMES.WORKFLOW_LEGACY].flatMap(
+    (w) => [
+      `${w}/${DIR_NAMES.SPEC}`,
+      `${w}/${DIR_NAMES.TASKS}`,
+      `${w}/${DIR_NAMES.WORKSPACE}`,
+    ],
+  );
   try {
     const out = execFileSync(
       "git",
@@ -169,13 +171,15 @@ export async function uninstall(options: UninstallOptions = {}): Promise<void> {
   }
 
   const cwd = process.cwd();
-  const trellisDir = path.join(cwd, DIR_NAMES.WORKFLOW);
+  const hasWorkflowDir =
+    fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW)) ||
+    fs.existsSync(path.join(cwd, DIR_NAMES.WORKFLOW_LEGACY));
 
-  // Pre-check 1: must have a `.trellis/` directory.
-  if (!fs.existsSync(trellisDir)) {
+  // Pre-check 1: must have a workflow directory (.xioflow/ or legacy .trellis/).
+  if (!hasWorkflowDir) {
     console.log(
       chalk.gray(
-        "Trellis is not installed in this project (no .trellis/ directory found).",
+        "xioflow is not installed in this project (no .xioflow/ or .trellis/ directory found).",
       ),
     );
     return;
@@ -187,8 +191,8 @@ export async function uninstall(options: UninstallOptions = {}): Promise<void> {
   if (Object.keys(hashes).length === 0) {
     console.error(
       chalk.red(
-        "Trellis directory found but manifest is missing — cannot determine which platform files to remove. " +
-          "You can manually delete .trellis/ if needed.",
+        "xioflow directory found but manifest is missing — cannot determine which platform files to remove. " +
+          `You can manually delete ${resolveWorkflowDir(cwd)}/ if needed.`,
       ),
     );
     process.exit(1);
@@ -232,7 +236,7 @@ export async function uninstall(options: UninstallOptions = {}): Promise<void> {
   if (uncommitted.length > 0) {
     console.warn(
       chalk.red.bold(
-        `\n⚠ ${uncommitted.length} uncommitted file(s) under .trellis/ (spec/tasks/workspace) ` +
+        `\n⚠ ${uncommitted.length} uncommitted file(s) under ${resolveWorkflowDir(cwd)}/ (spec/tasks/workspace) ` +
           `will be permanently deleted with no backup:`,
       ),
     );
@@ -255,7 +259,7 @@ export async function uninstall(options: UninstallOptions = {}): Promise<void> {
   if (uncommitted.length > 0 && options.yes && !dirtyUninstallBypassEnabled()) {
     console.error(
       chalk.red(
-        "Refusing to uninstall with --yes while .trellis/ has uncommitted user data " +
+        `Refusing to uninstall with --yes while ${resolveWorkflowDir(cwd)}/ has uncommitted user data ` +
           "(spec/tasks/workspace). Commit or stash it, re-run without --yes to confirm " +
           "interactively, or set TRELLIS_ALLOW_DIRTY_UNINSTALL=1 to override.",
       ),

@@ -1,6 +1,6 @@
 # Local Customization Overview
 
-This directory is for local AI working in a user project where Trellis was installed through npm and `trellis init` has already been run. The AI should modify generated `.trellis/` and platform directories inside the project, not Trellis CLI upstream source code.
+This directory is for local AI working in a user project where Trellis was installed through npm and `trellis init` has already been run. The AI should modify generated `.xioflow/` and platform directories inside the project, not Trellis CLI upstream source code.
 
 ## First Determine What The User Actually Wants To Change
 
@@ -18,20 +18,20 @@ This directory is for local AI working in a user project where Trellis was insta
 ## General Operation Order
 
 1. **Confirm platform and directories**: inspect which directories exist, such as `.claude/`, `.codex/`, `.cursor/`, `.zcode/`.
-2. **Confirm the current active task**: run `python3 ./.trellis/scripts/task.py current --source`.
-3. **Read the local source of truth**: prefer `.trellis/workflow.md`, `.trellis/config.yaml`, and relevant platform files.
+2. **Confirm the current active task**: run `python3 ./.xioflow/scripts/task.py current --source`.
+3. **Read the local source of truth**: prefer `.xioflow/workflow.md`, `.xioflow/config.yaml`, and relevant platform files.
 4. **Modify narrowly**: edit only files related to the user's request.
-5. **Synchronize semantics**: if a shared flow changes, check whether platform entry points also need changes; if a platform entry changes, check whether `.trellis/workflow.md` still agrees.
+5. **Synchronize semantics**: if a shared flow changes, check whether platform entry points also need changes; if a platform entry changes, check whether `.xioflow/workflow.md` still agrees.
 
 ## Local File Priority
 
 | Layer | Files |
 | --- | --- |
-| Workflow | `.trellis/workflow.md` |
-| Project configuration | `.trellis/config.yaml` |
-| Task material | `.trellis/tasks/<task>/` |
-| Project specs | `.trellis/spec/` |
-| Runtime scripts | `.trellis/scripts/` |
+| Workflow | `.xioflow/workflow.md` |
+| Project configuration | `.xioflow/config.yaml` |
+| Task material | `.xioflow/tasks/<task>/` |
+| Project specs | `.xioflow/spec/` |
+| Runtime scripts | `.xioflow/scripts/` |
 | Platform integration | `.claude/`, `.codex/`, `.cursor/`, `.opencode/`, `.zcode/`, and similar directories |
 | Shared skill | `.agents/skills/` |
 
@@ -41,7 +41,7 @@ This directory is for local AI working in a user project where Trellis was insta
 - Do not edit `node_modules/@mindfoldhq/trellis`.
 - Do not assume the user has the Trellis GitHub repository.
 - Do not overwrite local files already modified by the user with default templates.
-- Do not put team project rules into public `trellis-meta`; project rules belong in `.trellis/spec/` or a local skill.
+- Do not put team project rules into public `trellis-meta`; project rules belong in `.xioflow/spec/` or a local skill.
 
 ## When To Inspect Upstream Source
 

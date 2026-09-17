@@ -119,7 +119,7 @@ trellis channel context add design-feedback \
 trellis channel context add design-feedback \
   --scope global \
   --thread login-empty-state \
-  --file "$PWD/.trellis/tasks/05-13-login-redesign/design.md"
+  --file "$PWD/.xioflow/tasks/05-13-login-redesign/design.md"
 ```
 
 - `--thread <key>` switches between channel-level and thread-level context.

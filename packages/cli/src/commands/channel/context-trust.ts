@@ -15,7 +15,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { DIR_NAMES } from "../../constants/paths.js";
+import { resolveWorkflowDir } from "../../constants/paths.js";
 
 /** Top-level `.trellis/*` entries eligible for symlink auto-trust. */
 const AUTO_TRUST_ENTRIES = ["tasks", "workspace"] as const;
@@ -105,7 +105,7 @@ function stripTrustValue(s: string): string {
 }
 
 function loadChannelTrustConfig(cwd: string): ChannelTrustConfig {
-  const configPath = path.join(cwd, DIR_NAMES.WORKFLOW, "config.yaml");
+  const configPath = path.join(cwd, resolveWorkflowDir(cwd), "config.yaml");
   if (!fs.existsSync(configPath)) return { trustedDirs: [] };
   let content: string;
   try {
@@ -137,7 +137,7 @@ export function resolveTrustedRoots(cwd: string): string[] {
 
   if (config.autoTrustSymlinks !== false) {
     for (const entryName of AUTO_TRUST_ENTRIES) {
-      const entryPath = path.join(cwd, DIR_NAMES.WORKFLOW, entryName);
+      const entryPath = path.join(cwd, resolveWorkflowDir(cwd), entryName);
       let lstat: fs.Stats;
       try {
         lstat = fs.lstatSync(entryPath);

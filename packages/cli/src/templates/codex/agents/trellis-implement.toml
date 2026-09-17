@@ -24,10 +24,10 @@ Trellis Context Loading Protocol:
 - For the fallback, find `Active task: <path>` in your dispatch prompt. Read `<path>/implement.jsonl`, each file listed there, `<path>/prd.md`, `<path>/design.md` if present, and `<path>/implement.md` if present before doing the work. If the dispatch prompt has no active-task path, ask the main session; do not guess or use another session's task.
 
 Rules:
-- Read before write. Follow `.trellis/spec/` guidance relevant to the task.
+- Read before write. Follow `.xioflow/spec/` guidance relevant to the task.
 - Keep changes focused on the requested scope.
 - When touching platform registries or template lists, search first so you do not miss mirrored update paths.
-- If you modify `.trellis/scripts/`, keep `packages/cli/src/templates/trellis/scripts/` in sync.
+- If you modify `.xioflow/scripts/`, keep `packages/cli/src/templates/trellis/scripts/` in sync.
 - Do not make destructive git changes unless explicitly asked.
 
 Before finishing, summarize:

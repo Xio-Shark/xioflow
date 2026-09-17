@@ -81,17 +81,25 @@ If you have not already loaded Trellis context this session, read the `trellis-s
 # ---------------------------------------------------------------------------
 
 def find_trellis_root(start: Path) -> Optional[Path]:
-    """Walk up from start to find directory containing .trellis/.
+    """Walk up from start to find directory containing .xioflow/ or .trellis/.
 
     Handles CWD drift: subdirectory launches, monorepo packages, etc.
-    Returns None if no .trellis/ found (silent no-op).
+    Returns None if no workflow dir found (silent no-op).
     """
     cur = start.resolve()
     while cur != cur.parent:
-        if (cur / ".trellis").is_dir():
+        if (cur / ".xioflow").is_dir() or (cur / ".trellis").is_dir():
             return cur
         cur = cur.parent
     return None
+
+
+def _workflow_dir(root: Path) -> Path:
+    """Active workflow dir under root: .xioflow preferred, .trellis legacy."""
+    xio = root / ".xioflow"
+    if xio.is_dir():
+        return xio
+    return root / ".trellis"
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +158,7 @@ def _detect_platform(input_data: dict) -> str | None:
 
 
 def _resolve_active_task(root: Path, input_data: dict):
-    scripts_dir = root / ".trellis" / "scripts"
+    scripts_dir = _workflow_dir(root) / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
     from common.active_task import resolve_active_task  # type: ignore[import-not-found]
@@ -215,7 +223,7 @@ def load_breadcrumbs(root: Path) -> dict[str, str]:
     in build_breadcrumb so users see the broken state and fix
     workflow.md, rather than the hook silently masking the issue.
     """
-    workflow = root / ".trellis" / "workflow.md"
+    workflow = _workflow_dir(root) / "workflow.md"
     if not workflow.is_file():
         return {}
     try:
@@ -238,7 +246,7 @@ def _read_trellis_config(root: Path) -> dict:
     The helper lives in .trellis/scripts/common; the hook lives outside the
     scripts tree, so we extend sys.path before importing.
     """
-    scripts_dir = root / ".trellis" / "scripts"
+    scripts_dir = _workflow_dir(root) / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
     try:

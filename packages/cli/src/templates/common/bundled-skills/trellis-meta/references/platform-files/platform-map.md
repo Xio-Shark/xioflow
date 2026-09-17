@@ -81,8 +81,8 @@ Codex, Gemini CLI, Pi Agent, Kimi Code, and DeepSeek Harness (dsh) write the sha
 1. User specified a platform: modify only that platform directory unless shared workflow/spec files must also change.
 2. User says "all platforms should do this": synchronize equivalent entry points platform by platform; do not modify only one directory.
 3. User only says "my AI": inspect the configuration directories that actually exist in the project and infer the current AI platform.
-4. User wants project rules: prefer `.trellis/spec/` or a project-local skill.
-5. User wants Trellis behavior: edit `.trellis/workflow.md` plus platform hooks/agents/skills/commands.
+4. User wants project rules: prefer `.xioflow/spec/` or a project-local skill.
+5. User wants Trellis behavior: edit `.xioflow/workflow.md` plus platform hooks/agents/skills/commands.
 
 ## When Paths Differ
 

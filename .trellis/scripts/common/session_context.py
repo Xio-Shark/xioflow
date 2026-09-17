@@ -30,7 +30,7 @@ from .paths import (
     DIR_SCRIPTS,
     DIR_SPEC,
     DIR_TASKS,
-    DIR_WORKFLOW,
+    get_workflow_dir_name,
     DIR_WORKSPACE,
     count_lines,
     get_active_journal_file,
@@ -220,7 +220,7 @@ def _discover_child_git_repos(repo_root: Path) -> list[tuple[str, str]]:
             "warning: found more than "
             f"{_POLYREPO_SCAN_MAX_REPOS} child Git repositories; "
             "skipping automatic Git status collection. Configure explicit "
-            "packages entries with path and git: true in .trellis/config.yaml.",
+            f"packages entries with path and git: true in {get_workflow_dir_name(repo_root)}/config.yaml.",
             file=sys.stderr,
         )
         return []
@@ -320,7 +320,7 @@ def _append_package_git_context(lines: list[str], package_git_info: list[dict]) 
 
 def _read_project_version(repo_root: Path) -> str | None:
     try:
-        version = (repo_root / DIR_WORKFLOW / ".version").read_text(
+        version = (repo_root / get_workflow_dir_name(repo_root) / ".version").read_text(
             encoding="utf-8"
         ).strip()
     except OSError:
@@ -436,7 +436,7 @@ def _update_marker_path(repo_root: Path, context_key: str | None = None) -> Path
         safe_key = "session"
     return (
         repo_root
-        / DIR_WORKFLOW
+        / get_workflow_dir_name(repo_root)
         / ".runtime"
         / f"update-check-{safe_key[:160]}.marker"
     )
@@ -512,7 +512,7 @@ def get_context_json(repo_root: Path | None = None) -> dict:
     if journal_file and developer:
         journal_lines = count_lines(journal_file)
         journal_relative = (
-            f"{DIR_WORKFLOW}/{DIR_WORKSPACE}/{developer}/{journal_file.name}"
+            f"{get_workflow_dir_name(repo_root)}/{DIR_WORKSPACE}/{developer}/{journal_file.name}"
         )
 
     root_git_info = _collect_root_git_info(repo_root)
@@ -546,7 +546,7 @@ def get_context_json(repo_root: Path | None = None) -> dict:
         },
         "tasks": {
             "active": tasks,
-            "directory": f"{DIR_WORKFLOW}/{DIR_TASKS}",
+            "directory": f"{get_workflow_dir_name(repo_root)}/{DIR_TASKS}",
         },
         "journal": {
             "file": journal_relative,
@@ -599,7 +599,7 @@ def get_context_text(repo_root: Path | None = None) -> str:
     lines.append("## DEVELOPER")
     if not developer:
         lines.append(
-            f"ERROR: Not initialized. Run: python3 ./{DIR_WORKFLOW}/{DIR_SCRIPTS}/init_developer.py <name>"
+            f"ERROR: Not initialized. Run: python3 ./{get_workflow_dir_name(repo_root)}/{DIR_SCRIPTS}/init_developer.py <name>"
         )
         return "\n".join(lines)
 
@@ -698,7 +698,7 @@ def get_context_text(repo_root: Path | None = None) -> str:
     journal_file = get_active_journal_file(repo_root)
     if journal_file:
         journal_lines = count_lines(journal_file)
-        relative = f"{DIR_WORKFLOW}/{DIR_WORKSPACE}/{developer}/{journal_file.name}"
+        relative = f"{get_workflow_dir_name(repo_root)}/{DIR_WORKSPACE}/{developer}/{journal_file.name}"
         lines.append(f"Active file: {relative}")
         lines.append(f"Line count: {journal_lines} / 2000")
         if journal_lines > 1800:
@@ -715,9 +715,9 @@ def get_context_text(repo_root: Path | None = None) -> str:
 
     # Paths
     lines.append("## PATHS")
-    lines.append(f"Workspace: {DIR_WORKFLOW}/{DIR_WORKSPACE}/{developer}/")
-    lines.append(f"Tasks: {DIR_WORKFLOW}/{DIR_TASKS}/")
-    lines.append(f"Spec: {DIR_WORKFLOW}/{DIR_SPEC}/")
+    lines.append(f"Workspace: {get_workflow_dir_name(repo_root)}/{DIR_WORKSPACE}/{developer}/")
+    lines.append(f"Tasks: {get_workflow_dir_name(repo_root)}/{DIR_TASKS}/")
+    lines.append(f"Spec: {get_workflow_dir_name(repo_root)}/{DIR_SPEC}/")
     lines.append("")
 
     lines.append("========================================")
@@ -822,7 +822,7 @@ def get_context_text_record(repo_root: Path | None = None) -> str:
     developer = get_developer(repo_root)
     if not developer:
         lines.append(
-            f"ERROR: Not initialized. Run: python3 ./{DIR_WORKFLOW}/{DIR_SCRIPTS}/init_developer.py <name>"
+            f"ERROR: Not initialized. Run: python3 ./{get_workflow_dir_name(repo_root)}/{DIR_SCRIPTS}/init_developer.py <name>"
         )
         return "\n".join(lines)
 

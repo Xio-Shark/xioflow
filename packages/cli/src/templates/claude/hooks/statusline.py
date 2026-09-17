@@ -56,7 +56,7 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
-def _normalize_task_ref(task_ref: str) -> str:
+def _normalize_task_ref(task_ref: str, trellis_dir_name: str = ".xioflow") -> str:
     normalized = task_ref.strip()
     if not normalized:
         return ""
@@ -70,25 +70,28 @@ def _normalize_task_ref(task_ref: str) -> str:
         normalized = normalized[2:]
 
     if normalized.startswith("tasks/"):
-        return f".trellis/{normalized}"
+        return f"{trellis_dir_name}/{normalized}"
 
     return normalized
 
 
 def _resolve_task_dir(trellis_dir: Path, task_ref: str) -> Path:
-    normalized = _normalize_task_ref(task_ref)
+    normalized = _normalize_task_ref(task_ref, trellis_dir.name)
     path_obj = Path(normalized)
     if path_obj.is_absolute():
         return path_obj
-    if normalized.startswith(".trellis/"):
+    if normalized.startswith((".xioflow/", ".trellis/")):
         return trellis_dir.parent / path_obj
     return trellis_dir / "tasks" / path_obj
 
 
 def _find_trellis_dir() -> Path | None:
-    """Walk up from cwd to find .trellis/ directory."""
+    """Walk up from cwd to find the workflow dir (.xioflow preferred)."""
     current = Path.cwd()
     for parent in [current, *current.parents]:
+        candidate = parent / ".xioflow"
+        if candidate.is_dir():
+            return candidate
         candidate = parent / ".trellis"
         if candidate.is_dir():
             return candidate

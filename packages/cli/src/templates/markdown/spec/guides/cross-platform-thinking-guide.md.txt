@@ -38,7 +38,7 @@ print("Run: script.py <args>")
 
 # GOOD - Platform-aware wording
 print("Usage: python on Windows, python3 elsewhere")
-print("Run: {{PYTHON_CMD}} ./.trellis/scripts/task.py <args>")
+print("Run: {{PYTHON_CMD}} ./.xioflow/scripts/task.py <args>")
 ```
 
 **Rule 2**: When generating config files at init time, use placeholder + platform detection:
@@ -354,7 +354,7 @@ When making platform-related changes, check **all these locations**:
 
 ### Code Locations
 - [ ] `src/templates/` - Template files for new projects
-- [ ] `.trellis/scripts/` - Project's own scripts (if self-hosting)
+- [ ] `.xioflow/scripts/` - Project's own scripts (if self-hosting)
 - [ ] `dist/` - Built output (rebuild after changes)
 
 ### Search Pattern
@@ -528,7 +528,7 @@ subprocess.run(["./script.py"])  # FileNotFoundError
 
 ```
 src/templates/script.py  ← Updated
-.trellis/scripts/script.py  ← Forgot to sync!
+.xioflow/scripts/script.py  ← Forgot to sync!
 ```
 
 ### 4. "Python 3 is always python3"
@@ -604,7 +604,7 @@ included with Trellis, verify the whole distribution path:
 - [ ] `pnpm build` copies the asset into `dist/templates/**`.
 - [ ] `npm pack --dry-run --json` includes the expected `dist/**` path.
 - [ ] The built binary installs the asset in a fresh temp repository.
-- [ ] `.trellis/.template-hashes.json` tracks the generated asset path.
+- [ ] `.xioflow/.template-hashes.json` tracks the generated asset path.
 - [ ] `trellis update --dry-run` reports `Already up to date!` in that temp
   repository.
 
@@ -627,7 +627,7 @@ git -C "$tmpdir" init -q
   node /path/to/Trellis/packages/cli/bin/trellis.js init -u smoke --yes --claude --codex
   test -f .claude/skills/<skill>/SKILL.md
   test -f .agents/skills/<skill>/SKILL.md
-  grep -q '<skill>' .trellis/.template-hashes.json
+  grep -q '<skill>' .xioflow/.template-hashes.json
   node /path/to/Trellis/packages/cli/bin/trellis.js update --dry-run
 )
 ```

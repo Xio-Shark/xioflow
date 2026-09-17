@@ -32,7 +32,8 @@ if callable(_stdin_reconfigure):
         pass
 
 
-DIR_WORKFLOW = ".trellis"
+DIR_WORKFLOW = ".xioflow"
+DIR_WORKFLOW_LEGACY = ".trellis"
 DIR_RUNTIME = ".runtime"
 DIR_SHELL_TICKETS = "shell-tickets"
 SESSION_SUBCOMMANDS = {"start", "current", "finish"}
@@ -101,13 +102,22 @@ def _find_trellis_root(start: Path) -> Path | None:
     while True:
         if (current / DIR_WORKFLOW).is_dir():
             return current
+        if (current / DIR_WORKFLOW_LEGACY).is_dir():
+            return current
         if current == current.parent:
             return None
         current = current.parent
 
 
+def _workflow_dir(root: Path) -> Path:
+    """Active workflow dir under root: .xioflow preferred, .trellis legacy."""
+    if (root / DIR_WORKFLOW).is_dir():
+        return root / DIR_WORKFLOW
+    return root / DIR_WORKFLOW_LEGACY
+
+
 def _runtime_ticket_dir(root: Path) -> Path:
-    return root / DIR_WORKFLOW / DIR_RUNTIME / DIR_SHELL_TICKETS
+    return _workflow_dir(root) / DIR_RUNTIME / DIR_SHELL_TICKETS
 
 
 def _pending_shell_command(hook_input: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
@@ -155,7 +165,7 @@ def _host_platform_name() -> str | None:
 
 
 def _load_active_task_resolver(root: Path):
-    scripts_dir = root / DIR_WORKFLOW / "scripts"
+    scripts_dir = _workflow_dir(root) / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
     from common.active_task import resolve_context_key  # type: ignore[import-not-found]

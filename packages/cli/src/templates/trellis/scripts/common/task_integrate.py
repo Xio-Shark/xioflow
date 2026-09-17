@@ -350,7 +350,12 @@ def execute_integrate(
         # renames: "old -> new"
         if " -> " in path:
             path = path.split(" -> ", 1)[1].strip()
-        if path.startswith(".trellis/") or path == ".trellis":
+        if (
+            path.startswith(".xioflow/")
+            or path == ".xioflow"
+            or path.startswith(".trellis/")
+            or path == ".trellis"
+        ):
             continue
         if path:
             dirty_lines.append(line)

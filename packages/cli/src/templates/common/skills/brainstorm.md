@@ -13,7 +13,7 @@ Use during Phase 1 planning to turn the request into clear requirements and arti
 If no task exists yet:
 
 ```bash
-TASK_DIR=$({{PYTHON_CMD}} ./.trellis/scripts/task.py create "<short task title>" --description "<one-line summary>" --slug <slug>)
+TASK_DIR=$({{PYTHON_CMD}} ./.xioflow/scripts/task.py create "<short task title>" --description "<one-line summary>" --slug <slug>)
 ```
 
 Title and `--description` must both be non-empty — `create` rejects blanks. `--slug` gets the `MM-DD-` prefix automatically. `create` writes a starter `prd.md` — keep it updated as understanding grows.
@@ -44,7 +44,7 @@ When one request has several independently verifiable deliverables:
 3. Dual-write each child: `depends_on` / `isolation` in `task.json` + a `## Dependencies` section in `prd.md`
 4. `task.py ready <parent>` lists the ready set — dispatch after human review
 
-Tree position is ownership, not ordering. See `.trellis/spec/guides/parallel-decoupled-tasks.md`.
+Tree position is ownership, not ordering. See `.xioflow/spec/guides/parallel-decoupled-tasks.md`.
 
 ## PRD Convergence Pass
 

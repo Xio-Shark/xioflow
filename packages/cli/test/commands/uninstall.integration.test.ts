@@ -79,7 +79,7 @@ describe("uninstall() integration", () => {
     await init({ yes: true, claude: true, cursor: true, force: true });
 
     // Sanity: init wrote things.
-    expect(fs.existsSync(path.join(tmpDir, ".trellis"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, ".xioflow"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, ".claude"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, ".cursor"))).toBe(true);
 
@@ -89,7 +89,7 @@ describe("uninstall() integration", () => {
     await uninstall({ yes: true });
 
     // .trellis/ should be gone.
-    expect(fs.existsSync(path.join(tmpDir, ".trellis"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, ".xioflow"))).toBe(false);
 
     // Every opaque manifest path (non-structured files) should be gone.
     // Structured config files (settings.json/hooks.json/config.toml/
@@ -159,7 +159,7 @@ describe("uninstall() integration", () => {
 
     await uninstall({});
 
-    expect(fs.existsSync(path.join(tmpDir, ".trellis"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, ".xioflow"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, ".claude"))).toBe(true);
   });
 

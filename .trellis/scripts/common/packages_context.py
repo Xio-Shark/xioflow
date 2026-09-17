@@ -16,9 +16,9 @@ from pathlib import Path
 from .config import _is_true_config_value, get_default_package, get_packages, get_spec_scope
 from .paths import (
     DIR_SPEC,
-    DIR_WORKFLOW,
     get_current_task,
     get_repo_root,
+    get_workflow_dir_name,
 )
 from .tasks import load_task
 
@@ -100,7 +100,7 @@ def get_packages_info(repo_root: Path) -> list[dict]:
         return []
 
     default_pkg = get_default_package(repo_root)
-    spec_dir = repo_root / DIR_WORKFLOW / DIR_SPEC
+    spec_dir = repo_root / get_workflow_dir_name(repo_root) / DIR_SPEC
     result = []
 
     for pkg_name, pkg_config in packages.items():
@@ -124,7 +124,7 @@ def get_packages_info(repo_root: Path) -> list[dict]:
 
 def get_packages_section(repo_root: Path) -> str:
     """Build the PACKAGES section for text output."""
-    spec_dir = repo_root / DIR_WORKFLOW / DIR_SPEC
+    spec_dir = repo_root / get_workflow_dir_name(repo_root) / DIR_SPEC
     pkg_info = get_packages_info(repo_root)
 
     lines: list[str] = []
@@ -163,7 +163,7 @@ def get_context_packages_text(repo_root: Path | None = None) -> str:
     lines: list[str] = []
 
     if not pkg_info:
-        spec_dir = repo_root / DIR_WORKFLOW / DIR_SPEC
+        spec_dir = repo_root / get_workflow_dir_name(repo_root) / DIR_SPEC
         lines.append("Single-repo project (no packages configured)")
         lines.append("")
         layers = _scan_spec_layers(spec_dir)
@@ -195,16 +195,16 @@ def get_context_packages_text(repo_root: Path | None = None) -> str:
         if pkg["specLayers"]:
             lines.append(f"Spec layers: {', '.join(pkg['specLayers'])}")
             for layer in pkg["specLayers"]:
-                lines.append(f"  - .trellis/spec/{pkg['name']}/{layer}/index.md")
+                lines.append(f"  - {get_workflow_dir_name(repo_root)}/spec/{pkg['name']}/{layer}/index.md")
         else:
             lines.append("Spec: not configured")
         lines.append("")
 
     # Also show shared guides
-    guides_dir = repo_root / DIR_WORKFLOW / DIR_SPEC / "guides"
+    guides_dir = repo_root / get_workflow_dir_name(repo_root) / DIR_SPEC / "guides"
     if guides_dir.is_dir():
         lines.append("### Shared Guides (always included)")
-        lines.append("Path: .trellis/spec/guides/index.md")
+        lines.append(f"Path: {get_workflow_dir_name(repo_root)}/spec/guides/index.md")
         lines.append("")
 
     return "\n".join(lines)
@@ -218,7 +218,7 @@ def get_context_packages_json(repo_root: Path | None = None) -> dict:
     pkg_info = get_packages_info(repo_root)
 
     if not pkg_info:
-        spec_dir = repo_root / DIR_WORKFLOW / DIR_SPEC
+        spec_dir = repo_root / get_workflow_dir_name(repo_root) / DIR_SPEC
         layers = _scan_spec_layers(spec_dir)
         return {
             "mode": "single-repo",

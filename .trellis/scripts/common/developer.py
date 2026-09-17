@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .paths import (
     DEVELOPER_HINT,
-    DIR_WORKFLOW,
+    get_workflow_dir_name,
     DIR_WORKSPACE,
     DIR_TASKS,
     FILE_DEVELOPER,
@@ -53,8 +53,8 @@ def init_developer(name: str, repo_root: Path | None = None) -> bool:
     if repo_root is None:
         repo_root = get_repo_root()
 
-    dev_file = repo_root / DIR_WORKFLOW / FILE_DEVELOPER
-    workspace_dir = repo_root / DIR_WORKFLOW / DIR_WORKSPACE / name
+    dev_file = repo_root / get_workflow_dir_name(repo_root) / FILE_DEVELOPER
+    workspace_dir = repo_root / get_workflow_dir_name(repo_root) / DIR_WORKSPACE / name
 
     # Create .developer file
     initialized_at = datetime.now().isoformat()
@@ -160,7 +160,7 @@ def ensure_developer(repo_root: Path | None = None) -> None:
 
     if not check_developer(repo_root):
         print("Error: Developer not initialized.", file=sys.stderr)
-        print(f"Run: python3 ./{DIR_WORKFLOW}/scripts/init_developer.py <your-name>", file=sys.stderr)
+        print(f"Run: python3 ./{get_workflow_dir_name(repo_root)}/scripts/init_developer.py <your-name>", file=sys.stderr)
         print(DEVELOPER_HINT, file=sys.stderr)
         sys.exit(1)
 
@@ -180,8 +180,8 @@ def show_developer_info(repo_root: Path | None = None) -> None:
         print("Developer: (not initialized)")
     else:
         print(f"Developer: {developer}")
-        print(f"Workspace: {DIR_WORKFLOW}/{DIR_WORKSPACE}/{developer}/")
-        print(f"Tasks: {DIR_WORKFLOW}/{DIR_TASKS}/")
+        print(f"Workspace: {get_workflow_dir_name(repo_root)}/{DIR_WORKSPACE}/{developer}/")
+        print(f"Tasks: {get_workflow_dir_name(repo_root)}/{DIR_TASKS}/")
 
 
 # =============================================================================

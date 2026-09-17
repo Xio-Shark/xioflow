@@ -29,7 +29,13 @@ from .config import get_context_injection_limits
 from .git import branch_exists_locally
 from .io import read_json
 from .log import Colors, colored
-from .paths import DIR_ARCHIVE, DIR_TASKS, DIR_WORKFLOW, FILE_TASK_JSON, get_repo_root
+from .paths import (
+    DIR_ARCHIVE,
+    DIR_TASKS,
+    FILE_TASK_JSON,
+    get_repo_root,
+    get_workflow_dir_name,
+)
 from .task_utils import resolve_task_dir
 
 # Extensions that look like code rather than spec/research docs. Entries with
@@ -206,7 +212,7 @@ def _is_exempt_from_code_file_warning(file_path: str, task_rel: str) -> bool:
     artifacts, etc. legitimately live there).
     """
     posix_path = file_path.replace("\\", "/").lstrip("/")
-    exempt_prefixes = (".trellis/spec/", "docs/", "docs-site/")
+    exempt_prefixes = (".xioflow/spec/", ".trellis/spec/", "docs/", "docs-site/")
     if posix_path.startswith(exempt_prefixes):
         return True
     if task_rel and (posix_path == task_rel or posix_path.startswith(f"{task_rel}/")):
@@ -231,7 +237,8 @@ def _resolve_context_entry_path(
     except ValueError:
         return repo_path
 
-    archive_prefix = (DIR_WORKFLOW, DIR_TASKS, DIR_ARCHIVE)
+    wf = get_workflow_dir_name(repo_root)
+    archive_prefix = (wf, DIR_TASKS, DIR_ARCHIVE)
     if len(task_parts) != 5 or task_parts[:3] != archive_prefix:
         return repo_path
 
@@ -244,7 +251,7 @@ def _resolve_context_entry_path(
     ):
         return repo_path
 
-    historical_root = f"{DIR_WORKFLOW}/{DIR_TASKS}/{task_dir.name}"
+    historical_root = f"{wf}/{DIR_TASKS}/{task_dir.name}"
     posix_path = file_path.replace("\\", "/")
     if posix_path == historical_root:
         relative_parts: tuple[str, ...] = ()
@@ -394,7 +401,7 @@ def _validate_jsonl(jsonl_file: Path, repo_root: Path, task_dir: Path | None = N
             f"  {colored(f'{file_name}: ✗ (0 curated entries — sub-agents would get zero spec context)', Colors.RED)}"
         )
         print(
-            f"    Curate it:  python3 .trellis/scripts/task.py add-context <task> {action} <path> \"<why>\""
+            f"    Curate it:  python3 {get_workflow_dir_name(repo_root)}/scripts/task.py add-context <task> {action} <path> \"<why>\""
         )
         print(
             "    Intentionally empty? Bypass at start: task.py start <task> --allow-empty-context"
