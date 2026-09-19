@@ -77,6 +77,7 @@ export function defineContractTestSuite(
 
       expect(result.status).toBe('failed');
       expect(result.exitCode).toBe(127);
+      expect(result.spawnFailure).toBeTruthy();
       expect(domain.isResourceLocked('res:c1')).toBe(false);
 
       // 验证未产生假 active 状态

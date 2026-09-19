@@ -131,6 +131,7 @@ export interface ProcessOperationResult extends BaseResult {
   outputRef?: string;              // 兼容字段：第一个被截断流的转储引用
   outputHash?: string;             // 兼容字段：stdout 哈希（无 stdout 时为 stderr 哈希）
   terminationReason?: TerminationReason;
+  spawnFailure?: string;           // 非空表示可执行文件根本没起来（与子进程自己返回 127 区分）
   peakMemoryBytes?: number;
   cpuTimeMs?: number;
   residualProcessesReaped?: boolean; // 根进程退出后仍持有管道的后代已被停止流水线回收

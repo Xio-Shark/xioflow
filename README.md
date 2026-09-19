@@ -127,12 +127,13 @@ defineContractTestSuite('My Agent Runtime', async () => ({
 - Persistence is SQLite with WAL and `synchronous = FULL`, so committed facts survive power loss.
 - One execution domain is one workspace-scoped store plus one active owner. Isolation is rebuilt from the store before any new operation is admitted.
 - When the root process exits while a descendant still holds its pipes, the supervisor reaps the process group and reports the root's real exit facts with `residualProcessesReaped: true`, instead of blocking the operation until its timeout.
+- A spawn failure is reported both as `status: 'failed'`/`exitCode: 127` and as `spawnFailure` with the underlying error message, so embedders can tell "the binary could not start" apart from "the child exited 127".
 - Hard resource requests (`maxMemoryBytes`, `maxPids`, `maxCpuTimeMs` with `enforcement: 'hard'`) are rejected at admission with `UnsupportedCapabilityError` on platforms that cannot enforce them, instead of degrading silently. The remaining capability flags are reported truthfully for callers to inspect, but are not enforced by admission in 0.1.
 - Protocol specification: [`ARCHITECTURE.md`](./ARCHITECTURE.md) (Chinese).
 
 ## Status
 
-0.1.2, pre-1.0: the API may change. Not implemented yet: Linux cgroup v2 backend (hard memory/CPU/PID enforcement), enforced domain-wide memory budgets, artifact retrieval helpers.
+0.1.3, pre-1.0: the API may change. Not implemented yet: Linux cgroup v2 backend (hard memory/CPU/PID enforcement), enforced domain-wide memory budgets, artifact retrieval helpers.
 
 ## Releasing
 
