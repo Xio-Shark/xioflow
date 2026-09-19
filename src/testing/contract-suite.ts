@@ -11,7 +11,7 @@ import {
   ResourceConflictError,
   UnsupportedCapabilityError,
   EpochFencedError,
-} from '@xioflow/kernel';
+} from '../index.js';
 
 export interface ConsumerContext {
   domain: ExecutionDomain;

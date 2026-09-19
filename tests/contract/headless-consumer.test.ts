@@ -6,7 +6,7 @@ import {
   NodePlatformDriver,
   ProcessSupervisor,
 } from '@xioflow/kernel';
-import { defineContractTestSuite, ConsumerContext } from './suite.js';
+import { defineContractTestSuite, ConsumerContext } from '../../src/testing/contract-suite.js';
 
 // 消费者 A：纯无头 API 消费者（零 UI，零三件套，仅调用公开内核 API）
 defineContractTestSuite('Headless API Consumer', async (): Promise<ConsumerContext> => {
