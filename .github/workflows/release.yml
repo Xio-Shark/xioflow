@@ -1,0 +1,86 @@
+name: Release
+
+# Tag-driven release with npm Trusted Publishing (OIDC): no token, no manual 2FA.
+# One-time setup on npmjs.com, package settings -> Trusted Publisher -> GitHub Actions:
+#   Organization or user: Xio-Shark
+#   Repository:           xioflow
+#   Workflow filename:    release.yml
+#   Environment:          (leave empty)
+# After that, pushing a tag like v0.1.2 publishes through this workflow only.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+permissions:
+  contents: read
+  id-token: write # required for OIDC trusted publishing and provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm >= 11.5.1; Node 24 ships a suitable CLI,
+      # the check below fails loudly instead of silently publishing unsigned.
+      - name: Check npm CLI supports trusted publishing
+        run: |
+          npm_version="$(npm --version)"
+          echo "npm $npm_version"
+          node -e '
+            const [major, minor] = process.argv[1].split(".").map(Number);
+            if (major < 11 || (major === 11 && minor < 5)) {
+              console.error(`npm ${process.argv[1]} is too old for trusted publishing (need >= 11.5.1)`);
+              process.exit(1);
+            }
+          ' "$npm_version"
+
+      - name: Check tag matches package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          echo "tag=$tag package=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $pkg"
+            exit 1
+          fi
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm verify:package
+
+      - name: Publish with provenance
+        run: npm publish --provenance --access public
+
+      - name: Verify published version and provenance attestation
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          for attempt in $(seq 1 20); do
+            if metadata="$(npm view "@xioflow/kernel@$version" --json 2>/dev/null)"; then
+              echo "$metadata" | node -e '
+                const fs = require("fs");
+                const info = JSON.parse(fs.readFileSync(0, "utf8"));
+                const attestations = info.dist?.attestations;
+                if (!attestations?.provenance) {
+                  console.error("published version has no provenance attestation");
+                  process.exit(1);
+                }
+                console.log(`provenance: ${JSON.stringify(attestations.provenance)}`);
+              '
+              echo "verified @xioflow/kernel@$version"
+              exit 0
+            fi
+            echo "attempt $attempt/20: registry has not indexed $version yet; retrying in 30s"
+            sleep 30
+          done
+          echo "::error::registry never exposed @xioflow/kernel@$version (index lag); re-run this job to verify"
+          exit 1
