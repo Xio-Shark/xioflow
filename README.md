@@ -95,6 +95,25 @@ The kernel records execution facts (state, output evidence, artifact references)
 
 ## Design notes
 
+### Verify your own runtime
+
+The package ships the same 15-item contract suite that the kernel itself is tested against, so an embedding runtime can prove its consumer honors these guarantees:
+
+```js
+import { defineContractTestSuite } from '@xioflow/kernel/testing';
+
+defineContractTestSuite('My Agent Runtime', async () => ({
+  domain,
+  driver,
+  supervisor,
+  tempDir,
+  workflowType: 'memory', // or 'headless' | 'three_piece'
+  cleanup: async () => domain.close(),
+}));
+```
+
+`vitest` is an optional peer dependency, and the subpath is only loaded if you import it.
+
 - Persistence is SQLite with WAL and `synchronous = FULL`, so committed facts survive power loss.
 - One execution domain is one workspace-scoped store plus one active owner. Isolation is rebuilt from the store before any new operation is admitted.
 - Hard resource requests (`maxMemoryBytes`, `maxPids`, `maxCpuTimeMs` with `enforcement: 'hard'`) are rejected at admission with `UnsupportedCapabilityError` on platforms that cannot enforce them, instead of degrading silently. The remaining capability flags are reported truthfully for callers to inspect, but are not enforced by admission in 0.1.

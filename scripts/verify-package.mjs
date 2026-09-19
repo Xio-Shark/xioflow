@@ -37,7 +37,15 @@ const tarball = path.join(packDir, packInfo.filename);
 console.log(`    ${packInfo.filename}: ${(packInfo.size / 1024).toFixed(1)} KiB, ${packInfo.entryCount} files`);
 
 const packed = packInfo.files.map((file) => file.path).sort();
-for (const required of ['LICENSE', 'README.md', 'package.json', 'dist/index.js', 'dist/index.d.ts']) {
+for (const required of [
+  'LICENSE',
+  'README.md',
+  'package.json',
+  'dist/index.js',
+  'dist/index.d.ts',
+  'dist/testing/contract-suite.js',
+  'dist/testing/contract-suite.d.ts',
+]) {
   if (!packed.includes(required)) {
     throw new Error(`tarball is missing ${required}`);
   }
@@ -57,6 +65,10 @@ fs.copyFileSync(consumerSrc, path.join(appDir, 'consumer.mjs'));
 
 console.log('4/4 run embedder contract checks');
 run(process.execPath, ['consumer.mjs'], appDir);
+
+// The ./testing subpath needs vitest, so it is validated in-repo rather than in the
+// dependency-free staging app.
+run(process.execPath, ['--input-type=module', '-e', "await import('./dist/testing/contract-suite.js')"], pkgDir);
 
 fs.rmSync(staging, { recursive: true, force: true });
 console.log(`\nPASS: ${packInfo.filename} installs clean and satisfies every embedder check`);
