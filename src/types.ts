@@ -119,9 +119,17 @@ export interface ProcessOperationResult extends BaseResult {
   signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
-  isTruncated: boolean;            // 标记输出是否达到有界上限被截断
-  outputRef?: string;              // 溢出时完整流转储 (spill) 到 artifacts 的物理文件引用
-  outputHash?: string;             // 产物流完整 SHA-256 哈希
+  isTruncated: boolean;            // 任一输出流达到有界上限（聚合标记）
+  stdoutTruncated?: boolean;       // stdout 逐流截断标记
+  stderrTruncated?: boolean;       // stderr 逐流截断标记
+  stdoutRef?: string;              // stdout 被截断时的完整流转储文件
+  stderrRef?: string;              // stderr 被截断时的完整流转储文件
+  stdoutBytes?: number;            // stdout 实际总字节数（含未保留部分）
+  stderrBytes?: number;            // stderr 实际总字节数（含未保留部分）
+  stdoutHash?: string;             // stdout 全流 SHA-256
+  stderrHash?: string;             // stderr 全流 SHA-256
+  outputRef?: string;              // 兼容字段：第一个被截断流的转储引用
+  outputHash?: string;             // 兼容字段：stdout 哈希（无 stdout 时为 stderr 哈希）
   terminationReason?: TerminationReason;
   peakMemoryBytes?: number;
   cpuTimeMs?: number;

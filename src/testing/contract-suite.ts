@@ -108,6 +108,11 @@ export function defineContractTestSuite(
       expect(result.status).toBe('succeeded');
       expect(result.exitCode).toBe(0);
       expect(result.isTruncated).toBe(true);
+      expect(result.stdoutTruncated).toBe(true);
+      expect(result.stderrTruncated).toBe(false);
+      expect(result.stdoutBytes).toBeGreaterThanOrEqual(12 * 1024 * 1024);
+      expect(result.stdoutRef).toBeTruthy();
+      expect(result.stdoutHash).toMatch(/^[0-9a-f]{64}$/);
       expect(result.stdout.length).toBeLessThanOrEqual(10 * 1024 * 1024);
       expect(domain.isResourceLocked('res:c2')).toBe(false);
     });

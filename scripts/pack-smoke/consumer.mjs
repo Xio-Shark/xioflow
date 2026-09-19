@@ -105,12 +105,51 @@ try {
   });
   assert.equal(big.status, 'succeeded');
   assert.equal(big.isTruncated, true);
+  assert.equal(big.stdoutTruncated, true);
+  assert.equal(big.stderrTruncated, false);
+  assert.equal(big.stdoutBytes, totalBytes);
+  assert.match(big.stdoutHash, /^[0-9a-f]{64}$/);
   assert.equal(Buffer.byteLength(big.stdout, 'utf8'), maxBytes);
   assert.ok(big.outputRef && fs.existsSync(big.outputRef), 'spill file must exist');
   const spilled = fs.readFileSync(big.outputRef);
   assert.equal(spilled.length, totalBytes);
   assert.equal(crypto.createHash('sha256').update(spilled).digest('hex'), big.outputHash);
   ok('bounded drain + spill + hash', `memory=${Buffer.byteLength(big.stdout)}B spill=${spilled.length}B`);
+
+  // 2b. Environment policy is explicit: a whitelist means exactly that, and
+  //     inheritEnv:false yields an empty environment.
+  ensureRun('run-env');
+  const envProbe = await supervisor.executeProcess({
+    runId: 'run-env',
+    opId: 'op-env',
+    name: 'env-exactness',
+    command: {
+      execPath: process.execPath,
+      args: [
+        '-e',
+        "process.stdout.write((process.env.XIO_PROBE ?? 'unset') + '|' + (process.env.PATH ? 'has-path' : 'no-path'))",
+      ],
+      cwd: workspace,
+      envWhiteList: { XIO_PROBE: 'visible' },
+    },
+    requiredResources: ['embed:env'],
+  });
+  assert.equal(envProbe.stdout, 'visible|no-path');
+
+  const emptyEnv = await supervisor.executeProcess({
+    runId: 'run-env',
+    opId: 'op-env-empty',
+    name: 'env-empty',
+    command: {
+      execPath: process.execPath,
+      args: ['-e', "process.stdout.write(process.env.XIO_PROBE ?? 'unset')"],
+      cwd: workspace,
+      inheritEnv: false,
+    },
+    requiredResources: ['embed:env'],
+  });
+  assert.equal(emptyEnv.stdout, 'unset');
+  ok('env policy is explicit', 'whitelist exact, inheritEnv:false empty');
 
   // 3. Stop pipeline: lease is released only after the stop is confirmed.
   ensureRun('run-cancel');

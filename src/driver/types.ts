@@ -4,7 +4,16 @@ export interface StructuredCommand {
   execPath: string;
   args: string[];
   cwd: string;
+  /**
+   * 显式环境变量白名单：提供时按原样使用，绝不注入宿主 PATH。
+   * 需要 PATH 时请自行放入白名单（发行版通常有更严格的密钥剔除策略）。
+   */
   envWhiteList?: Record<string, string>;
+  /**
+   * 未提供 envWhiteList 时是否继承宿主 process.env，默认 true。
+   * 设为 false 时子进程得到空环境（故障关闭，适合安全敏感调用方）。
+   */
+  inheritEnv?: boolean;
 }
 
 export interface ProcessIdentity {
