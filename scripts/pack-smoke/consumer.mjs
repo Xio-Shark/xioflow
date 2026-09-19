@@ -83,6 +83,7 @@ try {
   });
   assert.equal(bad.status, 'failed');
   assert.equal(bad.exitCode, 127);
+  assert.match(bad.spawnFailure ?? '', /nonexistent-xioflow-binary/);
   assert.equal(store.getOperation('op-bad').status, 'done');
   assert.equal(domain.isResourceLocked('embed:bad'), false);
   ok('no fake running', `status=${bad.status} exitCode=${bad.exitCode}`);

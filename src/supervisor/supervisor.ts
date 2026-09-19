@@ -122,6 +122,7 @@ export class ProcessSupervisor {
         signal: null,
         stdout: '',
         stderr: spawnError?.message || String(spawnError),
+        spawnFailure: spawnError?.message || String(spawnError),
         isTruncated: false,
         identityVerification: 'not_original_process',
         durationMs: Date.now() - startTime,

@@ -69,6 +69,7 @@ describe('Task 02: Real Platform Driver, Stopping Pipeline & Headless Contract T
     expect(result.status).toBe('failed');
     expect(result.exitCode).toBe(127);
     expect(result.identityVerification).toBe('not_original_process');
+    expect(result.spawnFailure).toContain('binary_xyz');
 
     // 验证资源已立即释放，没有假挂起
     expect(domain.isResourceLocked('res:dummy')).toBe(false);
