@@ -8,6 +8,15 @@ import { ProcessSupervisor } from '../../src/supervisor/supervisor.js';
 import { RecoveryEngine } from '../../src/recovery/engine.js';
 import { PlatformDriver, ProcessIdentity, StopProcessResult } from '../../src/driver/types.js';
 
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe('Task 02: Real Platform Driver, Stopping Pipeline & Headless Contract Tests', () => {
   let tempDir: string;
   let domain: ExecutionDomain;
@@ -537,4 +546,40 @@ setTimeout(() => {
     expect(earlyExit.exitCode).toBe(0);
     expect(domain.isResourceLocked('res:stdin')).toBe(false);
   });
+
+  it('12. 根进程退出后仍持有管道的后代被回收，保留真实退出事实而不挂到超时', async () => {
+    const script = [
+      "import { spawn } from 'node:child_process';",
+      // 后代留在受管进程组内，且忽略 SIGTERM，持有继承来的 stdout 管道
+      "const child = spawn(process.execPath, ['-e', 'process.on(\"SIGTERM\",()=>{}); setInterval(()=>{},1000)'], { stdio: ['ignore','inherit','inherit'] });",
+      "process.stdout.write(String(child.pid)+'\\n');",
+      "setTimeout(() => process.exit(0), 30);",
+    ].join('');
+
+    const started = Date.now();
+    const result = await supervisor.executeProcess({
+      runId: 'run-drv',
+      opId: 'op-residual-group',
+      name: 'residual-group',
+      command: {
+        execPath: process.execPath,
+        args: ['-e', script],
+        cwd: tempDir,
+      },
+      requiredResources: ['res:residual'],
+      timeoutMs: 10_000,
+      drainTimeoutMs: 300,
+    });
+
+    // 不能挂到超时：root 已退出，操作应按真实退出事实收尾
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(result.status).toBe('succeeded');
+    expect(result.exitCode).toBe(0);
+    expect(result.residualProcessesReaped).toBe(true);
+    expect(domain.isResourceLocked('res:residual')).toBe(false);
+
+    const descendant = Number.parseInt(result.stdout.trim(), 10);
+    expect(Number.isInteger(descendant)).toBe(true);
+    expect(isPidAlive(descendant)).toBe(false);
+  }, 15_000);
 });
