@@ -5,6 +5,11 @@ export interface StructuredCommand {
   args: string[];
   cwd: string;
   /**
+   * 一次性 stdin 管道内容：提供时创建 stdin 管道，写入后立即关闭。
+   * 子进程提前退出导致的 EPIPE 不是启动失败，由退出码体现。
+   */
+  stdin?: string | Uint8Array;
+  /**
    * 显式环境变量白名单：提供时按原样使用，绝不注入宿主 PATH。
    * 需要 PATH 时请自行放入白名单（发行版通常有更严格的密钥剔除策略）。
    */

@@ -48,7 +48,7 @@ export function defineContractTestSuite(
   consumerName: string,
   createContext: () => Promise<ConsumerContext>
 ) {
-  describe(`15-Item Consistency Contract Suite: [${consumerName}]`, () => {
+  describe(`16-Item Consistency Contract Suite: [${consumerName}]`, () => {
     let ctx: ConsumerContext;
 
     beforeEach(async () => {
@@ -703,6 +703,53 @@ export function defineContractTestSuite(
       const fileBuffer = fs.readFileSync(result.outputRef!);
       const expectedHash = crypto.createHash('sha256').update(fileBuffer).digest('hex');
       expect(result.outputHash).toBe(expectedHash);
+    });
+
+    it('契约 16: stdin 一次性管道透传，写入后关闭且子进程提前退出不产生假失败', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c16', 'run-c16');
+      const upperCaseStdinScript = `
+        const chunks = [];
+        process.stdin.on('data', (c) => chunks.push(c));
+        process.stdin.on('end', () => {
+          process.stdout.write(Buffer.concat(chunks).toString('utf8').toUpperCase());
+        });
+      `;
+
+      const echoed = await supervisor.executeProcess({
+        runId: 'run-c16',
+        opId: 'op-c16-stdin',
+        name: 'stdin-echo',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', upperCaseStdinScript],
+          cwd: tempDir,
+          stdin: 'contract-16 payload',
+        },
+        requiredResources: ['res:c16'],
+      });
+
+      // 只有收到 EOF（写入端已关闭）子进程才会输出，因此同时证明写入与关闭
+      expect(echoed.status).toBe('succeeded');
+      expect(echoed.exitCode).toBe(0);
+      expect(echoed.stdout).toBe('CONTRACT-16 PAYLOAD');
+      expect(domain.isResourceLocked('res:c16')).toBe(false);
+
+      const earlyExit = await supervisor.executeProcess({
+        runId: 'run-c16',
+        opId: 'op-c16-stdin-epipe',
+        name: 'stdin-epipe',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', 'process.exit(0)'],
+          cwd: tempDir,
+          stdin: 'y'.repeat(4 * 1024 * 1024),
+        },
+        requiredResources: ['res:c16'],
+      });
+
+      expect(earlyExit.status).toBe('succeeded');
+      expect(earlyExit.exitCode).toBe(0);
     });
   });
 }

@@ -70,6 +70,15 @@ domain.close(); // releases the owner lease and the domain lock
 
 `requiredResources` are arbitrary exclusive lease IDs. Two operations requesting the same ID never run concurrently: the second one waits up to `waitTimeoutMs`, or fails with a `ResourceConflictError` naming the current holder.
 
+`StructuredCommand` fields decide the child's I/O and environment explicitly:
+
+| Field | Behavior |
+| --- | --- |
+| `args` | argv, never wrapped in a shell |
+| `stdin` | `string \| Uint8Array`, written to a one-shot stdin pipe that is closed right after; a child that exits without reading it is an ordinary exit, not a spawn failure |
+| `envWhiteList` | exact environment, nothing injected (no implicit `PATH`) |
+| `inheritEnv` | only when no whitelist is given; `false` yields an empty environment |
+
 To cancel, call `await supervisor.cancelOperation('op-1', graceMs)`. It returns `{ stopped, scope, residualPids? }`. The pending `executeProcess` promise then resolves with `status: 'cancelled'`, or with `status: 'indeterminate'` when the driver cannot confirm that the process actually stopped, in which case its leases stay locked.
 
 ## Crash recovery
@@ -98,7 +107,7 @@ The kernel records execution facts (state, output evidence, artifact references)
 
 ### Verify your own runtime
 
-The package ships the same 15-item contract suite that the kernel itself is tested against, so an embedding runtime can prove its consumer honors these guarantees:
+The package ships the same 16-item contract suite that the kernel itself is tested against, so an embedding runtime can prove its consumer honors these guarantees:
 
 ```js
 import { defineContractTestSuite } from '@xioflow/kernel/testing';
