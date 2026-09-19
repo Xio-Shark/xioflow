@@ -131,7 +131,17 @@ defineContractTestSuite('My Agent Runtime', async () => ({
 
 ## Status
 
-0.1.0, pre-1.0: the API may change. Not implemented yet: Linux cgroup v2 backend (hard memory/CPU/PID enforcement), enforced domain-wide memory budgets, artifact retrieval helpers.
+0.1.1, pre-1.0: the API may change. Not implemented yet: Linux cgroup v2 backend (hard memory/CPU/PID enforcement), enforced domain-wide memory budgets, artifact retrieval helpers.
+
+## Releasing
+
+Releases are tag-driven and use npm Trusted Publishing (OIDC), so there is no publish token anywhere:
+
+1. Bump `version` in `package.json`, commit, and push to `main`.
+2. Push the matching tag, e.g. `git tag v0.1.2 && git push origin v0.1.2`.
+3. `.github/workflows/release.yml` re-runs typecheck, tests and the pack smoke test, refuses a tag that does not match `package.json`, then runs `npm publish --provenance`.
+
+One-time setup on npmjs.com (package settings, Trusted Publisher, GitHub Actions): organization `Xio-Shark`, repository `xioflow`, workflow filename `release.yml`, environment left empty. The workflow's last step verifies the published version and its provenance attestation; npm's registry index can lag several minutes behind the upload, so that step polls and may need a job re-run.
 
 ## License
 
