@@ -290,6 +290,14 @@ export class ProcessSupervisor {
         stdout: stdoutData.content,
         stderr: stderrData.content,
         isTruncated,
+        stdoutTruncated: stdoutData.isTruncated,
+        stderrTruncated: stderrData.isTruncated,
+        stdoutRef: stdoutData.outputRef,
+        stderrRef: stderrData.outputRef,
+        stdoutBytes: stdoutData.bytesSeen,
+        stderrBytes: stderrData.bytesSeen,
+        stdoutHash: stdoutData.outputHash,
+        stderrHash: stderrData.outputHash,
         outputRef,
         outputHash,
         terminationReason,
@@ -421,12 +429,19 @@ export class ProcessSupervisor {
     spillFilePath?: string,
     onChunk?: (bytes: number) => void
   ): {
-    getResult: () => { content: string; isTruncated: boolean; outputRef?: string; outputHash?: string };
+    getResult: () => {
+      content: string;
+      isTruncated: boolean;
+      outputRef?: string;
+      outputHash?: string;
+      bytesSeen: number;
+    };
     finishPromise: Promise<void>;
     forceFinalize: () => void;
   } {
     const chunks: Buffer[] = [];
     let currentBytes = 0;
+    let bytesSeen = 0;
     let isTruncated = false;
     let spillFd: number | null = null;
     const hash = crypto.createHash('sha256');
@@ -462,6 +477,7 @@ export class ProcessSupervisor {
 
       stream.on('data', (chunk: Buffer | string) => {
         const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        bytesSeen += buf.length;
         if (onChunk) {
           try {
             onChunk(buf.length);
@@ -505,6 +521,7 @@ export class ProcessSupervisor {
           isTruncated,
           outputRef: isTruncated && spillFilePath ? spillFilePath : undefined,
           outputHash,
+          bytesSeen,
         };
       },
       finishPromise,

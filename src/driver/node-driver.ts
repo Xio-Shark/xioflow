@@ -35,9 +35,16 @@ export class NodePlatformDriver implements PlatformDriver {
     return new Promise<ManagedProcessHandle>((resolve, reject) => {
       let child: ChildProcess;
       try {
+        // envWhiteList 是精确语义：给了什么就是什么，不静默补 PATH。
+        const childEnv: NodeJS.ProcessEnv = command.envWhiteList
+          ? { ...command.envWhiteList }
+          : command.inheritEnv === false
+            ? {}
+            : process.env;
+
         child = spawn(command.execPath, command.args, {
           cwd: command.cwd,
-          env: command.envWhiteList ? { ...command.envWhiteList, PATH: process.env.PATH || '' } : process.env,
+          env: childEnv,
           detached: true,
           stdio: ['ignore', 'pipe', 'pipe'],
         });
