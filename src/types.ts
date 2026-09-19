@@ -133,6 +133,7 @@ export interface ProcessOperationResult extends BaseResult {
   terminationReason?: TerminationReason;
   peakMemoryBytes?: number;
   cpuTimeMs?: number;
+  residualProcessesReaped?: boolean; // 根进程退出后仍持有管道的后代已被停止流水线回收
   identityVerification: IdentityVerificationResult;
 }
 

@@ -174,6 +174,34 @@ try {
   assert.equal(domain.isResourceLocked('embed:stdin'), false);
   ok('one-shot stdin pipe', 'payload written, pipe closed after write');
 
+  // 2d. A descendant that outlives the root and keeps the pipes open must be
+  //     reaped so the operation reports the root's real exit facts.
+  ensureRun('run-residual');
+  const residualScript = [
+    "import { spawn } from 'node:child_process';",
+    "const child = spawn(process.execPath, ['-e', 'process.on(\"SIGTERM\",()=>{}); setInterval(()=>{},1000)'], { stdio: ['ignore','inherit','inherit'] });",
+    "process.stdout.write(String(child.pid)+'\\n');",
+    'setTimeout(() => process.exit(0), 30);',
+  ].join('');
+  const residualStarted = Date.now();
+  const residual = await supervisor.executeProcess({
+    runId: 'run-residual',
+    opId: 'op-residual',
+    name: 'residual-descendant',
+    command: { execPath: process.execPath, args: ['-e', residualScript], cwd: workspace },
+    requiredResources: ['embed:residual'],
+    timeoutMs: 10_000,
+    drainTimeoutMs: 300,
+  });
+  assert.equal(residual.status, 'succeeded');
+  assert.equal(residual.exitCode, 0);
+  assert.equal(residual.residualProcessesReaped, true);
+  assert.ok(Date.now() - residualStarted < 5_000, 'residual descendant must not block until timeout');
+  const residualPid = Number.parseInt(residual.stdout.trim(), 10);
+  assert.ok(Number.isInteger(residualPid) && residualPid > 0, 'descendant pid must be captured');
+  assert.throws(() => process.kill(residualPid, 0), 'residual descendant must be dead');
+  ok('residual descendant reaped', `descendant=${residualPid} reaped=${residual.residualProcessesReaped}`);
+
   // 3. Stop pipeline: lease is released only after the stop is confirmed.
   ensureRun('run-cancel');
   const pending = supervisor.executeProcess({

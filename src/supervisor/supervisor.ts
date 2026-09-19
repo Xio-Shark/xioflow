@@ -12,6 +12,7 @@ import {
 import {
   Operation,
   ProcessOperationResult,
+  IndeterminateResult,
   KernelRunStatus,
   TerminationReason,
   ResourceBudget,
@@ -215,9 +216,10 @@ export class ProcessSupervisor {
     }
 
     try {
-      // 等待底层退出或超时触发
+      // 等待根进程退出或超时触发；有 onRootExit 时不等待持有管道的后代
+      const rootExitPromise = handle.onRootExit ?? handle.onExit;
       const exitOrTimeout = await Promise.race([
-        handle.onExit.then((res) => ({ type: 'exit' as const, res })),
+        rootExitPromise.then((res) => ({ type: 'exit' as const, res })),
         timeoutPromise.then((type) => ({ type, res: null })),
       ]);
 
@@ -239,10 +241,36 @@ export class ProcessSupervisor {
       const drainPromise = Promise.all([stdoutDrainer.finishPromise, stderrDrainer.finishPromise]);
       const drainTimeoutPromise = new Promise((resolve) => setTimeout(resolve, drainTimeoutMs));
 
-      const drained = await Promise.race([
+      let drained = await Promise.race([
         drainPromise.then(() => true),
         drainTimeoutPromise.then(() => false),
       ]);
+
+      // 排空超时说明根进程已退出但仍有后代持有管道：回收整个进程组，
+      // 否则操作会一直挂到超时，且 root 的真实退出事实会被超时掩盖。
+      let residualProcessesReaped = false;
+      if (!drained && exitOrTimeout.type === 'exit') {
+        const reapResult = await this.driver.terminate(handle.identity, 1500);
+        if (!reapResult.stopped) {
+          const indetResult: IndeterminateResult = {
+            kind: 'indeterminate',
+            status: 'indeterminate',
+            reason: `Process ${handle.identity.pid} exited but residual descendants could not be confirmed stopped: ${reapResult.errorDetails}`,
+            recoveryGuidance: 'Residual PID detected. Inspect system processes manually before releasing resources.',
+            durationMs: Date.now() - startTime,
+            completedAt: new Date().toISOString(),
+          };
+          this.domain.getStore().recordOperationResult(options.opId, indetResult, false);
+          this.domain.getStore().updateRunStatus(options.runId, 'indeterminate', 'crash_detected');
+          return indetResult as unknown as ProcessOperationResult;
+        }
+        residualProcessesReaped = true;
+        // 被杀死的后代释放管道后，给排空最后一次机会
+        drained = await Promise.race([
+          drainPromise.then(() => true),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250)),
+        ]);
+      }
 
       if (!drained) {
         // 排空超时路径强制调用 fsyncSync + closeSync 结清刷盘
@@ -298,6 +326,7 @@ export class ProcessSupervisor {
         stderrBytes: stderrData.bytesSeen,
         stdoutHash: stdoutData.outputHash,
         stderrHash: stderrData.outputHash,
+        ...(residualProcessesReaped ? { residualProcessesReaped: true } : {}),
         outputRef,
         outputHash,
         terminationReason,
@@ -314,7 +343,15 @@ export class ProcessSupervisor {
 
       const existingOp = this.domain.getStore().getOperation(options.opId);
       if (existingOp && existingOp.status === 'done') {
-        return existingOp.result as unknown as ProcessOperationResult;
+        const storedResult = existingOp.result as unknown as { status?: string };
+        if (storedResult?.status === 'indeterminate') {
+          // 驱动无法确认停止：保留隔离事实与资源锁，绝不覆盖
+          return existingOp.result as unknown as ProcessOperationResult;
+        }
+        // 内部停止流水线（超时 / 资源超限）会先写一份粗糙终态；这里用本次采集到的
+        // 真实退出码、输出与耗时覆盖它，避免把已捕获的输出证据丢掉。
+        this.domain.getStore().recordOperationResult(options.opId, result, true);
+        return result;
       }
 
       // 6. [事务提交结果与释放资源]

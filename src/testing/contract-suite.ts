@@ -48,7 +48,7 @@ export function defineContractTestSuite(
   consumerName: string,
   createContext: () => Promise<ConsumerContext>
 ) {
-  describe(`16-Item Consistency Contract Suite: [${consumerName}]`, () => {
+  describe(`17-Item Consistency Contract Suite: [${consumerName}]`, () => {
     let ctx: ConsumerContext;
 
     beforeEach(async () => {
@@ -751,5 +751,42 @@ export function defineContractTestSuite(
       expect(earlyExit.status).toBe('succeeded');
       expect(earlyExit.exitCode).toBe(0);
     });
+
+    it('契约 17: 根进程退出后仍持有管道的后代被回收，操作不挂到超时', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c17', 'run-c17');
+      const script = [
+        "import { spawn } from 'node:child_process';",
+        "const child = spawn(process.execPath, ['-e', 'process.on(\"SIGTERM\",()=>{}); setInterval(()=>{},1000)'], { stdio: ['ignore','inherit','inherit'] });",
+        "process.stdout.write(String(child.pid)+'\\n');",
+        "setTimeout(() => process.exit(0), 30);",
+      ].join('');
+
+      const started = Date.now();
+      const result = await supervisor.executeProcess({
+        runId: 'run-c17',
+        opId: 'op-c17-residual',
+        name: 'residual-descendant',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', script],
+          cwd: tempDir,
+        },
+        requiredResources: ['res:c17'],
+        timeoutMs: 10_000,
+        drainTimeoutMs: 300,
+      });
+
+      // root 已退出：操作按真实退出事实收尾，而不是等到 10 秒超时
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(result.status).toBe('succeeded');
+      expect(result.exitCode).toBe(0);
+      expect(result.residualProcessesReaped).toBe(true);
+      expect(domain.isResourceLocked('res:c17')).toBe(false);
+
+      const descendant = Number.parseInt(result.stdout.trim(), 10);
+      expect(Number.isInteger(descendant)).toBe(true);
+      expect(() => process.kill(descendant, 0)).toThrow();
+    }, 15_000);
   });
 }

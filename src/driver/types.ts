@@ -40,6 +40,11 @@ export interface ManagedProcessHandle {
   identity: ProcessIdentity;
   stdout: NodeJS.ReadableStream;
   stderr: NodeJS.ReadableStream;
+  /**
+   * 根进程自身的退出事实，不等待仍持有管道的后代（onExit 的 close 语义会等）。
+   * 未提供时监督器退化为 onExit。
+   */
+  onRootExit?: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>;
   onExit: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>;
   rawProcess?: any;
 }

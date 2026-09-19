@@ -117,10 +117,26 @@ export class NodePlatformDriver implements PlatformDriver {
           }
         );
 
+        // 根进程真实退出事实：后代仍持有管道时 close 会推迟，这里的 exit 不会。
+        const rootExitPromise = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>(
+          (rootResolve) => {
+            let settled = false;
+            const settle = (exitCode: number | null, signal: NodeJS.Signals | null) => {
+              if (settled) return;
+              settled = true;
+              rootResolve({ exitCode, signal });
+            };
+            child.on('exit', (exitCode, signal) => settle(exitCode, signal));
+            child.on('error', () => settle(1, null));
+            child.on('close', (exitCode, signal) => settle(exitCode, signal));
+          }
+        );
+
         const handle: ManagedProcessHandle = {
           identity,
           stdout: child.stdout!,
           stderr: child.stderr!,
+          onRootExit: rootExitPromise,
           onExit: exitPromise,
           rawProcess: child,
         };

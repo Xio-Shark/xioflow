@@ -1,6 +1,6 @@
 {
   "name": "@xioflow/kernel",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Supervised execution kernel for AI agents: intent-first spawn, confirmed stop pipeline, honest crash recovery",
   "license": "MIT",
   "type": "module",
