@@ -1,0 +1,56 @@
+{
+  "name": "@xioflow/kernel",
+  "version": "0.1.0",
+  "description": "Supervised execution kernel for AI agents: intent-first spawn, confirmed stop pipeline, honest crash recovery",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Xio-Shark/xioflow.git"
+  },
+  "homepage": "https://github.com/Xio-Shark/xioflow#readme",
+  "bugs": {
+    "url": "https://github.com/Xio-Shark/xioflow/issues"
+  },
+  "packageManager": "pnpm@10.32.1",
+  "keywords": [
+    "ai-agent",
+    "agent-runtime",
+    "process-supervisor",
+    "crash-recovery",
+    "orchestration"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "verify:package": "node scripts/verify-package.mjs",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  }
+}
