@@ -32,6 +32,13 @@ export class NodePlatformDriver implements PlatformDriver {
   private descendantPollers: Map<number, NodeJS.Timeout> = new Map();
 
   public async spawn(command: StructuredCommand): Promise<ManagedProcessHandle> {
+    const stdinPayload =
+      command.stdin === undefined
+        ? undefined
+        : typeof command.stdin === 'string'
+          ? Buffer.from(command.stdin, 'utf8')
+          : Buffer.from(command.stdin);
+
     return new Promise<ManagedProcessHandle>((resolve, reject) => {
       let child: ChildProcess;
       try {
@@ -46,7 +53,7 @@ export class NodePlatformDriver implements PlatformDriver {
           cwd: command.cwd,
           env: childEnv,
           detached: true,
-          stdio: ['ignore', 'pipe', 'pipe'],
+          stdio: [stdinPayload === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         });
       } catch (err) {
         return reject(err);
@@ -119,6 +126,13 @@ export class NodePlatformDriver implements PlatformDriver {
         };
 
         this.activeHandles.set(pid, { handle, child, startTime: startTimeMonotonic });
+
+        // 一次性 stdin：写入后关闭。子进程不读就退出的 EPIPE 不是启动失败，由退出码体现。
+        if (stdinPayload !== undefined && child.stdin) {
+          child.stdin.on('error', () => {});
+          child.stdin.end(stdinPayload);
+        }
+
         resolve(handle);
       });
     });

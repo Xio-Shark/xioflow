@@ -325,11 +325,11 @@ describe('Task 02: Real Platform Driver, Stopping Pipeline & Headless Contract T
     expect(result.terminationReason).toBe('output_exceeded');
     expect(domain.isResourceLocked('res:soft-output')).toBe(false);
 
-    // 验证 run 级终态原因同步写入
-    const run = domain.getStore().getRun('run-drv');
-    expect(run?.terminationReason).toBe('output_exceeded');
-    expect(run?.status).toBe('failed');
-  });
+      // 验证 run 级终态原因同步写入
+      const run = domain.getStore().getRun('run-drv');
+      expect(run?.terminationReason).toBe('output_exceeded');
+      expect(run?.status).toBe('failed');
+    });
 
   it('9. 复杂孤儿逃逸检测：中间父进程先退出导致 PPID 断链变 1 场景下诚实探测到逃逸孤儿', async () => {
     const bPidFile = path.join(tempDir, 'b.pid');
@@ -492,5 +492,49 @@ setTimeout(() => {
         status: 'pending',
       });
     }).toThrowError(EpochFencedError);
+  });
+
+  it('11. stdin 一次性管道：内容完整透传并在写入后关闭，EPIPE 不产生假失败', async () => {
+    const echoStdinScript = `
+      const chunks = [];
+      process.stdin.on('data', (c) => chunks.push(c));
+      process.stdin.on('end', () => process.stdout.write(Buffer.concat(chunks).toString('utf8').toUpperCase()));
+    `;
+
+    const echoed = await supervisor.executeProcess({
+      runId: 'run-drv',
+      opId: 'op-stdin-echo',
+      name: 'stdin-echo',
+      command: {
+        execPath: process.execPath,
+        args: ['-e', echoStdinScript],
+        cwd: tempDir,
+        stdin: 'hello xioflow',
+      },
+      requiredResources: ['res:stdin'],
+    });
+
+    expect(echoed.status).toBe('succeeded');
+    expect(echoed.exitCode).toBe(0);
+    // 子进程收到 EOF（写入端已关闭）才会输出，证明 stdin 被写入并关闭
+    expect(echoed.stdout).toBe('HELLO XIOFLOW');
+
+    // 子进程不读 stdin 就退出时，EPIPE 由退出码体现，不能变成启动失败
+    const earlyExit = await supervisor.executeProcess({
+      runId: 'run-drv',
+      opId: 'op-stdin-epipe',
+      name: 'stdin-epipe',
+      command: {
+        execPath: process.execPath,
+        args: ['-e', 'process.exit(0)'],
+        cwd: tempDir,
+        stdin: 'x'.repeat(4 * 1024 * 1024),
+      },
+      requiredResources: ['res:stdin'],
+    });
+
+    expect(earlyExit.status).toBe('succeeded');
+    expect(earlyExit.exitCode).toBe(0);
+    expect(domain.isResourceLocked('res:stdin')).toBe(false);
   });
 });

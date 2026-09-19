@@ -151,6 +151,29 @@ try {
   assert.equal(emptyEnv.stdout, 'unset');
   ok('env policy is explicit', 'whitelist exact, inheritEnv:false empty');
 
+  // 2c. One-shot stdin: the payload is written and the pipe is closed, so a
+  //     child that reads until EOF still produces its output.
+  ensureRun('run-stdin');
+  const stdinEcho = await supervisor.executeProcess({
+    runId: 'run-stdin',
+    opId: 'op-stdin',
+    name: 'stdin-echo',
+    command: {
+      execPath: process.execPath,
+      args: [
+        '-e',
+        "const c=[];process.stdin.on('data',(b)=>c.push(b));process.stdin.on('end',()=>process.stdout.write(Buffer.concat(c).toString('utf8')))",
+      ],
+      cwd: workspace,
+      stdin: 'embedder stdin payload',
+    },
+    requiredResources: ['embed:stdin'],
+  });
+  assert.equal(stdinEcho.status, 'succeeded');
+  assert.equal(stdinEcho.stdout, 'embedder stdin payload');
+  assert.equal(domain.isResourceLocked('embed:stdin'), false);
+  ok('one-shot stdin pipe', 'payload written, pipe closed after write');
+
   // 3. Stop pipeline: lease is released only after the stop is confirmed.
   ensureRun('run-cancel');
   const pending = supervisor.executeProcess({
