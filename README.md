@@ -144,13 +144,13 @@ defineContractTestSuite('My Agent Runtime', async () => ({
 
 ## Releasing
 
-Releases are tag-driven and use npm Trusted Publishing (OIDC), so there is no publish token anywhere:
+Releases are tag-driven. A tag always produces a GitHub Release; the npm upload is switched on separately, so a tag can never ship an artifact that is not traceable to this repository:
 
 1. Bump `version` in `package.json`, commit, and push to `main`.
-2. Push the matching tag, e.g. `git tag v0.1.2 && git push origin v0.1.2`.
-3. `.github/workflows/release.yml` re-runs typecheck, tests and the pack smoke test, refuses a tag that does not match `package.json`, then runs `npm publish --provenance`.
+2. Push the matching tag, e.g. `git tag v0.1.5 && git push origin v0.1.5`.
+3. `.github/workflows/release.yml` re-runs typecheck, tests and the pack smoke test, refuses a tag that does not match `package.json`, creates the GitHub Release, and — only when the repository variable `NPM_TRUSTED_PUBLISHING_ENABLED` is `true` — publishes with `npm publish --provenance` and verifies the attestation.
 
-One-time setup on npmjs.com (package settings, Trusted Publisher, GitHub Actions): organization `Xio-Shark`, repository `xioflow`, workflow filename `release.yml`, environment left empty. The workflow's last step verifies the published version and its provenance attestation; npm's registry index can lag several minutes behind the upload, so that step polls and may need a job re-run.
+One-time setup, in this order: (1) npmjs.com → package settings → Trusted Publisher → GitHub Actions: organization `Xio-Shark`, repository `xioflow`, workflow filename `release.yml`, environment left empty; (2) set the repository variable `NPM_TRUSTED_PUBLISHING_ENABLED=true`. Until both exist the publish job is skipped and the reason is printed in the `verify` job's log. npm's registry index can lag several minutes behind an upload, so the verification step polls and may need a job re-run.
 
 ## License
 
