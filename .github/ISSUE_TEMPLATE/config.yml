@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or usage help
+    url: https://github.com/Xio-Shark/xioflow/discussions
+    about: Ask about embedding the kernel, the contract suite, or design trade-offs.
+  - name: Security issue
+    url: https://github.com/Xio-Shark/xioflow/security/advisories/new
+    about: Report privately instead of opening a public issue.

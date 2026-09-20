@@ -1,0 +1,73 @@
+name: Bug report
+description: The kernel did something wrong, hung, or reported a state you do not believe.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Real output beats prose: a minimal script plus what
+        actually happened is usually enough to reproduce a supervisor bug.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, what you got instead.
+      placeholder: |
+        executeProcess({ command: { execPath: 'npm', args: ['test'], cwd } })
+        Expected: status 'succeeded'. Got: the promise never resolved until timeoutMs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: A script or test that reaches the problem. Redact secrets.
+      render: js
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Kernel version
+      placeholder: "0.1.4"
+    validations:
+      required: true
+
+  - type: input
+    id: runtime
+    attributes:
+      label: Node version and OS
+      placeholder: "Node 24.14.0, macOS 15.6"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which guarantee is involved?
+      options:
+        - Not sure
+        - Process containment / stop confirmation
+        - Residual or escaped descendants
+        - Lease release / resource locking
+        - Crash recovery / indeterminate handling
+        - Output capture, truncation or spill artifacts
+        - Environment / stdin handling
+        - Store, journal or epoch fencing
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: facts
+    attributes:
+      label: Recorded facts
+      description: |
+        If relevant, paste `store.getOperation(opId).result`, the `terminationReason`,
+        `residualProcessesReaped`, `identityVerification`, or lease state. Do not paste secrets.
+      render: json
+    validations:
+      required: false
