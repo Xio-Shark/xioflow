@@ -122,8 +122,35 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists"
+          version="${GITHUB_REF_NAME#v}"
+          notes_file="$(mktemp)"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" {flag=1; next}
+            flag && /^## \[/ {exit}
+            flag {print}
+          ' CHANGELOG.md > "$notes_file"
+
+          if [ ! -s "$notes_file" ]; then
+            echo "no changelog section for $version; falling back to generated notes"
+            rm "$notes_file"
+            notes_file=""
           else
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            printf '\n**Full changelog**: https://github.com/%s/blob/main/CHANGELOG.md\n' "$GITHUB_REPOSITORY" >> "$notes_file"
+          fi
+
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME exists; syncing notes"
+            if [ -n "$notes_file" ]; then
+              gh release edit "$GITHUB_REF_NAME" --notes-file "$notes_file"
+            fi
+          else
+            if [ -n "$notes_file" ]; then
+              gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file "$notes_file"
+            else
+              gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            fi
+          fi
+
+          if [ -n "$notes_file" ]; then
+            rm "$notes_file"
           fi
