@@ -135,6 +135,7 @@ export interface ProcessOperationResult extends BaseResult {
   peakMemoryBytes?: number;
   cpuTimeMs?: number;
   residualProcessesReaped?: boolean; // 根进程退出后仍持有管道的后代已被停止流水线回收
+  streamCallbackError?: string;      // onStreamChunk 回调抛出的首个错误（不中断排空）
   identityVerification: IdentityVerificationResult;
 }
 
