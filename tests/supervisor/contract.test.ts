@@ -583,4 +583,52 @@ setTimeout(() => {
     expect(Number.isInteger(descendant)).toBe(true);
     expect(isPidAlive(descendant)).toBe(false);
   }, 15_000);
+
+  it('13. 流式投影：chunk 实时转发，回调抛错只记录不中断排空', async () => {
+    const chunks: { stream: string; text: string }[] = [];
+    const result = await supervisor.executeProcess({
+      runId: 'run-drv',
+      opId: 'op-stream-project',
+      name: 'stream-project',
+      command: {
+        execPath: process.execPath,
+        args: [
+          '-e',
+          "process.stdout.write('out-1\\n'); process.stderr.write('err-1\\n'); process.stdout.write('out-2\\n')",
+        ],
+        cwd: tempDir,
+      },
+      requiredResources: ['res:stream'],
+      onStreamChunk: (stream, chunk) => {
+        chunks.push({ stream, text: chunk.toString('utf8') });
+      },
+    });
+
+    expect(result.status).toBe('succeeded');
+    expect(result.stdout).toBe('out-1\nout-2\n');
+    expect(result.stderr).toBe('err-1\n');
+    expect(chunks.filter((c) => c.stream === 'stdout').map((c) => c.text).join('')).toBe('out-1\nout-2\n');
+    expect(chunks.filter((c) => c.stream === 'stderr').map((c) => c.text).join('')).toBe('err-1\n');
+    expect(result.streamCallbackError).toBeUndefined();
+
+    const throwing = await supervisor.executeProcess({
+      runId: 'run-drv',
+      opId: 'op-stream-throwing',
+      name: 'stream-throwing',
+      command: {
+        execPath: process.execPath,
+        args: ['-e', "process.stdout.write('still-captured')"],
+        cwd: tempDir,
+      },
+      requiredResources: ['res:stream'],
+      onStreamChunk: () => {
+        throw new Error('projection boom');
+      },
+    });
+
+    // 回调抛错不能让操作失败或丢输出，但必须留下可见事实
+    expect(throwing.status).toBe('succeeded');
+    expect(throwing.stdout).toBe('still-captured');
+    expect(throwing.streamCallbackError).toBe('projection boom');
+  });
 });

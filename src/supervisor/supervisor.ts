@@ -32,6 +32,11 @@ export interface ExecuteProcessOptions {
   resourceBudget?: ResourceBudget;
   waitTimeoutMs?: number;
   artifactsDir?: string;
+  /**
+   * 流式投影：每个 stdout/stderr chunk 原样转发，不做缓冲或截断。
+   * 回调抛错不会中断排空，首个错误以 result.streamCallbackError 记录。
+   */
+  onStreamChunk?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void;
 }
 
 export class ProcessSupervisor {
@@ -171,8 +176,29 @@ export class ProcessSupervisor {
       }
     };
 
-    const stdoutDrainer = this.setupStreamDrainer(handle.stdout, maxBytes, stdoutSpillPath, onChunk);
-    const stderrDrainer = this.setupStreamDrainer(handle.stderr, maxBytes, stderrSpillPath, onChunk);
+    let streamCallbackError: string | undefined;
+    const forwardChunk = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+      if (!options.onStreamChunk) return;
+      try {
+        options.onStreamChunk(stream, chunk);
+      } catch (err) {
+        streamCallbackError ??= err instanceof Error ? err.message : String(err);
+      }
+    };
+    const stdoutDrainer = this.setupStreamDrainer(
+      handle.stdout,
+      maxBytes,
+      stdoutSpillPath,
+      onChunk,
+      forwardChunk('stdout')
+    );
+    const stderrDrainer = this.setupStreamDrainer(
+      handle.stderr,
+      maxBytes,
+      stderrSpillPath,
+      onChunk,
+      forwardChunk('stderr')
+    );
 
     let timeoutTimer: NodeJS.Timeout | null = null;
     const timeoutPromise =
@@ -328,6 +354,7 @@ export class ProcessSupervisor {
         stdoutHash: stdoutData.outputHash,
         stderrHash: stderrData.outputHash,
         ...(residualProcessesReaped ? { residualProcessesReaped: true } : {}),
+        ...(streamCallbackError ? { streamCallbackError } : {}),
         outputRef,
         outputHash,
         terminationReason,
@@ -465,7 +492,8 @@ export class ProcessSupervisor {
     stream: NodeJS.ReadableStream,
     maxBytes: number,
     spillFilePath?: string,
-    onChunk?: (bytes: number) => void
+    onChunk?: (bytes: number) => void,
+    onData?: (chunk: Buffer) => void
   ): {
     getResult: () => {
       content: string;
@@ -528,6 +556,10 @@ export class ProcessSupervisor {
           try {
             fs.writeSync(spillFd, buf);
           } catch {}
+        }
+
+        if (onData) {
+          onData(buf);
         }
 
         // 内存有界保留

@@ -48,7 +48,7 @@ export function defineContractTestSuite(
   consumerName: string,
   createContext: () => Promise<ConsumerContext>
 ) {
-  describe(`17-Item Consistency Contract Suite: [${consumerName}]`, () => {
+  describe(`18-Item Consistency Contract Suite: [${consumerName}]`, () => {
     let ctx: ConsumerContext;
 
     beforeEach(async () => {
@@ -789,5 +789,52 @@ export function defineContractTestSuite(
       expect(Number.isInteger(descendant)).toBe(true);
       expect(() => process.kill(descendant, 0)).toThrow();
     }, 15_000);
+
+    it('契约 18: 流式投影回调按流转发 chunk，回调抛错不中断排空', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c18', 'run-c18');
+      const stdoutChunks: string[] = [];
+      const stderrChunks: string[] = [];
+
+      const projected = await supervisor.executeProcess({
+        runId: 'run-c18',
+        opId: 'op-c18-stream',
+        name: 'stream-projection',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', "process.stdout.write('live-1\\n'); process.stderr.write('live-err\\n'); process.stdout.write('live-2\\n')"],
+          cwd: tempDir,
+        },
+        requiredResources: ['res:c18'],
+        onStreamChunk: (stream, chunk) => {
+          (stream === 'stdout' ? stdoutChunks : stderrChunks).push(chunk.toString('utf8'));
+        },
+      });
+
+      expect(projected.status).toBe('succeeded');
+      // chunk 边界由内核决定（可能合并写入），逐流拼接必须完整
+      expect(stdoutChunks.join('')).toBe('live-1\nlive-2\n');
+      expect(stderrChunks.join('')).toBe('live-err\n');
+      expect(projected.streamCallbackError).toBeUndefined();
+
+      const throwing = await supervisor.executeProcess({
+        runId: 'run-c18',
+        opId: 'op-c18-stream-throwing',
+        name: 'stream-projection-throwing',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', "process.stdout.write('captured-anyway')"],
+          cwd: tempDir,
+        },
+        requiredResources: ['res:c18'],
+        onStreamChunk: () => {
+          throw new Error('consumer projection failed');
+        },
+      });
+
+      expect(throwing.status).toBe('succeeded');
+      expect(throwing.stdout).toBe('captured-anyway');
+      expect(throwing.streamCallbackError).toBe('consumer projection failed');
+    });
   });
 }

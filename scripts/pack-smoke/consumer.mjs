@@ -203,6 +203,28 @@ try {
   assert.throws(() => process.kill(residualPid, 0), 'residual descendant must be dead');
   ok('residual descendant reaped', `descendant=${residualPid} reaped=${residual.residualProcessesReaped}`);
 
+  // 2e. Live output projection: chunks reach the embedder while the process runs.
+  ensureRun('run-stream');
+  const seenStdout = [];
+  const projected = await supervisor.executeProcess({
+    runId: 'run-stream',
+    opId: 'op-stream',
+    name: 'stream-projection',
+    command: {
+      execPath: process.execPath,
+      args: ['-e', "process.stdout.write('live-a\\n'); process.stdout.write('live-b\\n')"],
+      cwd: workspace,
+    },
+    requiredResources: ['embed:stream'],
+    onStreamChunk: (stream, chunk) => {
+      if (stream === 'stdout') seenStdout.push(chunk.toString('utf8'));
+    },
+  });
+  assert.equal(projected.status, 'succeeded');
+  assert.equal(seenStdout.join(''), 'live-a\nlive-b\n');
+  assert.equal(projected.streamCallbackError, undefined);
+  ok('live stream projection', `chunks=${seenStdout.length}`);
+
   // 3. Stop pipeline: lease is released only after the stop is confirmed.
   ensureRun('run-cancel');
   const pending = supervisor.executeProcess({
