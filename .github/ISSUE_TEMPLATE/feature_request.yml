@@ -1,0 +1,48 @@
+name: Feature request
+description: Propose a capability, a platform backend, or a contract change.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The kernel is deliberately small and refuses to guess. Feature requests
+        that add a *fact* (something observable and recordable) land more easily
+        than requests that add a *policy* (what a distribution should do about it).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can you not express today, and what breaks because of it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: API sketch, states, and how failure would be reported.
+      render: ts
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind of change
+      options:
+        - New recorded fact on an existing result
+        - New platform driver capability (e.g. cgroup v2 limits)
+        - Contract / API change
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including "do it in the distribution instead of the kernel".
+    validations:
+      required: false
