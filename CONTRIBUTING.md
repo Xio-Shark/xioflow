@@ -37,6 +37,5 @@ Releases are tag-driven and token-free:
 
 1. Maintainer bumps `version` in `package.json`, moves the changelog entries out of `Unreleased`, and merges to `main`.
 2. Push the matching tag: `git tag v0.1.5 && git push origin v0.1.5`.
-3. `.github/workflows/release.yml` re-runs typecheck, tests and the pack smoke test, refuses a tag that disagrees with `package.json`, publishes with `--provenance`, then verifies the version and its attestation on the registry.
-
-This requires the one-time npm Trusted Publisher setup (npmjs.com → package settings → Trusted Publisher → GitHub Actions: `Xio-Shark` / `xioflow` / `release.yml`). Until that exists, the workflow fails loudly at the publish step instead of shipping an unverifiable artifact.
+3. `.github/workflows/release.yml` re-runs typecheck, tests and the pack smoke test, refuses a tag that disagrees with `package.json`, and creates the GitHub Release from the tag.
+4. The npm upload runs only when the repository variable `NPM_TRUSTED_PUBLISHING_ENABLED` is `true` — set after the one-time npm Trusted Publisher setup (npmjs.com → package settings → Trusted Publisher → GitHub Actions: `Xio-Shark` / `xioflow` / `release.yml`). Then the job publishes with `--provenance` and verifies the version and its attestation on the registry.
