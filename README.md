@@ -10,6 +10,8 @@ A supervised execution kernel for AI agent runtimes. Zero runtime dependencies.
 
 Agent runtimes usually call `spawn()` (or `exec()`) and hope for the best. When the host crashes mid-tool-call, or a cancel cannot be confirmed, they are left with orphan processes, double-applied side effects, and no honest record of what actually happened. This kernel makes those states first-class instead of silent.
 
+[xiocode](https://github.com/Xio-Shark/xiocode), the reference distribution, runs its supervised commands on this kernel by default on Node 22.5+ — the equivalence suite below is what made that switch safe to make.
+
 ## Guarantees
 
 | Guarantee | Mechanism |
