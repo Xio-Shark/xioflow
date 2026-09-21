@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="xioflow kernel: supervised execution kernel for AI agent runtimes">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070c18"/>
+      <stop offset="0.55" stop-color="#0c1526"/>
+      <stop offset="1" stop-color="#111f38"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#34d399"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <g stroke="#8ab4ff" stroke-opacity="0.06" stroke-width="1">
+    <path d="M0 96H1280M0 192H1280M0 288H1280M0 384H1280M0 480H1280M0 576H1280"/>
+    <path d="M128 0V640M256 0V640M384 0V640M512 0V640M640 0V640M768 0V640M896 0V640M1024 0V640M1152 0V640"/>
+  </g>
+
+  <rect x="0" y="0" width="1280" height="10" fill="url(#accent)"/>
+
+  <g font-family="Helvetica, Arial, sans-serif">
+    <text x="88" y="196" font-size="88" font-weight="700" fill="#f8fafc">xioflow<tspan font-size="44" font-weight="400" fill="#93a4bd"> / kernel</tspan></text>
+    <text x="90" y="266" font-size="34" fill="#d7e3f4">Supervised execution for AI agent runtimes</text>
+    <text x="90" y="316" font-size="26" fill="#8fa3bf">Zero runtime dependencies &#183; Node 22.5+ &#183; Linux &amp; macOS</text>
+
+    <g font-size="22" fill="#cfe4ff">
+      <rect x="88" y="386" width="256" height="58" rx="29" fill="#132a45" stroke="#2f6ea8"/>
+      <text x="112" y="423">intent before spawn</text>
+      <rect x="368" y="386" width="228" height="58" rx="29" fill="#132a45" stroke="#2f6ea8"/>
+      <text x="392" y="423">confirmed stop</text>
+      <rect x="620" y="386" width="266" height="58" rx="29" fill="#132a45" stroke="#2f6ea8"/>
+      <text x="644" y="423">per-stream evidence</text>
+      <rect x="910" y="386" width="240" height="58" rx="29" fill="#132a45" stroke="#2f6ea8"/>
+      <text x="934" y="423">honest recovery</text>
+    </g>
+
+    <text x="90" y="548" font-size="28" fill="#e2e8f0" font-family="Menlo, monospace">npm i @xioflow/kernel</text>
+    <text x="90" y="594" font-size="24" fill="#7f93ad" font-family="Menlo, monospace">github.com/Xio-Shark/xioflow</text>
+  </g>
+</svg>
