@@ -4,6 +4,10 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 > Release note: 0.1.0 – 0.1.4 were uploaded from a local npm bypass-2FA token. From the next tag-based release on, `.github/workflows/release.yml` publishes through npm Trusted Publishing (OIDC) with a provenance attestation, so the published artifact is verifiable back to this repository.
 
+## [Unreleased]
+
+Changes accumulate here while the npm upload is paused. Tag pushes still verify the build and produce a GitHub Release; the registry catches up when `NPM_TRUSTED_PUBLISHING_ENABLED` is set to `true`.
+
 ## [0.1.4] - 2026-09-20
 
 ### Added
