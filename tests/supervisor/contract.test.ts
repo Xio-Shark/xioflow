@@ -631,4 +631,78 @@ setTimeout(() => {
     expect(throwing.stdout).toBe('still-captured');
     expect(throwing.streamCallbackError).toBe('projection boom');
   });
+
+  it('14. 崩溃恢复：leader 被 SIGKILL 成僵尸、后代仍活着时按组清场并结清资源', async () => {
+    const { spawn } = await import('node:child_process');
+    const opId = 'op-zombie-leader';
+    const runId = 'run-zombie';
+
+    domain.getStore().saveTask({
+      id: 'task-zombie',
+      domainId: domain.domainId,
+      name: 'zombie-recovery',
+      createdAt: new Date().toISOString(),
+    });
+    domain.getStore().saveRun({
+      id: runId,
+      taskId: 'task-zombie',
+      domainId: domain.domainId,
+      owner: 'zombie-recovery',
+      status: 'running',
+      startedAt: new Date().toISOString(),
+    });
+    domain.registerOperationIntent({
+      id: opId,
+      runId,
+      kind: 'process',
+      name: 'process:crashed-with-orphan',
+      inputFingerprint: 'fp-zombie',
+      requiredResources: ['res:zombie'],
+      status: 'intent_registered',
+    });
+
+    // 真实后代进程：留在受管进程组里，持有继承来的管道，忽略 SIGTERM。
+    const descendant = spawn(
+      process.execPath,
+      ['-e', 'process.on("SIGTERM",()=>{}); setInterval(()=>{},1000)'],
+      { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }
+    );
+    const descendantPid = descendant.pid!;
+    descendant.unref();
+
+    domain.getStore().updateOperationStatus(opId, 'active', {
+      pid: descendantPid,
+      pgid: descendantPid,
+      spawnTime: new Date().toISOString(),
+      commandFingerprint: `${process.execPath}:-e`,
+    });
+    // 模拟"leader 已被 SIGKILL"：进程身份里的 leader 不存在，但组里还有后代。
+    domain.getStore().updateOperationStatus(opId, 'stopping');
+    const stored = domain.getStore().getOperation(opId)!;
+    domain.getStore().updateOperationStatus(opId, 'active', {
+      ...stored.processIdentity!,
+      pid: 2_147_483_000,
+    });
+
+    try {
+      const report = await new RecoveryEngine(domain, driver).recover();
+      expect(report.recoveredOperations).toHaveLength(1);
+      expect(report.recoveredOperations[0].action).toBe('marked_dead');
+      expect(report.recoveredOperations[0].resourcesReleased).toBe(true);
+
+      // 孤儿后代必须被真正清掉，而不是只写一条"已标记死亡"。
+      expect(isPidAlive(descendantPid)).toBe(false);
+      expect(domain.isResourceLocked('res:zombie')).toBe(false);
+      const result = domain.getStore().getOperation(opId)!.result!;
+      expect(result.kind).toBe('process');
+      expect(result.status).toBe('failed');
+      expect(result.kind === 'process' ? result.stderr : '').toContain('reaped during recovery');
+    } finally {
+      try {
+        process.kill(-descendantPid, 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+  }, 20_000);
 });

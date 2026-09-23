@@ -64,5 +64,13 @@ export interface PlatformDriver {
   spawn(command: StructuredCommand): Promise<ManagedProcessHandle>;
   verifyIdentity(identity: ProcessIdentity): Promise<IdentityVerificationResult>;
   terminate(identity: ProcessIdentity, graceMs: number): Promise<StopProcessResult>;
+  /**
+   * 回收一个已经没有任何合法 owner 的进程组（崩溃恢复专用）。
+   *
+   * `terminate` 只在"原 leader 还在"时有意义；当 leader 已被 SIGKILL 成僵尸、
+   * 组里却还有后代进程时，只有按 pgid 定向清场才能既确认结果又不留孤儿。
+   * 可选实现：不支持进程组的平台可以不提供，恢复会如实报告未回收的残留进程。
+   */
+  terminateGroup?(pgid: number, graceMs: number): Promise<StopProcessResult>;
   sampleMetrics?(identity: ProcessIdentity): Promise<{ rssBytes: number; pidsCount: number; cpuTimeMs: number }>;
 }

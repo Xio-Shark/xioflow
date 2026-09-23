@@ -8,6 +8,15 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 Changes accumulate here while the npm upload is paused. Tag pushes still verify the build and produce a GitHub Release; the registry catches up when `NPM_TRUSTED_PUBLISHING_ENABLED` is set to `true`.
 
+### Fixed
+- **Crash recovery no longer mistakes a zombie leader for a live process.** After a SIGKILLed owner, the leader sits in the process table as a zombie whose command reads `<defunct>`. Identity verification treated that as "alive", then failed the command-line fingerprint check and reported `cannot_determine` — so a determined crash was parked as `isolated_indeterminate`, the resource lease stayed held, and the Run stayed `running` forever while the owner's descendants kept running.
+- **Orphaned process groups are reaped during recovery.** "The leader is dead" is not "the group is empty": descendants the crashed owner had forked can still be running with no owner left. Recovery now calls the driver's new `terminateGroup(pgid, graceMs)` and only reports `marked_dead` once the group is confirmed empty; if it cannot confirm, it still isolates honestly with the residual PIDs.
+
+### Added
+- `PlatformDriver.terminateGroup?(pgid, graceMs)` for targeted cleanup of a group whose owner is gone. Platforms without process-group semantics may omit it, in which case recovery isolates instead of claiming a clean kill.
+- `pgid` and `commandFingerprint` are persisted with the process identity, so recovery has the group id it needs after a restart.
+- Shared contract suite: 19 items (adds the zombie-leader-with-orphan recovery case).
+
 ## [0.1.4] - 2026-09-20
 
 ### Added
