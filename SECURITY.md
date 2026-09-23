@@ -17,6 +17,15 @@ Include, when you can:
 
 This is a spare-time project, so there is no guaranteed response time. Reports about the kernel's core claims get priority: an operation reported as stopped while a process survives, a lease released before a stop is confirmed, a committed fact lost across a crash, or `indeterminate` being silently retried.
 
+## Verifying what you install
+
+Releases are built and published only by `.github/workflows/release.yml`; no long-lived npm token exists for this package. From 0.1.5 on:
+
+- the npm package carries an npm provenance attestation (`npm audit signatures`);
+- each GitHub Release carries a tarball packed in CI from the same tagged commit, `SHA256SUMS`, and a GitHub build provenance attestation (`gh attestation verify xioflow-kernel-<version>.tgz --repo Xio-Shark/xioflow`). It is packed separately from the npm upload, so compare file contents rather than tarball bytes.
+
+0.1.0 – 0.1.4 were uploaded from a local token and have no provenance.
+
 ## Scope notes
 
 - Windows is not supported in 0.1 and containment there is reported as unsupported rather than emulated.
