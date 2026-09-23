@@ -150,9 +150,20 @@ Releases are tag-driven. A tag always produces a GitHub Release; the npm upload 
 
 1. Bump `version` in `package.json`, commit, and push to `main`.
 2. Push the matching tag, e.g. `git tag v0.1.5 && git push origin v0.1.5`.
-3. `.github/workflows/release.yml` re-runs typecheck, tests and the pack smoke test, refuses a tag that does not match `package.json`, creates the GitHub Release, and — only when the repository variable `NPM_TRUSTED_PUBLISHING_ENABLED` is `true` — publishes with `npm publish --provenance` and verifies the attestation.
+3. `.github/workflows/release.yml` re-runs typecheck, tests and the pack smoke test, refuses a tag that does not match `package.json`, creates the GitHub Release with the packed tarball, `SHA256SUMS` and a build provenance attestation attached, and — only when the repository variable `NPM_TRUSTED_PUBLISHING_ENABLED` is `true` — publishes with `npm publish --provenance` and verifies the attestation.
 
 One-time setup, in this order: (1) npmjs.com → package settings → Trusted Publisher → GitHub Actions: organization `Xio-Shark`, repository `xioflow`, workflow filename `release.yml`, environment left empty; (2) set the repository variable `NPM_TRUSTED_PUBLISHING_ENABLED=true`. Until both exist the publish job is skipped and the reason is printed in the `verify` job's log. npm's registry index can lag several minutes behind an upload, so the verification step polls and may need a job re-run.
+
+To attach assets to an existing tag without publishing to npm, run the workflow manually: `gh workflow run release.yml -f tag=v0.1.5`. An asset that is already attached is kept if identical and fails the run if it differs; published assets are never overwritten.
+
+### Verifying a release
+
+```bash
+gh release download v0.1.5 --repo Xio-Shark/xioflow
+shasum -a 256 -c SHA256SUMS
+gh attestation verify xioflow-kernel-0.1.5.tgz --repo Xio-Shark/xioflow
+npm audit signatures   # inside a project that installed @xioflow/kernel from npm
+```
 
 ## License
 
