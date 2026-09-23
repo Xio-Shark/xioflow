@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -8,10 +9,23 @@ import { ProcessSupervisor } from '../../src/supervisor/supervisor.js';
 import { RecoveryEngine } from '../../src/recovery/engine.js';
 import { PlatformDriver, ProcessIdentity, StopProcessResult } from '../../src/driver/types.js';
 
+/**
+ * "Alive" means "can still do work". A reaped-by-nobody zombie (orphan reaped by
+ * a container init that does not wait) stays in the PID table and makes
+ * `process.kill(pid, 0)` succeed, so the state has to come from `ps`.
+ */
 function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
+  } catch {
+    return false;
+  }
+  try {
+    const state = execFileSync('ps', ['-p', String(pid), '-o', 'state='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return state[0] !== 'Z';
   } catch {
     return false;
   }
