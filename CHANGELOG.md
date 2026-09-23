@@ -6,7 +6,13 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
-Changes accumulate here while the npm upload is paused. Tag pushes still verify the build and produce a GitHub Release; the registry catches up when `NPM_TRUSTED_PUBLISHING_ENABLED` is set to `true`.
+## [0.1.5] - 2026-09-23
+
+First release published by `release.yml` through npm Trusted Publishing (OIDC) with a provenance attestation; no long-lived npm token is involved.
+
+### Changed
+- `ARCHITECTURE.md` now describes the target design (Rust core, embedded and daemon modes, snapshot/rollback, adjudication, a 39-item conformance list). Sections that 0.1.x does not implement yet are marked as target state.
+- `ROADMAP.md` added: the phased plan, the known 0.1.x correctness gaps (P0-1 … P0-14) and a spec-vs-implementation table.
 
 ### Fixed
 - **Crash recovery no longer mistakes a zombie leader for a live process.** After a SIGKILLed owner, the leader sits in the process table as a zombie whose command reads `<defunct>`. Identity verification treated that as "alive", then failed the command-line fingerprint check and reported `cannot_determine` — so a determined crash was parked as `isolated_indeterminate`, the resource lease stayed held, and the Run stayed `running` forever while the owner's descendants kept running.
@@ -15,7 +21,7 @@ Changes accumulate here while the npm upload is paused. Tag pushes still verify 
 ### Added
 - `PlatformDriver.terminateGroup?(pgid, graceMs)` for targeted cleanup of a group whose owner is gone. Platforms without process-group semantics may omit it, in which case recovery isolates instead of claiming a clean kill.
 - `pgid` and `commandFingerprint` are persisted with the process identity, so recovery has the group id it needs after a restart.
-- Shared contract suite: 19 items (adds the zombie-leader-with-orphan recovery case).
+- Kernel test suite: adds the zombie-leader-with-orphan recovery case. The shared contract suite at `@xioflow/kernel/testing` stays at 18 items; promoting this case into it is tracked in `ROADMAP.md` (P0-14).
 
 ## [0.1.4] - 2026-09-20
 

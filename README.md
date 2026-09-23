@@ -138,11 +138,11 @@ defineContractTestSuite('My Agent Runtime', async () => ({
 - A spawn failure is reported both as `status: 'failed'`/`exitCode: 127` and as `spawnFailure` with the underlying error message, so embedders can tell "the binary could not start" apart from "the child exited 127".
 - `onStreamChunk(stream, chunk)` forwards raw stdout/stderr chunks while the process runs, so a caller can render live output. A throwing callback never aborts the drain; the first error is recorded as `streamCallbackError`.
 - Hard resource requests (`maxMemoryBytes`, `maxPids`, `maxCpuTimeMs` with `enforcement: 'hard'`) are rejected at admission with `UnsupportedCapabilityError` on platforms that cannot enforce them, instead of degrading silently. The remaining capability flags are reported truthfully for callers to inspect, but are not enforced by admission in 0.1.
-- Protocol specification: [`ARCHITECTURE.md`](./ARCHITECTURE.md) (Chinese).
+- Protocol specification: [`ARCHITECTURE.md`](./ARCHITECTURE.md) (Chinese). It describes the target design; the phased plan and the spec-vs-implementation gap table live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Status
 
-0.1.4, pre-1.0: the API may change. Not implemented yet: Linux cgroup v2 backend (hard memory/CPU/PID enforcement), enforced domain-wide memory budgets, artifact retrieval helpers.
+0.1.5, pre-1.0: the API may change. Not implemented yet: Linux cgroup v2 backend (hard memory/CPU/PID enforcement), enforced domain-wide memory budgets, artifact retrieval helpers. Known correctness gaps in 0.1.x and the plan toward a Rust core with snapshot/rollback and a daemon mode are tracked in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Releasing
 
