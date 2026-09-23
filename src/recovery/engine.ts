@@ -95,14 +95,43 @@ export class RecoveryEngine {
             });
           }
         } else if (verification === 'not_original_process') {
-          // 进程已确定死亡，核定终态并结清资源
+          // 进程已确定死亡。但"leader 死了"不等于"组空了"：被 SIGKILL 的 leader 会
+          // 变成僵尸，它 fork 出来的后代可能还在运行，而这些进程已经没有 owner。
+          // 先尝试按 pgid 定向清场；清不掉就如实隔离，绝不假装干净。
+          const pgid = op.processIdentity.pgid;
+          let reapedOrphans = false;
+          if (pgid !== undefined && this.isGroupAlive(pgid)) {
+            const reaped = this.driver.terminateGroup
+              ? await this.driver.terminateGroup(pgid, 2000)
+              : { stopped: false, scope: 'unknown' as const };
+            if (!reaped.stopped) {
+              const indetResult: IndeterminateResult = {
+                kind: 'indeterminate',
+                status: 'indeterminate',
+                reason: 'Owner is dead but its process group could not be confirmed stopped',
+                recoveryGuidance: 'Residual processes from the crashed owner are still alive; inspect them before retrying.',
+                durationMs: 0,
+                completedAt: new Date().toISOString(),
+              };
+              store.recordOperationResult(op.id, indetResult, false);
+              report.recoveredOperations.push({
+                opId: op.id,
+                action: 'isolated_indeterminate',
+                resourcesReleased: false,
+              });
+              continue;
+            }
+            reapedOrphans = true;
+          }
           const deadResult: ProcessOperationResult = {
             kind: 'process',
             status: 'failed',
             exitCode: 137,
             signal: 'SIGKILL',
             stdout: '',
-            stderr: 'Process terminated due to system crash',
+            stderr: reapedOrphans
+              ? 'Process terminated due to system crash; orphaned descendants were reaped during recovery'
+              : 'Process terminated due to system crash',
             isTruncated: false,
             identityVerification: 'not_original_process',
             durationMs: 0,
@@ -136,5 +165,15 @@ export class RecoveryEngine {
     }
 
     return report;
+  }
+
+  /** 进程组是否仍存在（僵尸也算存在；具体是否"能工作"由驱动的 terminateGroup 判定）。 */
+  private isGroupAlive(pgid: number): boolean {
+    try {
+      process.kill(-pgid, 0);
+      return true;
+    } catch (err: any) {
+      return err?.code === 'EPERM';
+    }
   }
 }

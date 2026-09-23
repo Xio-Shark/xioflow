@@ -155,8 +155,10 @@ export class NodePlatformDriver implements PlatformDriver {
   }
 
   public async verifyIdentity(identity: ProcessIdentity): Promise<IdentityVerificationResult> {
-    // 1. 检查操作系统中该 PID 是否存活
-    if (!this.isPidAlive(identity.pid)) {
+    // 1. 检查操作系统中该 PID 是否存活。僵尸进程（已退出、等待父进程收尸）不能再算
+    //    存活：它既不会继续工作，ps 里的命令也已经变成 `<defunct>`，若按存活处理就会
+    //    走到下面的指纹校验并得出 cannot_determine，把一个已经确定的崩溃错判成不可知。
+    if (!this.isPidAlive(identity.pid) || this.isZombie(identity.pid)) {
       return 'not_original_process';
     }
 
@@ -256,6 +258,45 @@ export class NodePlatformDriver implements PlatformDriver {
 
     this.cumulativeDescendantsMap.delete(pid);
     return { stopped: true, scope: 'process_group' };
+  }
+
+  /**
+   * 崩溃恢复专用：leader 已经死了（通常是 SIGKILL 后的僵尸），但组里可能还有后代
+   * 进程活着。这些进程没有任何 owner，唯一诚实的处置是按 pgid 定向清场，并在返回前
+   * 确认组已经空了——否则残留进程会被继续留在这个域里。
+   */
+  public async terminateGroup(pgid: number, graceMs: number = 2000): Promise<StopProcessResult> {
+    if (!this.capabilities.processGroupKill) {
+      return {
+        stopped: false,
+        scope: 'unknown',
+        errorDetails: 'process groups are not supported on this platform',
+      };
+    }
+    if (!this.isGroupAlive(pgid)) {
+      return { stopped: true, scope: 'process_group' };
+    }
+
+    this.sendSignalToGroup(pgid, 'SIGKILL');
+    const start = Date.now();
+    while (Date.now() - start < graceMs) {
+      if (!this.isGroupAlive(pgid)) {
+        this.cumulativeDescendantsMap.delete(pgid);
+        return { stopped: true, scope: 'process_group' };
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+
+    const survivors: number[] = [];
+    for (const entry of this.processTable().values()) {
+      if (entry.state === 'Z') continue;
+      if (entry.pgid === pgid) survivors.push(entry.pid);
+    }
+    return {
+      stopped: survivors.length === 0,
+      scope: 'process_group',
+      residualPids: survivors.length > 0 ? survivors : undefined,
+    };
   }
 
   public async sampleMetrics(
@@ -419,13 +460,49 @@ export class NodePlatformDriver implements PlatformDriver {
     }
   }
 
+  /**
+   * 崩溃恢复的判定依据：进程组里是否还有**真正能工作**的进程。
+   *
+   * SIGKILL 掉的 leader 会以僵尸形态留在组里，`kill(-pgid, 0)` 因此永远为真。
+   * 只按 PID 存在与否判断会让恢复永远无法确认"组已清空"，孤儿进程也就永远得不到
+   * 处置。这里按 ps 的进程状态把僵尸排除掉。
+   */
   private isGroupAlive(pgid: number): boolean {
     try {
       process.kill(-pgid, 0);
-      return true;
     } catch (err: any) {
       return err.code === 'EPERM';
     }
+    // The group exists; zombies do not count as work in progress.
+    for (const entry of this.processTable().values()) {
+      if (entry.state === 'Z') continue;
+      if (entry.pgid === pgid) return true;
+    }
+    return false;
+  }
+
+  /** pid → { pid, pgid, state } snapshot from `ps -A`; state is one letter (R/S/T/Z/…). */
+  private processTable(): Map<number, { pid: number; pgid: number; state: string }> {
+    const table = new Map<number, { pid: number; pgid: number; state: string }>();
+    try {
+      const output = execFileSync('ps', ['-A', '-o', 'pid=,pgid=,state='], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      for (const line of output.split('\n')) {
+        const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)/);
+        if (!match) continue;
+        const pid = parseInt(match[1], 10);
+        table.set(pid, { pid, pgid: parseInt(match[2], 10), state: match[3][0] });
+      }
+    } catch {
+      // no snapshot available; callers treat the process as alive
+    }
+    return table;
+  }
+
+  private isZombie(pid: number): boolean {
+    return this.processTable().get(pid)?.state === 'Z';
   }
 
   private sendSignalToGroup(pid: number, signal: NodeJS.Signals): void {

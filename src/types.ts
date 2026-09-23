@@ -86,8 +86,11 @@ export interface Operation {
   result?: OperationResult;
   processIdentity?: {
     pid: number;
+    /** 进程组 id：崩溃恢复时按组定向清场，避免 leader 已死但后代还活着。 */
+    pgid?: number;
     startTimeMonotonic?: number;
     spawnTime: string;
+    commandFingerprint?: string;
   };
 }
 
