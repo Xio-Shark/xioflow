@@ -11,6 +11,7 @@
 2. **先写失败契约再修**：每个缺陷对应一个 §7.2 条目，先让它在当前实现上失败，修复后变绿。
 3. **先修“撒谎”的地方**：返回虚假成功、虚报能力、吞掉失败的问题，优先级高于新功能。
 4. **采用与技术并行**：从 P1 起同步寻找外部设计伙伴；止损线写死在 §7。
+5. **活性检查与一致性重扫**：任务与 Checklist 严禁写快照死事实（如写死未发布的版本号或临时暂停状态），一律采用活性对账表达式（如 `dist-tags.latest == 依赖版本`）；**每阶段出口时强制重扫 open 任务一致性**，消除跨仓与跨阶段事实脱节。
 
 ---
 
@@ -19,13 +20,13 @@
 | 阶段 | 目标 | 关键产出 | 出口条件 | 依赖 |
 |---|---|---|---|---|
 | **P0 止血** | 修掉 0.1.x 上已被证实的诚实性与挂起缺陷，保护 xiocode 现网用户 | Trusted Publishing 跑通；`0.1.5`；`0.2.0` | §2.4 | — |
-| **P1 协议与契约冻结 v1** | 把 ABI 从 TypeScript 代码里剥离成语言无关的规范 | JSON Schema、schema v1 与迁移、黑盒 conformance、`xf-fixture` | §3.3 | P0 |
+| **P1 协议与契约冻结 v1** | 把 ABI 从 TypeScript 代码里剥离成语言无关的规范 | JSON Schema、schema v1 与迁移、黑盒 conformance、`xf-fixture` | §3.3 | P0（与产品观察期并行） |
 | **P2 Rust 核心 MVP（嵌入模式）** | 规范实现落地，三平台可用 | Rust crates、Node / Python 绑定、`@xioflow/kernel` 1.0 | §4.4 | P1 |
 | **P3 快照回滚与写入限制** | 兑现“进程 + 文件系统变更”的管辖范围 | `git-shadow` 快照驱动、写入限制驱动 | §5.3 | P2 |
 | **P4 daemon 与多客户端** | 兑现“一个工作区一个仲裁者” | `xioflowd`、客户端模式绑定 | §6.3 | P2（与 P3 可并行） |
 | **P5 生态与采用** | 让第三方框架真正接入 | 设计伙伴、集成指南、英文规范 | §7 | 从 P1 起并行 |
 
-关键路径：**P0 → P1 → P2 → P3 / P4**；P5 从 P1 开始贯穿全程。
+关键路径与并行：产品侧关键路径为 **P0 → 观察期（≥5工作日） → 2.0-cut**；内核仓推进 **P0 → P1 → P2 → P3 / P4**。P0 出口（0.2.0 发布并在 xiocode 完成适配）后，产品侧启动 5 工作日真实观察期，内核仓同步启动 P1 阶段（Step 6–8 协议/schema），两轨并行推进，互不阻塞。P5 从 P1 开始贯穿全程。
 
 ---
 
@@ -116,7 +117,8 @@ xiocode 侧待办：`kernel-adapter.ts` 头注释仍写“内核不转发 onOutp
 
 ### 4.2 迁移与兼容
 - Rust 核心打开 0.1.x 的 `domain.db` 时按 §1.2 迁移，并能裁决其中遗留的崩溃现场。
-- 去掉 `node:sqlite` 之后，Node 绑定不再要求 Node ≥ 22.5；xiocode 可以删除内置 supervisor 这条回退路径。
+- 内置 supervisor 回退路径与逃生开关已在 xiocode 2.0.0（基于 0.2.0 实战观察期通过后）彻底删除；P2 专职负责 TS 内核向 Rust 内核绑定的平滑切换，不再承担删 supervisor。
+- **engines 策略**：最低 Node 22.5（当前由内核存储依赖 `node:sqlite` 决定）；此后 engines 跟随支持期内的 Node LTS（Node 20 于 2026-04 已 EOL），不随实现细节（P2 换 napi-rs）回退。
 - `@xioflow/kernel` 1.0 在语义相同处保持 API 形状，不同处在迁移指南中逐条列出。
 
 ### 4.3 TypeScript 实现的去留
@@ -125,7 +127,7 @@ xiocode 侧待办：`kernel-adapter.ts` 头注释仍写“内核不转发 onOutp
 ### 4.4 出口条件
 - Linux / macOS / Windows CI 矩阵上通过 L1 + L2；H 等级在 Linux cgroup 可用时通过 #37、#38，其余如实报告 `unsupported`。
 - 宿主事件循环不受监督负载影响（采样与转储全部在核心线程上）。
-- xiocode 通过特性开关切换到 Rust 绑定，全量测试与 `kill -9` 演练通过后改为默认。
+- xiocode 通过全新独立特性开关（如 `XIOCODE_KERNEL_IMPL=rust`，不复用已删除的 `XIOCODE_PROCESS_KERNEL`）切换到 Rust 绑定，全量测试与 `kill -9` 演练通过后改为默认。
 
 ---
 
