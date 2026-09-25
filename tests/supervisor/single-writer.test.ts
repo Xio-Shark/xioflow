@@ -244,10 +244,19 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
     const originalSpawn = driver.spawn.bind(driver);
     driver.spawn = async (command) => {
       const handle = await originalSpawn(command);
-      // 监听子进程首段输出流产生后立即发起 cancelOperation，验证流数据不会在取消时被丢弃
-      handle.stdout.once('data', () => {
-        void supervisor.cancelOperation(opId, 1500);
+      // 等待子进程启动并输出第一段内容，随后暂停流并将数据放回头部，确保 supervisor 的 drainer 能够接收
+      await new Promise<void>((resolve) => {
+        handle.stdout.once('data', (chunk) => {
+          handle.stdout.pause();
+          handle.stdout.unshift(chunk);
+          resolve();
+        });
       });
+      // 在 spawn 真正返回给 supervisor 之前发起 cancelOperation！
+      // 此时 supervisor 内部 opState.phase 严格处于 'spawning'，尚未进入 'active'。
+      // 调用 cancelOperation 会登记 cancelRequested = true 并生成 stopPromise。
+      // spawn 返回后，supervisor 走到 spawning 阶段取消分支触发停止流水线。
+      void supervisor.cancelOperation(opId, 1500);
       return handle;
     };
 
@@ -257,7 +266,7 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
       name: 'spawn-cancel-op',
       command: {
         execPath: process.execPath,
-        args: ['-e', 'process.stdout.write("spawn-output-retained\\n"); setInterval(() => {}, 1000);'],
+        args: ['-e', 'require("node:fs").writeSync(1, "spawn-output-retained\\n"); setInterval(() => {}, 1000);'],
         cwd: tempDir,
       },
       requiredResources: ['res:spawn-cancel'],
@@ -281,6 +290,132 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
       resultEvents.length,
       `Expected exactly 1 OPERATION_RESULT_RECORDED for ${opId}, found ${resultEvents.length}`
     ).toBe(1);
+
+    driver.spawn = originalSpawn;
+  });
+
+  // --------------------------------------------------------------------------
+  // 用例 3d: 等资源超时后 activeOperations 清理与 cancelOperation 绝不挂起
+  // --------------------------------------------------------------------------
+  it('1.3d [回归保护] 等资源超时后 activeOperations 清理与 cancelOperation 拒绝：不挂死，立即抛出 not_found', async () => {
+    // 先占用一个独占资源
+    domain.allocateResources('op-holder', ['res:contended']);
+
+    const opWaitTimeoutId = 'op-wait-timeout-cleanup';
+    // 启动一个需要该资源的操作，设置 waitTimeoutMs 为 50ms
+    const execPromise = supervisor.executeProcess({
+      runId: 'run-b1',
+      opId: opWaitTimeoutId,
+      name: 'wait-timeout-cleanup-op',
+      command: {
+        execPath: process.execPath,
+        args: ['-e', 'process.exit(0);'],
+        cwd: tempDir,
+      },
+      requiredResources: ['res:contended'],
+      waitTimeoutMs: 50,
+    });
+
+    // 预期抛出 ResourceConflictError
+    await expect(execPromise).rejects.toThrow();
+
+    // 关键断言 1: activeOperations 中绝无残留条目
+    expect((supervisor as any).activeOperations.has(opWaitTimeoutId)).toBe(false);
+
+    // 关键断言 2: 对已超时失败的 op 调用 cancelOperation，不得挂死，必须立即抛出 OperationNotActiveError
+    await expect(
+      supervisor.cancelOperation(opWaitTimeoutId, 1000)
+    ).rejects.toSatisfy((err: any) => {
+      expect(err).toBeInstanceOf(OperationNotActiveError);
+      expect(err.reason).toBe('not_found');
+      return true;
+    });
+
+    domain.releaseResources('op-holder', ['res:contended']);
+  });
+
+  // --------------------------------------------------------------------------
+  // 用例 3e: spawn 失败与启动前取消后的状态清理与诚实停止信号
+  // --------------------------------------------------------------------------
+  it('1.3e [回归保护] spawn 失败与启动前取消后的状态清理：map 无残留，cancel 诚实返回 stopped: true', async () => {
+    // 1. 连续 5 次 spawn 失败（命令不存在）
+    for (let i = 0; i < 5; i++) {
+      const failOpId = `op-spawn-fail-${i}`;
+      const res = await supervisor.executeProcess({
+        runId: 'run-b1',
+        opId: failOpId,
+        name: `spawn-fail-op-${i}`,
+        command: {
+          execPath: '/non/existent/executable/binary/xyz',
+          args: [],
+          cwd: tempDir,
+        },
+        requiredResources: [],
+      });
+      expect(res.status).toBe('failed');
+      expect((supervisor as any).activeOperations.has(failOpId)).toBe(false);
+    }
+
+    // 关键断言: 5 次失败后 map 必须为空（0 条残留）
+    expect((supervisor as any).activeOperations.size).toBe(0);
+
+    // 2. 验证 spawn 期间被取消时，若 spawn 失败，cancel 调用方拿到的是诚实的 stopped: true 而非 false
+    const cancelFailOpId = 'op-spawn-fail-cancel';
+    const originalSpawn = driver.spawn.bind(driver);
+    let cancelPromise: Promise<any> | undefined;
+    driver.spawn = async () => {
+      cancelPromise = supervisor.cancelOperation(cancelFailOpId, 1000);
+      throw new Error('Simulated spawn failure');
+    };
+
+    const res = await supervisor.executeProcess({
+      runId: 'run-b1',
+      opId: cancelFailOpId,
+      name: 'spawn-fail-cancel-op',
+      command: {
+        execPath: process.execPath,
+        args: ['-e', 'process.exit(0);'],
+        cwd: tempDir,
+      },
+      requiredResources: [],
+    });
+
+    expect(res.status).toBe('failed');
+    const cancelRes = await cancelPromise;
+    expect(cancelRes.stopped).toBe(true);
+    expect((supervisor as any).activeOperations.has(cancelFailOpId)).toBe(false);
+
+    driver.spawn = originalSpawn;
+  });
+
+  // --------------------------------------------------------------------------
+  // 用例 3f: 禁止静默放过重复 finalize 与写入事实（Fail Fast 保护）
+  // --------------------------------------------------------------------------
+  it('1.3f [防静默守卫] 对已处于 done 状态的操作重复调用 finalizeOperation 或 recordOperationResult 必须显式抛错', async () => {
+    const opId = 'op-fail-fast-duplicate-finalize';
+    const result = await supervisor.executeProcess({
+      runId: 'run-b1',
+      opId,
+      name: 'fail-fast-op',
+      command: {
+        execPath: process.execPath,
+        args: ['-e', 'process.exit(0);'],
+        cwd: tempDir,
+      },
+      requiredResources: [],
+    });
+
+    expect(result.status).toBe('succeeded');
+
+    // 1. 验证 supervisor.finalizeOperation 对已 done 操作抛错，杜绝静默返回第一次结果掩盖内部逻辑缺陷
+    expect(() => {
+      (supervisor as any).finalizeOperation(opId, result, [], true);
+    }).toThrowError(/already finalized with status "done"/);
+
+    // 2. 验证 store.recordOperationResult 对已 done 操作抛错，在持久层严格杜绝二次写入事实
+    expect(() => {
+      domain.getStore().recordOperationResult(opId, result, true);
+    }).toThrowError(/already finalized with status "done"/);
   });
 
   // --------------------------------------------------------------------------
@@ -344,6 +479,72 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
       `Expected exactly 1 OPERATION_RESULT_RECORDED for op-p02-timeout-bounded, found ${resultEvents.length}`
     ).toBe(1);
   }, 12_000);
+
+  it('1.4b [回归保护] 逃逸后代在 op 返回后继续往 stdout 输出：宿主进程不崩溃，不抛出 ERR_CRYPTO_HASH_FINALIZED', async () => {
+    const uncaughtErrors: Error[] = [];
+    const uncaughtHandler = (err: Error) => {
+      uncaughtErrors.push(err);
+    };
+    process.on('uncaughtException', uncaughtHandler);
+
+    const subPidFile = path.join(tempDir, 'sub-chatty.pid');
+    try {
+      const runnerScript = `
+        const { spawn } = require('node:child_process');
+        const fs = require('node:fs');
+        const sub = spawn(process.execPath, ['-e', \`
+          const interval = setInterval(() => {
+            try {
+              process.stdout.write("escaping grandchild output\\\\n");
+            } catch {}
+          }, 40);
+          setTimeout(() => {
+            clearInterval(interval);
+            process.exit(0);
+          }, 3000);
+        \`], {
+          detached: true,
+          stdio: ['ignore', 'inherit', 'inherit']
+        });
+        fs.writeFileSync(${JSON.stringify(subPidFile)}, String(sub.pid));
+        setTimeout(() => {
+          process.exit(0);
+        }, 100);
+      `;
+
+      const result = await supervisor.executeProcess({
+        runId: 'run-b1',
+        opId: 'op-escaping-chatty',
+        name: 'escaping-chatty-op',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', runnerScript],
+          cwd: tempDir,
+        },
+        requiredResources: ['res:chatty'],
+        timeoutMs: 5000,
+        drainTimeoutMs: 200,
+      });
+
+      // 逃逸后代仍存活，契约保证返回 indeterminate
+      expect(result.status).toBe('indeterminate');
+
+      // 等待 300ms，让逃逸孙进程在 op 返回后继续向管道输出
+      await new Promise((r) => setTimeout(r, 300));
+
+      // 显式断言：宿主事件循环中未产生任何未捕获异常（特别是 ERR_CRYPTO_HASH_FINALIZED），
+      // 避免仅依赖 runner 退出码隐式暴露问题
+      expect(uncaughtErrors).toHaveLength(0);
+    } finally {
+      process.off('uncaughtException', uncaughtHandler);
+      if (fs.existsSync(subPidFile)) {
+        try {
+          const pid = parseInt(fs.readFileSync(subPidFile, 'utf8').trim(), 10);
+          if (!isNaN(pid)) process.kill(pid, 'SIGKILL');
+        } catch {}
+      }
+    }
+  }, 10_000);
 
   // --------------------------------------------------------------------------
   // 用例 5 (N3): Run 语义对齐与终态保护

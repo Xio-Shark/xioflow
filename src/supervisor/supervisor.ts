@@ -130,161 +130,161 @@ export class ProcessSupervisor {
     };
     this.activeOperations.set(options.opId, opState);
 
-    // 1. [资源分配与排队等待]
-    await this.domain.allocateResourcesWithWait(
-      options.opId,
-      options.requiredResources,
-      options.waitTimeoutMs ?? 0,
-      options.resourceBudget,
-      () => opState.cancelRequested === true
-    );
-
-    if (opState.cancelRequested) {
-      return this.handlePreSpawnCancellation(options, opState, startTime);
-    }
-
-    // 2. [启动协议步骤 1] 写入 SQLite (status: intent_registered)
-    try {
-      this.domain.getStore().registerOperationIntent(op, this.domain.domainId);
-      opState.phase = 'intent_registered';
-    } catch (err) {
-      this.domain.releaseResources(options.opId, options.requiredResources);
-      this.activeOperations.delete(options.opId);
-      throw err;
-    }
-
-    if (opState.cancelRequested) {
-      return this.handlePreSpawnCancellation(options, opState, startTime);
-    }
-
-    let handle: ManagedProcessHandle;
-    opState.phase = 'spawning';
-    try {
-      // 3. [启动协议步骤 2] 请求平台驱动启动
-      handle = await this.driver.spawn(options.command);
-      opState.handle = handle;
-      opState.command = options.command;
-    } catch (spawnError: any) {
-      opState.phase = 'done';
-      opState.stopResolve?.({ stopped: false, scope: 'direct_child', errorDetails: spawnError?.message });
-      // 启动失败（如可执行文件不存在），不产生假运行状态，直接失败收尾并释放资源
-      const failResult: ProcessOperationResult = {
-        kind: 'process',
-        status: 'failed',
-        exitCode: 127,
-        signal: null,
-        stdout: '',
-        stderr: spawnError?.message || String(spawnError),
-        spawnFailure: spawnError?.message || String(spawnError),
-        isTruncated: false,
-        identityVerification: 'not_original_process',
-        durationMs: Date.now() - startTime,
-        completedAt: new Date().toISOString(),
-      };
-      return this.finalizeOperation(options.opId, failResult, options.requiredResources, true);
-    }
-
-    // 4. [启动协议步骤 3] 登记执行身份，状态推进为 active
-    this.domain.getStore().updateOperationStatus(options.opId, 'active', handle.identity);
-    opState.phase = 'active';
-
-    // 准备 artifacts 溢出转储目录
-    const artifactsDir = options.artifactsDir || path.join(this.domain.domainPath, 'artifacts');
-    if (!fs.existsSync(artifactsDir)) {
-      try {
-        fs.mkdirSync(artifactsDir, { recursive: true });
-      } catch {}
-    }
-    const stdoutSpillPath = path.join(artifactsDir, `${options.opId}-stdout.log`);
-    const stderrSpillPath = path.join(artifactsDir, `${options.opId}-stderr.log`);
-
-    // 5. [正常监督、有界排空与流式转储 (Spill to Artifacts)]
-    let totalOutputBytes = 0;
-    const onChunk = (bytes: number) => {
-      totalOutputBytes += bytes;
-      if (
-        options.resourceBudget?.enforcement === 'soft' &&
-        options.resourceBudget.maxOutputBytes &&
-        totalOutputBytes > options.resourceBudget.maxOutputBytes &&
-        !opState.terminationReason
-      ) {
-        opState.terminationReason = 'output_exceeded';
-        this.handleStopPipeline(options.opId, 'output_exceeded', 1000).catch(() => {});
-      }
-    };
-
-    let streamCallbackError: string | undefined;
-    const forwardChunk = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
-      if (!options.onStreamChunk) return;
-      try {
-        options.onStreamChunk(stream, chunk);
-      } catch (err) {
-        streamCallbackError ??= err instanceof Error ? err.message : String(err);
-      }
-    };
-    stdoutDrainer = this.setupStreamDrainer(
-      handle.stdout,
-      maxBytes,
-      stdoutSpillPath,
-      onChunk,
-      forwardChunk('stdout')
-    );
-    stderrDrainer = this.setupStreamDrainer(
-      handle.stderr,
-      maxBytes,
-      stderrSpillPath,
-      onChunk,
-      forwardChunk('stderr')
-    );
-
-    // 检查在 spawn 途中是否已被请求取消：若已请求取消，立即触发停止流水线向底层发送终止信号
-    if (opState.cancelRequested) {
-      this.handleStopPipeline(options.opId, 'user_cancelled', opState.cancelGraceMs ?? 2000).catch(() => {});
-    }
-
     let timeoutTimer: NodeJS.Timeout | null = null;
-    const timeoutPromise =
-      options.timeoutMs && options.timeoutMs > 0
-        ? new Promise<'timeout'>((resolve) => {
-            timeoutTimer = setTimeout(() => resolve('timeout'), options.timeoutMs);
-          })
-        : new Promise<'timeout'>(() => {});
-
-    // Soft / Observe 模式资源采样治理
-    let peakMemoryBytes = 0;
-    let peakCpuTimeMs = 0;
     let samplingInterval: NodeJS.Timeout | null = null;
-    if (
-      this.driver.sampleMetrics &&
-      options.resourceBudget &&
-      (options.resourceBudget.enforcement === 'soft' || options.resourceBudget.enforcement === 'observe')
-    ) {
-      samplingInterval = setInterval(async () => {
-        try {
-          const metrics = await this.driver.sampleMetrics!(handle.identity);
-          peakMemoryBytes = Math.max(peakMemoryBytes, metrics.rssBytes);
-          peakCpuTimeMs = Math.max(peakCpuTimeMs, metrics.cpuTimeMs);
-
-          if (options.resourceBudget?.enforcement === 'soft') {
-            if (options.resourceBudget.maxMemoryBytes && metrics.rssBytes > options.resourceBudget.maxMemoryBytes) {
-              opState.terminationReason = 'memory_exceeded';
-              if (samplingInterval) clearInterval(samplingInterval);
-              await this.handleStopPipeline(options.opId, 'memory_exceeded', 1000);
-            } else if (options.resourceBudget.maxCpuTimeMs && metrics.cpuTimeMs > options.resourceBudget.maxCpuTimeMs) {
-              opState.terminationReason = 'cpu_exceeded';
-              if (samplingInterval) clearInterval(samplingInterval);
-              await this.handleStopPipeline(options.opId, 'cpu_exceeded', 1000);
-            } else if (options.resourceBudget.maxPids && metrics.pidsCount > options.resourceBudget.maxPids) {
-              opState.terminationReason = 'pids_exceeded';
-              if (samplingInterval) clearInterval(samplingInterval);
-              await this.handleStopPipeline(options.opId, 'pids_exceeded', 1000);
-            }
-          }
-        } catch {}
-      }, 100);
-    }
 
     try {
+      // 1. [资源分配与排队等待]
+      await this.domain.allocateResourcesWithWait(
+        options.opId,
+        options.requiredResources || [],
+        options.waitTimeoutMs ?? 0,
+        options.resourceBudget,
+        () => opState.cancelRequested === true
+      );
+
+      if (opState.cancelRequested) {
+        return this.handlePreSpawnCancellation(options, opState, startTime);
+      }
+
+      // 2. [启动协议步骤 1] 写入 SQLite (status: intent_registered)
+      try {
+        this.domain.getStore().registerOperationIntent(op, this.domain.domainId);
+        opState.phase = 'intent_registered';
+      } catch (err) {
+        this.domain.releaseResources(options.opId, options.requiredResources);
+        throw err;
+      }
+
+      if (opState.cancelRequested) {
+        return this.handlePreSpawnCancellation(options, opState, startTime);
+      }
+
+      let handle: ManagedProcessHandle;
+      opState.phase = 'spawning';
+      try {
+        // 3. [启动协议步骤 2] 请求平台驱动启动
+        handle = await this.driver.spawn(options.command);
+        opState.handle = handle;
+        opState.command = options.command;
+      } catch (spawnError: any) {
+        opState.phase = 'done';
+        opState.stopResolve?.({ stopped: true, scope: 'direct_child', errorDetails: spawnError?.message });
+        opState.stopResolve = undefined;
+        // 启动失败（如可执行文件不存在），不产生假运行状态，直接失败收尾并释放资源
+        const failResult: ProcessOperationResult = {
+          kind: 'process',
+          status: 'failed',
+          exitCode: 127,
+          signal: null,
+          stdout: '',
+          stderr: spawnError?.message || String(spawnError),
+          spawnFailure: spawnError?.message || String(spawnError),
+          isTruncated: false,
+          identityVerification: 'not_original_process',
+          durationMs: Date.now() - startTime,
+          completedAt: new Date().toISOString(),
+        };
+        return this.finalizeOperation(options.opId, failResult, options.requiredResources, true);
+      }
+
+      // 4. [启动协议步骤 3] 登记执行身份，状态推进为 active
+      this.domain.getStore().updateOperationStatus(options.opId, 'active', handle.identity);
+      opState.phase = 'active';
+
+      // 准备 artifacts 溢出转储目录
+      const artifactsDir = options.artifactsDir || path.join(this.domain.domainPath, 'artifacts');
+      if (!fs.existsSync(artifactsDir)) {
+        try {
+          fs.mkdirSync(artifactsDir, { recursive: true });
+        } catch {}
+      }
+      const stdoutSpillPath = path.join(artifactsDir, `${options.opId}-stdout.log`);
+      const stderrSpillPath = path.join(artifactsDir, `${options.opId}-stderr.log`);
+
+      // 5. [正常监督、有界排空与流式转储 (Spill to Artifacts)]
+      let totalOutputBytes = 0;
+      const onChunk = (bytes: number) => {
+        totalOutputBytes += bytes;
+        if (
+          options.resourceBudget?.enforcement === 'soft' &&
+          options.resourceBudget.maxOutputBytes &&
+          totalOutputBytes > options.resourceBudget.maxOutputBytes &&
+          !opState.terminationReason
+        ) {
+          opState.terminationReason = 'output_exceeded';
+          this.handleStopPipeline(options.opId, 'output_exceeded', 1000).catch(() => {});
+        }
+      };
+
+      let streamCallbackError: string | undefined;
+      const forwardChunk = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
+        if (!options.onStreamChunk) return;
+        try {
+          options.onStreamChunk(stream, chunk);
+        } catch (err) {
+          streamCallbackError ??= err instanceof Error ? err.message : String(err);
+        }
+      };
+      stdoutDrainer = this.setupStreamDrainer(
+        handle.stdout,
+        maxBytes,
+        stdoutSpillPath,
+        onChunk,
+        forwardChunk('stdout')
+      );
+      stderrDrainer = this.setupStreamDrainer(
+        handle.stderr,
+        maxBytes,
+        stderrSpillPath,
+        onChunk,
+        forwardChunk('stderr')
+      );
+
+      // 检查在 spawn 途中是否已被请求取消：若已请求取消，立即触发停止流水线向底层发送终止信号
+      if (opState.cancelRequested) {
+        this.handleStopPipeline(options.opId, 'user_cancelled', opState.cancelGraceMs ?? 2000).catch(() => {});
+      }
+
+      const timeoutPromise =
+        options.timeoutMs && options.timeoutMs > 0
+          ? new Promise<'timeout'>((resolve) => {
+              timeoutTimer = setTimeout(() => resolve('timeout'), options.timeoutMs);
+            })
+          : new Promise<'timeout'>(() => {});
+
+      // Soft / Observe 模式资源采样治理
+      let peakMemoryBytes = 0;
+      let peakCpuTimeMs = 0;
+      if (
+        this.driver.sampleMetrics &&
+        options.resourceBudget &&
+        (options.resourceBudget.enforcement === 'soft' || options.resourceBudget.enforcement === 'observe')
+      ) {
+        samplingInterval = setInterval(async () => {
+          try {
+            const metrics = await this.driver.sampleMetrics!(handle.identity);
+            peakMemoryBytes = Math.max(peakMemoryBytes, metrics.rssBytes);
+            peakCpuTimeMs = Math.max(peakCpuTimeMs, metrics.cpuTimeMs);
+
+            if (options.resourceBudget?.enforcement === 'soft') {
+              if (options.resourceBudget.maxMemoryBytes && metrics.rssBytes > options.resourceBudget.maxMemoryBytes) {
+                opState.terminationReason = 'memory_exceeded';
+                if (samplingInterval) clearInterval(samplingInterval);
+                await this.handleStopPipeline(options.opId, 'memory_exceeded', 1000);
+              } else if (options.resourceBudget.maxCpuTimeMs && metrics.cpuTimeMs > options.resourceBudget.maxCpuTimeMs) {
+                opState.terminationReason = 'cpu_exceeded';
+                if (samplingInterval) clearInterval(samplingInterval);
+                await this.handleStopPipeline(options.opId, 'cpu_exceeded', 1000);
+              } else if (options.resourceBudget.maxPids && metrics.pidsCount > options.resourceBudget.maxPids) {
+                opState.terminationReason = 'pids_exceeded';
+                if (samplingInterval) clearInterval(samplingInterval);
+                await this.handleStopPipeline(options.opId, 'pids_exceeded', 1000);
+              }
+            }
+          } catch {}
+        }, 100);
+      }
       // 等待根进程退出或超时触发；有 onRootExit 时不等待持有管道的后代
       const rootExitPromise = handle.onRootExit ?? handle.onExit;
       const exitOrTimeout = await Promise.race([
@@ -458,6 +458,15 @@ export class ProcessSupervisor {
       stderrDrainer?.forceFinalize();
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (samplingInterval) clearInterval(samplingInterval);
+      if (opState.stopResolve) {
+        const resolveFn = opState.stopResolve;
+        opState.stopResolve = undefined;
+        resolveFn({
+          stopped: true,
+          scope: 'direct_child',
+          errorDetails: opState.phase === 'done' ? undefined : 'Operation terminated before process activation',
+        });
+      }
       this.activeOperations.delete(options.opId);
     }
   }
@@ -573,20 +582,7 @@ export class ProcessSupervisor {
     opState.phase = 'done';
     const stopRes: StopProcessResult = { stopped: true, scope: 'direct_child' };
     opState.stopResolve?.(stopRes);
-
-    const stored = this.domain.getStore().getOperation(options.opId);
-    if (!stored) {
-      const op: Operation = {
-        id: options.opId,
-        runId: options.runId,
-        kind: 'process',
-        name: options.name,
-        inputFingerprint: options.inputFingerprint || 'fingerprint-pre-spawn-cancelled',
-        requiredResources: options.requiredResources,
-        status: 'intent_registered',
-      };
-      this.domain.getStore().registerOperationIntent(op, this.domain.domainId);
-    }
+    opState.stopResolve = undefined;
 
     const cancelResult: ProcessOperationResult = {
       kind: 'process',
@@ -602,6 +598,25 @@ export class ProcessSupervisor {
       durationMs: Date.now() - startTime,
       completedAt: new Date().toISOString(),
     };
+
+    const stored = this.domain.getStore().getOperation(options.opId);
+    if (!stored) {
+      // 此时操作是在 waiting_resources 阶段就被取消，尚未获取资源租约，亦未正常注册意图。
+      // 为保证 store 中有该操作记录以便写入 cancelled 结果，直接记录预意图取消操作，
+      // 绝不向 resource_leases 写入虚假租约，亦不产生虚假的 OPERATION_INTENT_REGISTERED 事件。
+      const op: Operation = {
+        id: options.opId,
+        runId: options.runId,
+        kind: 'process',
+        name: options.name,
+        inputFingerprint: options.inputFingerprint || 'fingerprint-pre-spawn-cancelled',
+        requiredResources: options.requiredResources || [],
+        status: 'done',
+      };
+      this.domain.getStore().recordPreIntentCancelledOperation(op, this.domain.domainId, cancelResult);
+      return cancelResult;
+    }
+
     return this.finalizeOperation(options.opId, cancelResult, options.requiredResources, true);
   }
 
@@ -613,7 +628,9 @@ export class ProcessSupervisor {
   ): ProcessOperationResult {
     const existing = this.domain.getStore().getOperation(opId);
     if (existing && existing.status === 'done') {
-      return (existing.result ?? result) as ProcessOperationResult;
+      throw new Error(
+        `Cannot finalize operation "${opId}": operation is already finalized with status "${existing.status}"`
+      );
     }
 
     if (result.status === 'indeterminate') {
@@ -686,6 +703,10 @@ export class ProcessSupervisor {
       };
 
       stream.on('data', (chunk: Buffer | string) => {
+        if (isFinalized) {
+          // finalize 之后，流继续读走数据避免堵塞或 SIGPIPE，但跳过 hash、落盘和转发
+          return;
+        }
         const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         bytesSeen += buf.length;
         if (onChunk) {
@@ -693,7 +714,9 @@ export class ProcessSupervisor {
             onChunk(buf.length);
           } catch {}
         }
-        hash.update(buf);
+        try {
+          hash.update(buf);
+        } catch {}
 
         // 持续落盘转储全部流
         if (spillFd !== null) {
