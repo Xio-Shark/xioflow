@@ -364,6 +364,7 @@ export class SqliteStore {
 
     this.transaction(() => {
       this.verifyEpochFencing(domainId);
+      const now = new Date().toISOString();
       // 1. 写入 operation 记录，初始状态 intent_registered
       const opStmt = this.db.prepare(`
         INSERT INTO operations (id, run_id, domain_id, kind, name, input_fingerprint, status, required_resources, timeout_ms, resource_budget, output_ref, process_identity, result)
@@ -376,7 +377,7 @@ export class SqliteStore {
         op.kind,
         op.name,
         op.inputFingerprint,
-        JSON.stringify(op.requiredResources),
+        JSON.stringify(op.requiredResources || []),
         op.timeoutMs || null,
         op.resourceBudget ? JSON.stringify(op.resourceBudget) : null,
         op.outputRef || null,
@@ -385,19 +386,20 @@ export class SqliteStore {
       );
 
       // 2. 写入 resource_leases 表记录排他资源占用
-      const leaseStmt = this.db.prepare(`
-        INSERT INTO resource_leases (resource_id, operation_id, domain_id, acquired_at, budget)
-        VALUES (?, ?, ?, ?, ?)
-      `);
-      const now = new Date().toISOString();
-      for (const res of op.requiredResources) {
-        leaseStmt.run(
-          res,
-          op.id,
-          domainId,
-          now,
-          op.resourceBudget ? JSON.stringify(op.resourceBudget) : null
-        );
+      if (op.requiredResources && op.requiredResources.length > 0) {
+        const leaseStmt = this.db.prepare(`
+          INSERT INTO resource_leases (resource_id, operation_id, domain_id, acquired_at, budget)
+          VALUES (?, ?, ?, ?, ?)
+        `);
+        for (const res of op.requiredResources) {
+          leaseStmt.run(
+            res,
+            op.id,
+            domainId,
+            now,
+            op.resourceBudget ? JSON.stringify(op.resourceBudget) : null
+          );
+        }
       }
 
       // 3. 记录领域事件
@@ -414,6 +416,66 @@ export class SqliteStore {
           resourceBudget: op.resourceBudget,
         },
         timestamp: now,
+      });
+    });
+  }
+
+  public recordPreIntentCancelledOperation(
+    op: Operation,
+    domainId: string,
+    result: OperationResult
+  ): void {
+    const run = this.getRun(op.runId);
+    if (!run) {
+      throw new Error(
+        `Run "${op.runId}" is not registered in domain "${domainId}". ` +
+          'Register the task and run first (store.saveTask() + store.saveRun()), then execute operations for that run.'
+      );
+    }
+
+    if (
+      run.status === 'succeeded' ||
+      run.status === 'failed' ||
+      run.status === 'cancelled' ||
+      run.status === 'indeterminate'
+    ) {
+      throw new Error(
+        `Cannot register operation "${op.id}" for Run "${op.runId}" because the Run is already finalized with status "${run.status}".`
+      );
+    }
+
+    this.transaction(() => {
+      this.verifyEpochFencing(domainId);
+      const existing = this.getOperation(op.id);
+      if (existing) {
+        throw new Error(`Operation "${op.id}" already exists`);
+      }
+      const opStmt = this.db.prepare(`
+        INSERT INTO operations (id, run_id, domain_id, kind, name, input_fingerprint, status, required_resources, timeout_ms, resource_budget, output_ref, process_identity, result)
+        VALUES (?, ?, ?, ?, ?, ?, 'done', ?, ?, ?, ?, ?, ?)
+      `);
+      opStmt.run(
+        op.id,
+        op.runId,
+        domainId,
+        op.kind,
+        op.name,
+        op.inputFingerprint,
+        JSON.stringify(op.requiredResources || []),
+        op.timeoutMs || null,
+        op.resourceBudget ? JSON.stringify(op.resourceBudget) : null,
+        op.outputRef || null,
+        op.processIdentity ? JSON.stringify(op.processIdentity) : null,
+        JSON.stringify(result)
+      );
+
+      this.recordEventAndTransitionState({
+        domainId,
+        runId: op.runId,
+        operationId: op.id,
+        type: 'OPERATION_RESULT_RECORDED',
+        payload: { result, releaseResources: false },
+        timestamp: result.completedAt || new Date().toISOString(),
       });
     });
   }
@@ -460,6 +522,12 @@ export class SqliteStore {
         throw new Error(`Operation ${opId} not found`);
       }
       this.verifyEpochFencing(op.domainId);
+
+      if (op.status === 'done') {
+        throw new Error(
+          `Cannot record result for operation "${opId}": operation is already finalized with status "done"`
+        );
+      }
 
       const stmt = this.db.prepare(`
         UPDATE operations

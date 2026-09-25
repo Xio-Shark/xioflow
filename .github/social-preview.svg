@@ -22,7 +22,7 @@
   <g font-family="Helvetica, Arial, sans-serif">
     <text x="88" y="196" font-size="88" font-weight="700" fill="#f8fafc">xioflow<tspan font-size="44" font-weight="400" fill="#93a4bd"> / kernel</tspan></text>
     <text x="90" y="266" font-size="34" fill="#d7e3f4">Supervised execution for AI agent runtimes</text>
-    <text x="90" y="316" font-size="26" fill="#8fa3bf">Zero runtime dependencies &#183; Node 22.5+ &#183; Linux &amp; macOS</text>
+    <text x="90" y="316" font-size="26" fill="#8fa3bf">Zero runtime dependencies &#183; Node 22.13+ &#183; Linux &amp; macOS</text>
 
     <g font-size="22" fill="#cfe4ff">
       <rect x="88" y="386" width="256" height="58" rx="29" fill="#132a45" stroke="#2f6ea8"/>

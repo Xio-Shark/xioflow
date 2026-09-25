@@ -118,7 +118,7 @@ xiocode 侧待办：`kernel-adapter.ts` 头注释仍写“内核不转发 onOutp
 ### 4.2 迁移与兼容
 - Rust 核心打开 0.1.x 的 `domain.db` 时按 §1.2 迁移，并能裁决其中遗留的崩溃现场。
 - 内置 supervisor 回退路径与逃生开关已在 xiocode 2.0.0（基于 0.2.0 实战观察期通过后）彻底删除；P2 专职负责 TS 内核向 Rust 内核绑定的平滑切换，不再承担删 supervisor。
-- **engines 策略**：最低 Node 22.5（当前由内核存储依赖 `node:sqlite` 决定）；此后 engines 跟随支持期内的 Node LTS（Node 20 于 2026-04 已 EOL），不随实现细节（P2 换 napi-rs）回退。
+- **engines 策略**：最低 Node 22.13（由内核存储依赖 `node:sqlite` 无 flag 运行要求及工具链 `@rolldown/binding` 原生绑定下限 `>=22.12` 共同决定）；此后 engines 跟随支持期内的 Node LTS（Node 20 于 2026-04 已 EOL），不随实现细节（P2 换 napi-rs）回退。
 - `@xioflow/kernel` 1.0 在语义相同处保持 API 形状，不同处在迁移指南中逐条列出。
 
 ### 4.3 TypeScript 实现的去留
