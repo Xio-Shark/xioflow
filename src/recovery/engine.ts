@@ -51,6 +51,11 @@ export class RecoveryEngine {
       }
 
       if (op.processIdentity) {
+        const spawnTimeMs = op.processIdentity.spawnTime
+          ? new Date(op.processIdentity.spawnTime).getTime()
+          : NaN;
+        const calcDurationMs = () => (!isNaN(spawnTimeMs) ? Math.max(0, Date.now() - spawnTimeMs) : 0);
+
         // 场景 2-5：存在进程身份，现场向驱动核实身份
         const verification = await this.driver.verifyIdentity(op.processIdentity);
 
@@ -62,12 +67,13 @@ export class RecoveryEngine {
               kind: 'process',
               status: 'cancelled',
               exitCode: null,
-              signal: 'SIGKILL',
+              signal: null,
               stdout: '',
-              stderr: 'Alive process safely terminated and recovered',
+              stderr: '',
+              evidence: 'unobserved',
               isTruncated: false,
               identityVerification: 'is_original_process',
-              durationMs: 0,
+              durationMs: calcDurationMs(),
               completedAt: new Date().toISOString(),
             };
             store.recordOperationResult(op.id, cancelResult, true);
@@ -84,7 +90,7 @@ export class RecoveryEngine {
               status: 'indeterminate',
               reason: 'Alive process failed to stop during recovery',
               recoveryGuidance: 'Residual PID detected. Check system processes manually.',
-              durationMs: 0,
+              durationMs: calcDurationMs(),
               completedAt: new Date().toISOString(),
             };
             store.recordOperationResult(op.id, indetResult, false);
@@ -110,7 +116,7 @@ export class RecoveryEngine {
                 status: 'indeterminate',
                 reason: 'Owner is dead but its process group could not be confirmed stopped',
                 recoveryGuidance: 'Residual processes from the crashed owner are still alive; inspect them before retrying.',
-                durationMs: 0,
+                durationMs: calcDurationMs(),
                 completedAt: new Date().toISOString(),
               };
               store.recordOperationResult(op.id, indetResult, false);
@@ -126,15 +132,15 @@ export class RecoveryEngine {
           const deadResult: ProcessOperationResult = {
             kind: 'process',
             status: 'failed',
-            exitCode: 137,
-            signal: 'SIGKILL',
+            exitCode: null,
+            signal: null,
             stdout: '',
-            stderr: reapedOrphans
-              ? 'Process terminated due to system crash; orphaned descendants were reaped during recovery'
-              : 'Process terminated due to system crash',
+            stderr: reapedOrphans ? 'orphaned descendants were reaped during recovery' : '',
+            evidence: 'unobserved',
+            residualProcessesReaped: reapedOrphans,
             isTruncated: false,
             identityVerification: 'not_original_process',
-            durationMs: 0,
+            durationMs: calcDurationMs(),
             completedAt: new Date().toISOString(),
           };
           store.recordOperationResult(op.id, deadResult, true);
@@ -151,7 +157,7 @@ export class RecoveryEngine {
             status: 'indeterminate',
             reason: 'Cannot determine process identity after restart',
             recoveryGuidance: 'Manual inspection required. Resource isolation remains active.',
-            durationMs: 0,
+            durationMs: calcDurationMs(),
             completedAt: new Date().toISOString(),
           };
           store.recordOperationResult(op.id, indetResult, false);

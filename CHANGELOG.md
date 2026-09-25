@@ -6,7 +6,16 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
-## [0.1.5] - 2026-09-23
+### Added
+- **`OperationNotActiveError`** (Contract #12, P0-4): `supervisor.cancelOperation` now explicitly rejects attempts to cancel operations that do not exist (`not_found`), have already completed (`already_completed`), or belong to an already closed `ExecutionDomain` (`domain_closed`).
+- **`evidence` field** (N1 / PRD Decision 2): `ProcessOperationResult.evidence` (`'observed' | 'unobserved'`) indicates whether exit facts were directly observed via process streams or reconstructed post-mortem.
+- **Run immutability guards** (N3): `SqliteStore` now strictly guards finalized Runs (`succeeded`, `failed`, `cancelled`, `indeterminate`), rejecting illegal status transitions and preventing new operation intent registrations on finished runs.
+
+### Changed
+- **Single Writer for operation completion (N1)**: `executeProcess` is now the single writer for operation results and journal events (`OPERATION_RESULT_RECORDED` occurs exactly once per operation). Intermediate stops no longer write coarse/fabricated `SIGKILL` or `137` results to the journal.
+- **Run status decoupling (N3)**: A single operation timeout or cancellation no longer marks the parent Run as `failed` or `cancelled`. The parent Run remains `running` until explicitly concluded by the embedder or marked `indeterminate` upon unconfirmed stop.
+- **Bounded timeout under pipe-holding descendants (Contract #11, P0-2)**: Timeout branches now await root process termination facts (`onRootExit`) bounded by an upper limit, ensuring deterministic return times within `timeoutMs + graceMs + drainTimeoutMs` rather than hanging indefinitely on escaped descendants.
+
 
 First release published by `release.yml` through npm Trusted Publishing (OIDC) with a provenance attestation; no long-lived npm token is involved.
 

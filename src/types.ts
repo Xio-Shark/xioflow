@@ -140,6 +140,7 @@ export interface ProcessOperationResult extends BaseResult {
   residualProcessesReaped?: boolean; // 根进程退出后仍持有管道的后代已被停止流水线回收
   streamCallbackError?: string;      // onStreamChunk 回调抛出的首个错误（不中断排空）
   identityVerification: IdentityVerificationResult;
+  evidence?: 'observed' | 'unobserved';
 }
 
 export interface FilesystemOperationResult extends BaseResult {
@@ -307,3 +308,21 @@ export function sanitizeConfigSnapshot(config?: Record<string, unknown>): Record
   }
   return sanitized;
 }
+
+/**
+ * 对非活跃操作发起停止时抛出的显式异常（契约 #12）
+ */
+export class OperationNotActiveError extends Error {
+  constructor(
+    public readonly opId: string,
+    public readonly reason: 'not_found' | 'already_completed' | 'domain_closed',
+    message?: string
+  ) {
+    super(
+      message ??
+        `Operation "${opId}" is not active (reason: ${reason}). Stop requests must target active operations.`
+    );
+    this.name = 'OperationNotActiveError';
+  }
+}
+

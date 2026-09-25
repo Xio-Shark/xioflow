@@ -211,6 +211,14 @@ export class SqliteStore {
 
   public saveRun(run: Run): void {
     this.verifyEpochFencing(run.domainId);
+    const existing = this.getRun(run.id);
+    if (existing && (existing.status === 'succeeded' || existing.status === 'failed' || existing.status === 'cancelled' || existing.status === 'indeterminate')) {
+      if (existing.status !== run.status) {
+        throw new Error(
+          `Cannot transition Run "${run.id}" from terminal status "${existing.status}" to "${run.status}".`
+        );
+      }
+    }
     const sanitizedConfig = sanitizeConfigSnapshot(run.configSnapshotWhiteList);
     const stmt = this.db.prepare(`
       INSERT INTO runs (id, task_id, domain_id, owner, status, termination_reason, started_at, ended_at, config_snapshot)
@@ -261,6 +269,14 @@ export class SqliteStore {
       const run = this.getRun(runId);
       if (run) {
         this.verifyEpochFencing(run.domainId);
+        if (run.status === 'succeeded' || run.status === 'failed' || run.status === 'cancelled' || run.status === 'indeterminate') {
+          if (run.status === status) {
+            return;
+          }
+          throw new Error(
+            `Cannot transition Run "${runId}" from terminal status "${run.status}" to "${status}".`
+          );
+        }
       }
       const stmt = this.db.prepare(`
         UPDATE runs
@@ -290,6 +306,13 @@ export class SqliteStore {
       if (!run) throw new Error(`Run '${runId}' not found`);
       this.verifyEpochFencing(run.domainId);
 
+      if (run.status === 'succeeded') return;
+      if (run.status === 'failed' || run.status === 'cancelled' || run.status === 'indeterminate') {
+        throw new Error(
+          `Cannot report run '${runId}' succeeded: already finalized with status '${run.status}'`
+        );
+      }
+
       const ops = this.getOperationsByRun(runId);
       const unfinished = ops.filter((op) => op.status !== 'done');
       if (unfinished.length > 0) {
@@ -300,7 +323,8 @@ export class SqliteStore {
 
       const indeterminate = ops.filter((op) => op.result?.status === 'indeterminate');
       if (indeterminate.length > 0) {
-        this.updateRunStatus(runId, 'indeterminate', 'crash_detected', new Date().toISOString());
+        const indetReason = (indeterminate[0].result as any)?.terminationReason || undefined;
+        this.updateRunStatus(runId, 'indeterminate', indetReason, new Date().toISOString());
         return;
       }
 
@@ -313,17 +337,28 @@ export class SqliteStore {
       const run = this.getRun(runId);
       if (!run) throw new Error(`Run '${runId}' not found`);
       this.verifyEpochFencing(run.domainId);
+      if (run.status === 'failed') return;
+      if (run.status === 'succeeded' || run.status === 'cancelled' || run.status === 'indeterminate') {
+        throw new Error(
+          `Cannot report run '${runId}' failed: already finalized with status '${run.status}'`
+        );
+      }
       this.updateRunStatus(runId, 'failed', reason, new Date().toISOString());
     });
   }
 
   public registerOperationIntent(op: Operation, domainId: string): void {
-    // 边界校验：Operation 必须挂在已登记的 Run 上。这里提前抛出可执行的错误，
-    // 而不是把 SQLite 的 FOREIGN KEY constraint failed 直接丢给调用方。
-    if (!this.getRun(op.runId)) {
+    const run = this.getRun(op.runId);
+    if (!run) {
       throw new Error(
         `Run "${op.runId}" is not registered in domain "${domainId}". ` +
           'Register the task and run first (store.saveTask() + store.saveRun()), then execute operations for that run.'
+      );
+    }
+
+    if (run.status === 'succeeded' || run.status === 'failed' || run.status === 'cancelled' || run.status === 'indeterminate') {
+      throw new Error(
+        `Cannot register operation "${op.id}" for Run "${op.runId}" because the Run is already finalized with status "${run.status}".`
       );
     }
 

@@ -281,15 +281,22 @@ export class ExecutionDomain {
     operationId: string,
     resources: string[],
     maxWaitMs: number = 0,
-    budget?: ResourceBudget
+    budget?: ResourceBudget,
+    isCancelled?: () => boolean
   ): Promise<void> {
     const startTime = Date.now();
     while (true) {
+      if (isCancelled && isCancelled()) {
+        return;
+      }
       try {
         this.allocateResources(operationId, resources, Date.now() - startTime, budget);
         return;
       } catch (err) {
         if (err instanceof ResourceConflictError) {
+          if (isCancelled && isCancelled()) {
+            return;
+          }
           const elapsed = Date.now() - startTime;
           if (elapsed >= maxWaitMs) {
             throw new ResourceConflictError(err.resourceId, err.existingOwnerOpId, operationId, elapsed);
