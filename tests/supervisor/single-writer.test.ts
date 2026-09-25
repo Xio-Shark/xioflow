@@ -234,6 +234,56 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
   });
 
   // --------------------------------------------------------------------------
+  // 用例 3c (N1/I3): 启动瞬间取消操作：如实排空输出流、诚实捕获终止信号且 journal 事件严格唯一
+  // --------------------------------------------------------------------------
+  it('1.3c [N1/I3] 在 spawn 执行期间触发取消：stdout 如实排空而不被丢弃，signal 诚实捕获，journal 仅有 1 条结果事件', async () => {
+    const opId = 'op-spawn-cancel-honesty';
+
+    // 劫持 driver.spawn 在底层进程创建成功但尚未交还给 supervisor 时触发取消，
+    // 精准覆盖 phase === 'spawning' 阶段的取消场景。
+    const originalSpawn = driver.spawn.bind(driver);
+    driver.spawn = async (command) => {
+      const handle = await originalSpawn(command);
+      // 监听子进程首段输出流产生后立即发起 cancelOperation，验证流数据不会在取消时被丢弃
+      handle.stdout.once('data', () => {
+        void supervisor.cancelOperation(opId, 1500);
+      });
+      return handle;
+    };
+
+    const execResult = await supervisor.executeProcess({
+      runId: 'run-b1',
+      opId,
+      name: 'spawn-cancel-op',
+      command: {
+        execPath: process.execPath,
+        args: ['-e', 'process.stdout.write("spawn-output-retained\\n"); setInterval(() => {}, 1000);'],
+        cwd: tempDir,
+      },
+      requiredResources: ['res:spawn-cancel'],
+    });
+
+    expect(execResult.status).toBe('cancelled');
+    expect(execResult.terminationReason).toBe('user_cancelled');
+
+    // 关键断言 1: 输出流被如实排空转储，而非丢弃或写死为空串
+    expect(execResult.stdout).toContain('spawn-output-retained');
+
+    // 关键断言 2: signal 如实由驱动层捕获（SIGINT），而非编造
+    expect(execResult.signal).toBe('SIGINT');
+
+    // 关键断言 3 (I3 Single Writer): journal 中结果记录事件严格为 1 条
+    const events = domain.getStore().getJournalEvents('test-b1-domain');
+    const resultEvents = events.filter(
+      (e) => e.operationId === opId && e.type === 'OPERATION_RESULT_RECORDED'
+    );
+    expect(
+      resultEvents.length,
+      `Expected exactly 1 OPERATION_RESULT_RECORDED for ${opId}, found ${resultEvents.length}`
+    ).toBe(1);
+  });
+
+  // --------------------------------------------------------------------------
   // 用例 4 (P0-2 / 契约 #11): 超时 + setsid 逃逸后代持有管道时有界返回
   // --------------------------------------------------------------------------
   it('1.4 [P0-2] 超时 + 逃逸后代持有管道：操作在有界时间内返回，绝不挂到逃逸后代自行退出', async () => {
@@ -283,6 +333,16 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
 
     // 契约 #11: 超时 + 逃逸后代：操作在有界时间内返回 indeterminate，不挂到逃逸进程退出
     expect(result.status).toBe('indeterminate');
+
+    // 关键断言 (I3 Single Writer): journal 中结果记录事件必须严格只有 1 条，绝不允许双写
+    const events = domain.getStore().getJournalEvents('test-b1-domain');
+    const resultEvents = events.filter(
+      (e) => e.operationId === 'op-p02-timeout-bounded' && e.type === 'OPERATION_RESULT_RECORDED'
+    );
+    expect(
+      resultEvents.length,
+      `Expected exactly 1 OPERATION_RESULT_RECORDED for op-p02-timeout-bounded, found ${resultEvents.length}`
+    ).toBe(1);
   }, 12_000);
 
   // --------------------------------------------------------------------------

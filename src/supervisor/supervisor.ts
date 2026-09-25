@@ -56,6 +56,18 @@ interface ActiveOperationState {
   stopResolve?: (res: StopProcessResult) => void;
 }
 
+interface StreamDrainer {
+  getResult: () => {
+    content: string;
+    isTruncated: boolean;
+    outputRef?: string;
+    outputHash?: string;
+    bytesSeen: number;
+  };
+  finishPromise: Promise<void>;
+  forceFinalize: () => void;
+}
+
 export class ProcessSupervisor {
   private activeOperations: Map<string, ActiveOperationState> = new Map();
 
@@ -79,6 +91,9 @@ export class ProcessSupervisor {
     const startTime = Date.now();
     const maxBytes = options.maxOutputBytes ?? 10 * 1024 * 1024; // 默认 10MB
     const drainTimeoutMs = options.drainTimeoutMs ?? 2000;      // 默认 2000ms
+
+    let stdoutDrainer: StreamDrainer | undefined;
+    let stderrDrainer: StreamDrainer | undefined;
 
     // 0. [准入期强校验 Pre-admission Capability Check]
     if (options.resourceBudget?.enforcement === 'hard') {
@@ -169,41 +184,6 @@ export class ProcessSupervisor {
       return this.finalizeOperation(options.opId, failResult, options.requiredResources, true);
     }
 
-    // 检查在 spawn 途中是否已被请求取消
-    if (opState.cancelRequested) {
-      opState.phase = 'stopping';
-      this.domain.getStore().updateOperationStatus(options.opId, 'active', handle.identity);
-      const stopRes = await this.driver.terminate(handle.identity, opState.cancelGraceMs ?? 2000);
-      opState.stopResolve?.(stopRes);
-
-      if (!stopRes.stopped) {
-        const indetResult: IndeterminateResult = {
-          kind: 'indeterminate',
-          status: 'indeterminate',
-          reason: `Process ${handle.identity.pid} was cancelled during spawn but could not be confirmed stopped: ${stopRes.errorDetails}`,
-          recoveryGuidance: 'Residual PID detected. Inspect system processes manually before releasing resources.',
-          durationMs: Date.now() - startTime,
-          completedAt: new Date().toISOString(),
-        };
-        return this.finalizeOperation(options.opId, indetResult, options.requiredResources, false);
-      }
-
-      const cancelResult: ProcessOperationResult = {
-        kind: 'process',
-        status: 'cancelled',
-        exitCode: null,
-        signal: 'SIGINT',
-        stdout: '',
-        stderr: '',
-        isTruncated: false,
-        terminationReason: 'user_cancelled',
-        identityVerification: 'is_original_process',
-        durationMs: Date.now() - startTime,
-        completedAt: new Date().toISOString(),
-      };
-      return this.finalizeOperation(options.opId, cancelResult, options.requiredResources, true);
-    }
-
     // 4. [启动协议步骤 3] 登记执行身份，状态推进为 active
     this.domain.getStore().updateOperationStatus(options.opId, 'active', handle.identity);
     opState.phase = 'active';
@@ -242,20 +222,25 @@ export class ProcessSupervisor {
         streamCallbackError ??= err instanceof Error ? err.message : String(err);
       }
     };
-    const stdoutDrainer = this.setupStreamDrainer(
+    stdoutDrainer = this.setupStreamDrainer(
       handle.stdout,
       maxBytes,
       stdoutSpillPath,
       onChunk,
       forwardChunk('stdout')
     );
-    const stderrDrainer = this.setupStreamDrainer(
+    stderrDrainer = this.setupStreamDrainer(
       handle.stderr,
       maxBytes,
       stderrSpillPath,
       onChunk,
       forwardChunk('stderr')
     );
+
+    // 检查在 spawn 途中是否已被请求取消：若已请求取消，立即触发停止流水线向底层发送终止信号
+    if (opState.cancelRequested) {
+      this.handleStopPipeline(options.opId, 'user_cancelled', opState.cancelGraceMs ?? 2000).catch(() => {});
+    }
 
     let timeoutTimer: NodeJS.Timeout | null = null;
     const timeoutPromise =
@@ -327,6 +312,10 @@ export class ProcessSupervisor {
         ]);
 
         if (!stopRes.stopped || !rootExitOrTimeout.exited) {
+          const stored = this.domain.getStore().getOperation(options.opId);
+          if (stored && stored.status === 'done' && stored.result?.status === 'indeterminate') {
+            return stored.result as unknown as ProcessOperationResult;
+          }
           const indetResult: IndeterminateResult = {
             kind: 'indeterminate',
             status: 'indeterminate',
@@ -445,9 +434,19 @@ export class ProcessSupervisor {
       if (opState.stopPromise) {
         const stopRes = await opState.stopPromise;
         if (!stopRes.stopped) {
-          // 驱动无法确认停止：保留隔离事实与资源锁，绝不覆盖
           const stored = this.domain.getStore().getOperation(options.opId);
-          return (stored?.result ?? null) as unknown as ProcessOperationResult;
+          if (stored && stored.status === 'done') {
+            return (stored.result ?? null) as unknown as ProcessOperationResult;
+          }
+          const indetResult: IndeterminateResult = {
+            kind: 'indeterminate',
+            status: 'indeterminate',
+            reason: `Process ${handle.identity.pid} was cancelled or stopped but could not be confirmed: ${stopRes.errorDetails || 'residual processes still alive'}`,
+            recoveryGuidance: 'Residual PID detected. Inspect system processes manually before releasing resources.',
+            durationMs: Date.now() - startTime,
+            completedAt: new Date().toISOString(),
+          };
+          return this.finalizeOperation(options.opId, indetResult, options.requiredResources, false);
         }
       }
 
@@ -455,6 +454,8 @@ export class ProcessSupervisor {
       // 统一由 finalizeOperation 写入事实与处理资源
       return this.finalizeOperation(options.opId, result, options.requiredResources, true);
     } finally {
+      stdoutDrainer?.forceFinalize();
+      stderrDrainer?.forceFinalize();
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (samplingInterval) clearInterval(samplingInterval);
       this.activeOperations.delete(options.opId);
@@ -472,7 +473,7 @@ export class ProcessSupervisor {
     }
     active.terminationReason = 'user_cancelled';
 
-    if (active.phase === 'active') {
+    if (active.phase === 'active' || active.phase === 'stopping') {
       return this.handleStopPipeline(opId, 'user_cancelled', graceMs);
     }
 
@@ -492,19 +493,21 @@ export class ProcessSupervisor {
   ): Promise<StopProcessResult> {
     const active = this.ensureActiveOperation(opId);
 
-    if (active.stopPromise) {
+    if (active.phase === 'stopping' && active.stopPromise) {
       return active.stopPromise;
     }
 
-    active.stopPromise = (async () => {
-      if (reason === 'user_cancelled') {
-        active.cancelRequested = true;
-      }
-      active.terminationReason = reason;
+    active.phase = 'stopping';
+    if (reason === 'user_cancelled') {
+      active.cancelRequested = true;
+    }
+    active.terminationReason = reason;
 
+    const existingResolve = active.stopResolve;
+    const runPipeline = (async () => {
       if (!active.handle) {
         const res: StopProcessResult = { stopped: true, scope: 'direct_child' };
-        active.stopResolve?.(res);
+        existingResolve?.(res);
         return res;
       }
 
@@ -514,10 +517,8 @@ export class ProcessSupervisor {
       // 2. 调用驱动停止流水线 (SIGINT -> grace -> SIGTERM -> SIGKILL)
       const stopResult = await this.driver.terminate(active.handle.identity, graceMs);
 
-      // 3. 停止流水线只负责向驱动请求停止并返回结果，
-      // 绝不在此预写粗糙终态或修改 Run 状态，结果统一由 executeProcess 作为 Single Writer 写入。
+      // 3. 驱动无法确认停止 -> 立即转入 indeterminate，绝对保留隔离屏障与锁！
       if (!stopResult.stopped) {
-        // 驱动无法确认完全停止 -> 转入 indeterminate，绝对保留隔离屏障与锁！
         const op = this.domain.getStore().getOperation(opId);
         if (op && op.status !== 'done') {
           const indetResult: IndeterminateResult = {
@@ -528,16 +529,16 @@ export class ProcessSupervisor {
             durationMs: Date.now() - active.startTime,
             completedAt: new Date().toISOString(),
           };
-          // 传递 releaseResources = false，绝对不释放锁
           this.finalizeOperation(opId, indetResult, undefined, false);
         }
       }
 
-      active.stopResolve?.(stopResult);
+      existingResolve?.(stopResult);
       return stopResult;
     })();
 
-    return active.stopPromise;
+    active.stopPromise = runPipeline;
+    return runPipeline;
   }
 
   private ensureActiveOperation(opId: string): ActiveOperationState {
@@ -610,6 +611,11 @@ export class ProcessSupervisor {
     requiredResources?: string[],
     releaseResourceLock: boolean = true
   ): ProcessOperationResult {
+    const existing = this.domain.getStore().getOperation(opId);
+    if (existing && existing.status === 'done') {
+      return (existing.result ?? result) as ProcessOperationResult;
+    }
+
     if (result.status === 'indeterminate') {
       this.domain.getStore().recordOperationResult(opId, result, false);
       const op = this.domain.getStore().getOperation(opId);
