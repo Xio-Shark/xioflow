@@ -11,12 +11,14 @@ import {
 } from '../driver/types.js';
 import {
   Operation,
+  OperationResult,
   ProcessOperationResult,
   IndeterminateResult,
   KernelRunStatus,
   TerminationReason,
   ResourceBudget,
   UnsupportedCapabilityError,
+  OperationNotActiveError,
 } from '../types.js';
 
 export interface ExecuteProcessOptions {
@@ -39,18 +41,23 @@ export interface ExecuteProcessOptions {
   onStreamChunk?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void;
 }
 
+interface ActiveOperationState {
+  opId: string;
+  runId: string;
+  phase: 'waiting_resources' | 'intent_registered' | 'spawning' | 'active' | 'stopping' | 'done';
+  startTime: number;
+  handle?: ManagedProcessHandle;
+  command?: StructuredCommand;
+  cancelRequested: boolean;
+  cancelGraceMs?: number;
+  timedOut: boolean;
+  terminationReason?: TerminationReason;
+  stopPromise?: Promise<StopProcessResult>;
+  stopResolve?: (res: StopProcessResult) => void;
+}
+
 export class ProcessSupervisor {
-  private activeOperations: Map<
-    string,
-    {
-      handle: ManagedProcessHandle;
-      command: StructuredCommand;
-      cancelRequested: boolean;
-      timedOut: boolean;
-      terminationReason?: TerminationReason;
-      stopPromise?: Promise<StopProcessResult>;
-    }
-  > = new Map();
+  private activeOperations: Map<string, ActiveOperationState> = new Map();
 
   constructor(
     private readonly domain: ExecutionDomain,
@@ -98,27 +105,53 @@ export class ProcessSupervisor {
       status: 'pending',
     };
 
+    const opState: ActiveOperationState = {
+      opId: options.opId,
+      runId: options.runId,
+      phase: 'waiting_resources',
+      startTime,
+      cancelRequested: false,
+      timedOut: false,
+    };
+    this.activeOperations.set(options.opId, opState);
+
     // 1. [资源分配与排队等待]
     await this.domain.allocateResourcesWithWait(
       options.opId,
       options.requiredResources,
       options.waitTimeoutMs ?? 0,
-      options.resourceBudget
+      options.resourceBudget,
+      () => opState.cancelRequested === true
     );
+
+    if (opState.cancelRequested) {
+      return this.handlePreSpawnCancellation(options, opState, startTime);
+    }
 
     // 2. [启动协议步骤 1] 写入 SQLite (status: intent_registered)
     try {
       this.domain.getStore().registerOperationIntent(op, this.domain.domainId);
+      opState.phase = 'intent_registered';
     } catch (err) {
       this.domain.releaseResources(options.opId, options.requiredResources);
+      this.activeOperations.delete(options.opId);
       throw err;
     }
 
+    if (opState.cancelRequested) {
+      return this.handlePreSpawnCancellation(options, opState, startTime);
+    }
+
     let handle: ManagedProcessHandle;
+    opState.phase = 'spawning';
     try {
       // 3. [启动协议步骤 2] 请求平台驱动启动
       handle = await this.driver.spawn(options.command);
+      opState.handle = handle;
+      opState.command = options.command;
     } catch (spawnError: any) {
+      opState.phase = 'done';
+      opState.stopResolve?.({ stopped: false, scope: 'direct_child', errorDetails: spawnError?.message });
       // 启动失败（如可执行文件不存在），不产生假运行状态，直接失败收尾并释放资源
       const failResult: ProcessOperationResult = {
         kind: 'process',
@@ -133,23 +166,47 @@ export class ProcessSupervisor {
         durationMs: Date.now() - startTime,
         completedAt: new Date().toISOString(),
       };
-      this.domain.getStore().recordOperationResult(options.opId, failResult, true);
-      this.domain.releaseResources(options.opId, options.requiredResources);
-      return failResult;
+      return this.finalizeOperation(options.opId, failResult, options.requiredResources, true);
+    }
+
+    // 检查在 spawn 途中是否已被请求取消
+    if (opState.cancelRequested) {
+      opState.phase = 'stopping';
+      this.domain.getStore().updateOperationStatus(options.opId, 'active', handle.identity);
+      const stopRes = await this.driver.terminate(handle.identity, opState.cancelGraceMs ?? 2000);
+      opState.stopResolve?.(stopRes);
+
+      if (!stopRes.stopped) {
+        const indetResult: IndeterminateResult = {
+          kind: 'indeterminate',
+          status: 'indeterminate',
+          reason: `Process ${handle.identity.pid} was cancelled during spawn but could not be confirmed stopped: ${stopRes.errorDetails}`,
+          recoveryGuidance: 'Residual PID detected. Inspect system processes manually before releasing resources.',
+          durationMs: Date.now() - startTime,
+          completedAt: new Date().toISOString(),
+        };
+        return this.finalizeOperation(options.opId, indetResult, options.requiredResources, false);
+      }
+
+      const cancelResult: ProcessOperationResult = {
+        kind: 'process',
+        status: 'cancelled',
+        exitCode: null,
+        signal: 'SIGINT',
+        stdout: '',
+        stderr: '',
+        isTruncated: false,
+        terminationReason: 'user_cancelled',
+        identityVerification: 'is_original_process',
+        durationMs: Date.now() - startTime,
+        completedAt: new Date().toISOString(),
+      };
+      return this.finalizeOperation(options.opId, cancelResult, options.requiredResources, true);
     }
 
     // 4. [启动协议步骤 3] 登记执行身份，状态推进为 active
     this.domain.getStore().updateOperationStatus(options.opId, 'active', handle.identity);
-
-    const opState = {
-      handle,
-      command: options.command,
-      cancelRequested: false,
-      timedOut: false,
-      terminationReason: undefined as TerminationReason | undefined,
-      stopPromise: undefined as Promise<StopProcessResult> | undefined,
-    };
-    this.activeOperations.set(options.opId, opState);
+    opState.phase = 'active';
 
     // 准备 artifacts 溢出转储目录
     const artifactsDir = options.artifactsDir || path.join(this.domain.domainPath, 'artifacts');
@@ -258,8 +315,30 @@ export class ProcessSupervisor {
       if (exitOrTimeout.type === 'timeout') {
         opState.timedOut = true;
         opState.terminationReason = 'timed_out';
-        await this.handleStopPipeline(options.opId, 'timed_out', 1500);
-        exitResult = await handle.onExit;
+        const stopRes = await this.handleStopPipeline(options.opId, 'timed_out', 1500);
+
+        // 超时路径：根进程已由停止流水线终止，等待根进程退出事实（避免被持有管道的逃逸后代挂死）
+        // 关键防护（问题 4）：给等待根进程退出增加有界上限（1000ms），
+        // 若驱动停止未确认（stopped: false）或根进程超出上限仍未退出，转入 indeterminate
+        const rootExitWaitMs = 1000;
+        const rootExitOrTimeout = await Promise.race([
+          (handle.onRootExit ?? handle.onExit).then((res) => ({ exited: true as const, res })),
+          new Promise<{ exited: false }>((resolve) => setTimeout(() => resolve({ exited: false }), rootExitWaitMs)),
+        ]);
+
+        if (!stopRes.stopped || !rootExitOrTimeout.exited) {
+          const indetResult: IndeterminateResult = {
+            kind: 'indeterminate',
+            status: 'indeterminate',
+            reason: `Process ${handle.identity.pid} timed out and root process could not be confirmed exited within ${rootExitWaitMs}ms bound: ${stopRes.errorDetails || 'root process still alive'}`,
+            recoveryGuidance: 'Residual PID detected. Inspect system processes manually before releasing resources.',
+            durationMs: Date.now() - startTime,
+            completedAt: new Date().toISOString(),
+          };
+          return this.finalizeOperation(options.opId, indetResult, options.requiredResources, false);
+        }
+
+        exitResult = rootExitOrTimeout.res;
       } else {
         exitResult = exitOrTimeout.res!;
       }
@@ -287,9 +366,7 @@ export class ProcessSupervisor {
             durationMs: Date.now() - startTime,
             completedAt: new Date().toISOString(),
           };
-          this.domain.getStore().recordOperationResult(options.opId, indetResult, false);
-          this.domain.getStore().updateRunStatus(options.runId, 'indeterminate', 'crash_detected');
-          return indetResult as unknown as ProcessOperationResult;
+          return this.finalizeOperation(options.opId, indetResult, options.requiredResources, false);
         }
         residualProcessesReaped = true;
         // 被杀死的后代释放管道后，给排空最后一次机会
@@ -366,35 +443,17 @@ export class ProcessSupervisor {
       };
 
       if (opState.stopPromise) {
-        await opState.stopPromise;
-      }
-
-      const existingOp = this.domain.getStore().getOperation(options.opId);
-      if (existingOp && existingOp.status === 'done') {
-        const storedResult = existingOp.result as unknown as { status?: string };
-        if (storedResult?.status === 'indeterminate') {
+        const stopRes = await opState.stopPromise;
+        if (!stopRes.stopped) {
           // 驱动无法确认停止：保留隔离事实与资源锁，绝不覆盖
-          return existingOp.result as unknown as ProcessOperationResult;
+          const stored = this.domain.getStore().getOperation(options.opId);
+          return (stored?.result ?? null) as unknown as ProcessOperationResult;
         }
-        // 内部停止流水线（超时 / 资源超限）会先写一份粗糙终态；这里用本次采集到的
-        // 真实退出码、输出与耗时覆盖它，避免把已捕获的输出证据丢掉。
-        this.domain.getStore().recordOperationResult(options.opId, result, true);
-        return result;
       }
 
-      // 6. [事务提交结果与释放资源]
-      this.domain.getStore().recordOperationResult(options.opId, result, true);
-      this.domain.releaseResources(options.opId, options.requiredResources);
-
-      if (terminationReason && terminationReason !== 'completed') {
-        this.domain.getStore().updateRunStatus(
-          options.runId,
-          finalStatus === 'cancelled' ? 'cancelled' : 'failed',
-          terminationReason
-        );
-      }
-
-      return result;
+      // 6. [事务提交结果与释放资源 - Single Writer]
+      // 统一由 finalizeOperation 写入事实与处理资源
+      return this.finalizeOperation(options.opId, result, options.requiredResources, true);
     } finally {
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (samplingInterval) clearInterval(samplingInterval);
@@ -406,7 +465,24 @@ export class ProcessSupervisor {
    * 停止确认流水线 (Stopping Pipeline)
    */
   public async cancelOperation(opId: string, graceMs: number = 2000): Promise<StopProcessResult> {
-    return this.handleStopPipeline(opId, 'user_cancelled', graceMs);
+    const active = this.ensureActiveOperation(opId);
+    active.cancelRequested = true;
+    if (active.cancelGraceMs === undefined) {
+      active.cancelGraceMs = graceMs;
+    }
+    active.terminationReason = 'user_cancelled';
+
+    if (active.phase === 'active') {
+      return this.handleStopPipeline(opId, 'user_cancelled', graceMs);
+    }
+
+    // 操作仍在等资源、intent_registered 或 spawn 途中，返回已有的或新建的 stopPromise
+    if (!active.stopPromise) {
+      active.stopPromise = new Promise((resolve) => {
+        active.stopResolve = resolve;
+      });
+    }
+    return active.stopPromise;
   }
 
   public async handleStopPipeline(
@@ -414,24 +490,23 @@ export class ProcessSupervisor {
     reason: TerminationReason,
     graceMs: number
   ): Promise<StopProcessResult> {
-    const active = this.activeOperations.get(opId);
-    if (!active) {
-      return { stopped: true, scope: 'direct_child' };
-    }
+    const active = this.ensureActiveOperation(opId);
 
     if (active.stopPromise) {
       return active.stopPromise;
     }
 
     active.stopPromise = (async () => {
-      if (this.domain.isClosed()) {
-        return { stopped: true, scope: 'direct_child' };
-      }
-
       if (reason === 'user_cancelled') {
         active.cancelRequested = true;
       }
       active.terminationReason = reason;
+
+      if (!active.handle) {
+        const res: StopProcessResult = { stopped: true, scope: 'direct_child' };
+        active.stopResolve?.(res);
+        return res;
+      }
 
       // 1. 进入 stopping 中间态（保持排他资源锁定，阻断新操作）
       this.domain.getStore().updateOperationStatus(opId, 'stopping');
@@ -439,53 +514,116 @@ export class ProcessSupervisor {
       // 2. 调用驱动停止流水线 (SIGINT -> grace -> SIGTERM -> SIGKILL)
       const stopResult = await this.driver.terminate(active.handle.identity, graceMs);
 
-      if (stopResult.stopped) {
-        // 3a. 驱动确认停止 -> 记录终态并安全释放资源
+      // 3. 停止流水线只负责向驱动请求停止并返回结果，
+      // 绝不在此预写粗糙终态或修改 Run 状态，结果统一由 executeProcess 作为 Single Writer 写入。
+      if (!stopResult.stopped) {
+        // 驱动无法确认完全停止 -> 转入 indeterminate，绝对保留隔离屏障与锁！
         const op = this.domain.getStore().getOperation(opId);
         if (op && op.status !== 'done') {
-          const cancelResult: ProcessOperationResult = {
-            kind: 'process',
-            status: reason === 'user_cancelled' ? 'cancelled' : 'failed',
-            exitCode: null,
-            signal: 'SIGKILL',
-            stdout: '',
-            stderr: `Operation stopped via stopping pipeline (${reason})`,
-            isTruncated: false,
-            terminationReason: reason,
-            identityVerification: 'not_original_process',
-            durationMs: 0,
-            completedAt: new Date().toISOString(),
-          };
-          this.domain.getStore().recordOperationResult(opId, cancelResult, true);
-          this.domain.releaseResources(opId, op.requiredResources);
-          this.domain.getStore().updateRunStatus(
-            op.runId,
-            reason === 'user_cancelled' ? 'cancelled' : 'failed',
-            reason
-          );
-        }
-      } else {
-        // 3b. 驱动无法确认完全停止 -> 转入 indeterminate，绝对保留隔离屏障与锁！
-        const op = this.domain.getStore().getOperation(opId);
-        if (op && op.status !== 'done') {
-          const indetResult = {
-            kind: 'indeterminate' as const,
-            status: 'indeterminate' as const,
+          const indetResult: IndeterminateResult = {
+            kind: 'indeterminate',
+            status: 'indeterminate',
             reason: `Process ${active.handle.identity.pid} could not be confirmed stopped: ${stopResult.errorDetails}`,
             recoveryGuidance: 'Residual PID detected. Inspect system processes manually before releasing resources.',
-            durationMs: 0,
+            durationMs: Date.now() - active.startTime,
             completedAt: new Date().toISOString(),
           };
           // 传递 releaseResources = false，绝对不释放锁
-          this.domain.getStore().recordOperationResult(opId, indetResult, false);
-          this.domain.getStore().updateRunStatus(op.runId, 'indeterminate', 'crash_detected');
+          this.finalizeOperation(opId, indetResult, undefined, false);
         }
       }
 
+      active.stopResolve?.(stopResult);
       return stopResult;
     })();
 
     return active.stopPromise;
+  }
+
+  private ensureActiveOperation(opId: string): ActiveOperationState {
+    if (this.domain.isClosed()) {
+      throw new OperationNotActiveError(opId, 'domain_closed');
+    }
+
+    const active = this.activeOperations.get(opId);
+    if (!active || active.phase === 'done') {
+      const stored = this.domain.getStore().getOperation(opId);
+      if (!stored) {
+        throw new OperationNotActiveError(opId, 'not_found');
+      }
+      if (stored.status === 'done') {
+        throw new OperationNotActiveError(opId, 'already_completed');
+      }
+      throw new OperationNotActiveError(
+        opId,
+        'not_found',
+        `Operation "${opId}" is not active (current status: ${stored.status}).`
+      );
+    }
+
+    return active;
+  }
+
+  private handlePreSpawnCancellation(
+    options: ExecuteProcessOptions,
+    opState: ActiveOperationState,
+    startTime: number
+  ): ProcessOperationResult {
+    opState.phase = 'done';
+    const stopRes: StopProcessResult = { stopped: true, scope: 'direct_child' };
+    opState.stopResolve?.(stopRes);
+
+    const stored = this.domain.getStore().getOperation(options.opId);
+    if (!stored) {
+      const op: Operation = {
+        id: options.opId,
+        runId: options.runId,
+        kind: 'process',
+        name: options.name,
+        inputFingerprint: options.inputFingerprint || 'fingerprint-pre-spawn-cancelled',
+        requiredResources: options.requiredResources,
+        status: 'intent_registered',
+      };
+      this.domain.getStore().registerOperationIntent(op, this.domain.domainId);
+    }
+
+    const cancelResult: ProcessOperationResult = {
+      kind: 'process',
+      status: 'cancelled',
+      exitCode: null,
+      signal: null,
+      stdout: '',
+      stderr: '',
+      isTruncated: false,
+      terminationReason: 'user_cancelled',
+      evidence: 'unobserved',
+      identityVerification: 'not_original_process',
+      durationMs: Date.now() - startTime,
+      completedAt: new Date().toISOString(),
+    };
+    return this.finalizeOperation(options.opId, cancelResult, options.requiredResources, true);
+  }
+
+  private finalizeOperation(
+    opId: string,
+    result: OperationResult,
+    requiredResources?: string[],
+    releaseResourceLock: boolean = true
+  ): ProcessOperationResult {
+    if (result.status === 'indeterminate') {
+      this.domain.getStore().recordOperationResult(opId, result, false);
+      const op = this.domain.getStore().getOperation(opId);
+      if (op) {
+        const termReason = (result as any).terminationReason as TerminationReason | undefined;
+        this.domain.getStore().updateRunStatus(op.runId, 'indeterminate', termReason);
+      }
+    } else {
+      this.domain.getStore().recordOperationResult(opId, result, true);
+      if (releaseResourceLock && requiredResources && requiredResources.length > 0) {
+        this.domain.releaseResources(opId, requiredResources);
+      }
+    }
+    return result as ProcessOperationResult;
   }
 
   private setupStreamDrainer(

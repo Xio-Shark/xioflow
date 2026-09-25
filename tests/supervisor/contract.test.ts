@@ -288,7 +288,7 @@ describe('Task 02: Real Platform Driver, Stopping Pipeline & Headless Contract T
     expect(independentResult.stdout.trim()).toBe('Independent worker finished');
   });
 
-  it('7. Soft 模式资源治理：真实采样超限并写回 memory_exceeded 与 run.terminationReason', async () => {
+  it('7. Soft 模式资源治理：真实采样超限触发 memory_exceeded，单 op 失败不改写 run 状态 (N3)', async () => {
     // 内存泄漏脚本：分配 40MB 内存并保持常驻
     const leakScript = `
       const buf = Buffer.alloc(1024 * 1024 * 40, 1);
@@ -315,12 +315,12 @@ describe('Task 02: Real Platform Driver, Stopping Pipeline & Headless Contract T
     expect(result.terminationReason).toBe('memory_exceeded');
     expect(domain.isResourceLocked('res:soft-mem')).toBe(false);
 
-    // 验证 run 级终态原因同步写入
+    // 验证 N3: 单个 op 失败不改写 run 状态，run 保持 running
     const run = domain.getStore().getRun('run-drv');
-    expect(run?.terminationReason).toBe('memory_exceeded');
+    expect(run?.status).toBe('running');
   });
 
-  it('8. Soft 模式输出治理：真实流输出超限触发 output_exceeded 并写回 run.terminationReason', async () => {
+  it('8. Soft 模式输出治理：真实流输出超限触发 output_exceeded，单 op 失败不改写 run 状态 (N3)', async () => {
     // 持续输出大批量数据脚本（输出约 1MB）
     const heavyPrintScript = `
       const buf = Buffer.alloc(1024 * 50, 'x');
@@ -349,11 +349,10 @@ describe('Task 02: Real Platform Driver, Stopping Pipeline & Headless Contract T
     expect(result.terminationReason).toBe('output_exceeded');
     expect(domain.isResourceLocked('res:soft-output')).toBe(false);
 
-      // 验证 run 级终态原因同步写入
-      const run = domain.getStore().getRun('run-drv');
-      expect(run?.terminationReason).toBe('output_exceeded');
-      expect(run?.status).toBe('failed');
-    });
+    // 验证 N3: 单个 op 失败不改写 run 状态，run 保持 running
+    const run = domain.getStore().getRun('run-drv');
+    expect(run?.status).toBe('running');
+  });
 
   it('9. 复杂孤儿逃逸检测：中间父进程先退出导致 PPID 断链变 1 场景下诚实探测到逃逸孤儿', async () => {
     const bPidFile = path.join(tempDir, 'b.pid');
