@@ -110,7 +110,9 @@ try {
   assert.equal(big.stderrTruncated, false);
   assert.equal(big.stdoutBytes, totalBytes);
   assert.match(big.stdoutHash, /^[0-9a-f]{64}$/);
-  assert.equal(Buffer.byteLength(big.stdout, 'utf8'), maxBytes);
+  assert.ok(Buffer.byteLength(big.stdout, 'utf8') <= maxBytes);
+  assert.ok(Buffer.byteLength(big.stdout, 'utf8') >= maxBytes - 256);
+  assert.ok(big.stdout.includes('[... truncated'));
   assert.ok(big.outputRef && fs.existsSync(big.outputRef), 'spill file must exist');
   const spilled = fs.readFileSync(big.outputRef);
   assert.equal(spilled.length, totalBytes);
@@ -237,7 +239,7 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 400));
   const stop = await supervisor.cancelOperation('op-cancel', 1500);
   const cancelled = await pending;
-  assert.equal(stop.stopped, true);
+  assert.equal(stop.stopped, 'confirmed_stopped');
   assert.equal(cancelled.status, 'cancelled');
   assert.equal(domain.isResourceLocked('embed:cancel'), false);
   ok('confirmed stop releases lease', `scope=${stop.scope} status=${cancelled.status}`);

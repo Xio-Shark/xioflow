@@ -59,6 +59,13 @@ export class SqliteStore {
   }
 
   /**
+   * 触发代际栅栏，永久阻断后续所有写操作 (P0-11)
+   */
+  public fence(): void {
+    this.currentEpoch = -1;
+  }
+
+  /**
    * @internal 仅供测试套件模拟跨代/代际穿透场景，严禁在生产运行时直接调用
    */
   public unsafeSetCurrentEpochForTesting(epoch: number | null): void {
@@ -347,6 +354,36 @@ export class SqliteStore {
     });
   }
 
+  public reportRunCancelled(runId: string, reason: TerminationReason = 'user_cancelled'): void {
+    this.transaction(() => {
+      const run = this.getRun(runId);
+      if (!run) throw new Error(`Run '${runId}' not found`);
+      this.verifyEpochFencing(run.domainId);
+      if (run.status === 'succeeded' || run.status === 'failed' || run.status === 'cancelled' || run.status === 'indeterminate') {
+        throw new Error(
+          `Cannot report run '${runId}' cancelled: already finalized with status '${run.status}'`
+        );
+      }
+      this.updateRunStatus(runId, 'cancelled', reason, new Date().toISOString());
+    });
+  }
+
+  public getActiveRuns(domainId: string): Run[] {
+    const stmt = this.db.prepare('SELECT * FROM runs WHERE domain_id = ? AND status = ?');
+    const rows = stmt.all(domainId, 'running') as any[];
+    return rows.map((row) => ({
+      id: row.id,
+      taskId: row.task_id,
+      domainId: row.domain_id,
+      owner: row.owner,
+      status: row.status as KernelRunStatus,
+      terminationReason: row.termination_reason as TerminationReason | undefined,
+      startedAt: row.started_at,
+      endedAt: row.ended_at || undefined,
+      configSnapshotWhiteList: row.config_snapshot ? JSON.parse(row.config_snapshot) : undefined,
+    }));
+  }
+
   public registerOperationIntent(op: Operation, domainId: string): void {
     const run = this.getRun(op.runId);
     if (!run) {
@@ -511,6 +548,20 @@ export class SqliteStore {
     });
   }
 
+  public updateOperationResult(opId: string, result: OperationResult): void {
+    this.transaction(() => {
+      const op = this.getOperation(opId);
+      if (!op) throw new Error(`Operation ${opId} not found`);
+      this.verifyEpochFencing(op.domainId);
+      const stmt = this.db.prepare(`
+        UPDATE operations
+        SET result = ?
+        WHERE id = ?
+      `);
+      stmt.run(JSON.stringify(result), opId);
+    });
+  }
+
   public recordOperationResult(
     opId: string,
     result: OperationResult,
@@ -618,6 +669,29 @@ export class SqliteStore {
     }));
   }
 
+  public getAllOperations(domainId: string): (Operation & { domainId: string })[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM operations
+      WHERE domain_id = ?
+    `);
+    const rows = stmt.all(domainId) as any[];
+    return rows.map((row) => ({
+      id: row.id,
+      runId: row.run_id,
+      domainId: row.domain_id,
+      kind: row.kind,
+      name: row.name,
+      inputFingerprint: row.input_fingerprint,
+      requiredResources: JSON.parse(row.required_resources),
+      timeoutMs: row.timeout_ms || undefined,
+      resourceBudget: row.resource_budget ? JSON.parse(row.resource_budget) : undefined,
+      outputRef: row.output_ref || undefined,
+      status: row.status as OperationStatus,
+      processIdentity: row.process_identity ? JSON.parse(row.process_identity) : undefined,
+      result: row.result ? JSON.parse(row.result) : undefined,
+    }));
+  }
+
   public getPersistedResourceLeases(domainId: string): (ResourceLease & { budget?: ResourceBudget })[] {
     const stmt = this.db.prepare('SELECT * FROM resource_leases WHERE domain_id = ?');
     const rows = stmt.all(domainId) as any[];
@@ -641,6 +715,7 @@ export class SqliteStore {
   }
 
   public recordEventAndTransitionState(event: Omit<JournalEvent, 'seq'>): number {
+    this.verifyEpochFencing(event.domainId);
     const stmt = this.db.prepare(`
       INSERT INTO journal_events (domain_id, run_id, operation_id, type, payload, timestamp)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -663,6 +738,24 @@ export class SqliteStore {
       ORDER BY seq ASC
     `);
     const rows = stmt.all(domainId, fromSeq) as any[];
+    return rows.map((row) => ({
+      seq: row.seq,
+      domainId: row.domain_id,
+      runId: row.run_id || undefined,
+      operationId: row.operation_id || undefined,
+      type: row.type,
+      payload: JSON.parse(row.payload),
+      timestamp: row.timestamp,
+    }));
+  }
+
+  public getEventsByRun(runId: string): JournalEvent[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM journal_events
+      WHERE run_id = ?
+      ORDER BY seq ASC
+    `);
+    const rows = stmt.all(runId) as any[];
     return rows.map((row) => ({
       seq: row.seq,
       domainId: row.domain_id,

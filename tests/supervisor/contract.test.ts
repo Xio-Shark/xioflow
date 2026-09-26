@@ -167,7 +167,7 @@ describe('Task 02: Real Platform Driver, Stopping Pipeline & Headless Contract T
       },
       async terminate(): Promise<StopProcessResult> {
         return {
-          stopped: false,
+          stopped: 'cannot_determine',
           scope: 'unknown',
           residualPids: [99999],
           errorDetails: 'Process refused to die',
@@ -191,7 +191,7 @@ describe('Task 02: Real Platform Driver, Stopping Pipeline & Headless Contract T
     await new Promise((r) => setTimeout(r, 100));
     // 手动取消
     const cancelRes = await mockSupervisor.cancelOperation('op-stubborn');
-    expect(cancelRes.stopped).toBe(false);
+    expect(cancelRes.stopped).toBe('cannot_determine');
 
     // 关键架构红线断言：未确认停止时，资源锁绝对不能被释放！
     expect(domain.isResourceLocked('res:stubborn-resource')).toBe(true);
@@ -453,7 +453,7 @@ setTimeout(() => {
       // 驱动基于运行时累积后代作为 BFS 种子探活，诚实探测到残留并标记 stopped: false
       const cancelRes = await supervisor.cancelOperation('op-lineage-escape', 1000);
 
-      expect(cancelRes.stopped).toBe(false);
+      expect(cancelRes.stopped).toBe('cannot_determine');
       expect(cancelRes.residualPids).toBeDefined();
       expect(cancelRes.residualPids).toContain(orphanPid);
 

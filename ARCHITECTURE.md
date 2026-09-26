@@ -42,7 +42,7 @@
 | **模型上下文** | 完全不处理模型上下文、自然语言与提示词 | 提示词片段拼装、规约按需注入、会话裁剪 |
 | **界面与工件** | 零 UI 依赖、不强制任何特定 Markdown 文件 | CLI、TUI、三件套文档及其他呈现形式 |
 
-### 0.2 五项核心架构裁决
+### 0.2 九项核心架构裁决
 
 #### 1. 管理范围：默认工作区级执行域，不做整机统一调度
 - **执行域（Execution Domain）定义**：一个执行域拥有一份持久化 SQLite 状态库、一个活动内核所有者（Active Kernel Owner）、一套资源登记与预算配额，以及域内有序的事务事件记录；
@@ -91,6 +91,30 @@ Linux 发行版生态建立在 syscall ABI 长期稳定之上。xioflow 的等�
 - **三件 ABI**：§5 的协议消息形状、§1 的 `domain.db` schema（带 `user_version` 迁移）、§7 的 conformance 契约；
 - **版本策略**：协议与 schema 独立于任何语言包的版本号，按 SemVer 演进；破坏性变更必须提升主版本并提供迁移；
 - **实现地位**：Rust 核心是规范实现，TypeScript 0.1.x 是历史参考实现；任何实现（含第三方）以通过 conformance 等级为准，而不以代码同源为准。
+
+#### 6. op 幂等：内核只做副作用层，至多发生一次（或诚实报错）
+- xioflow 不做 workflow 引擎；它是 durable 引擎（Temporal、Restate、LangGraph 等）下面的**副作用层**。引擎负责重放，内核负责「同一个 opId 的副作用至多发生一次，否则如实报告」；
+- `opId` 在执行域内唯一，跨 Run 生效（D17）。Run 仍是「单次执行尝试」：崩溃后继续同一任务需开新 Run，重放的 op 返回原 Run 下已记录的事实；
+- 重放判定表（详见 §3.7）：不存在 → 正常执行；存在且指纹不同 → `OperationIdConflictError`；在飞 → 加入同一结果；已结清 → 返回已记录结果并标 `replayed: true`；`indeterminate` → 原样返回，绝不重跑；未终结且不在内存（崩溃现场未恢复） → `RecoveryRequiredError`；
+- 每次重放写 `OPERATION_REPLAYED` 事件，让「没有盲目重放」本身可审计；
+- 0.2.0 的 `DuplicateOperationError` 在 0.3.0 放宽为幂等重放，放宽方向单调，不削弱任何保证。
+
+#### 7. service：受监督的长驻进程，实例即 process op
+- 新增 `kind: 'service'`。一个 service 由若干**实例**组成，每个实例就是一个普通 process op（opId = `<serviceId>#<n>`），完全复用启动、停止、身份与恢复协议，不引入第二套状态机；
+- 实例的 stdio：`stdinMode: 'stream'`（持续可写，宿主关闭或停止时关闭），stdout 为**直通**（调用方消费，内核不在内存保留、可选旁路落盘），stderr 按现有有界排空与转储处理；
+- 就绪事实：`readiness: 'spawned' | { stdoutLine: RegExp }`，就绪后写 `SERVICE_READY`；
+- 重启规格（D19）：`restart: 'never' | { policy: 'on-failure', maxRestarts, backoffMs }`；每次重启是新实例 op，写 `SERVICE_RESTARTED`；超过上限 ⇒ service 终态 `failed`；
+- 宿主崩溃：恢复引擎按普通 op 处理各实例（核验身份、停止、结清），**不自动重启**；是否重启由新宿主决定。
+
+#### 8. 快照绑定 journal seq，支持 materialize 分叉
+- `SnapshotRef` 增加 `journalSeq`：捕获事务里 `SNAPSHOT_CAPTURED` 事件的 seq。语义是「工作区在 seq N 时的状态」。发行版回退对话到 seq N 时，据此找到对应快照。内核不碰对话；
+- `snapshot.materialize(snapshotId, newRoot)`：在新根目录生成独立工作区（首个驱动用 `git worktree add --detach`），登记为受管资源 `workspace:write:<newRoot>`；`dematerialize` 回收。用于 best-of-N 并行候选。
+
+#### 9. capability：授权事实的结构化载体，统一租约、写根与快照
+- capability 由发行版策略签发（内核不判定谁该拿到），内核在准入时只做结构校验：存在、未过期、属于当前 epoch、op 申请的资源与写根都被 capability 覆盖（路径先 realpath 再判包含）。校验失败显式拒绝，签发、收窄、使用都写 journal；
+- 同一个 capability 同时决定租约集合、`ConfinementDriver` 的可写根、快照根。op 只声明 `capabilityId` 时，这三者由它推导，不再是三个可能互相矛盾的字段；
+- 回滚 `coverage` 由「本次是否真的在 capability 范围内受限执行」推导：有写入限制 ⇒ 可达 `complete`；没有 ⇒ 最多 `declared_roots`；
+- 不是安全边界（§8.1 不变）；嵌入模式不做签名（D18），daemon 模式再议。
 
 ---
 
@@ -197,7 +221,7 @@ export interface ResourceBudget {
 export interface Operation {
   id: string;
   runId: string;
-  kind: 'process' | 'snapshot' | 'rollback' | 'filesystem' | 'gate' | 'custom';
+  kind: 'process' | 'service' | 'snapshot' | 'rollback' | 'filesystem' | 'gate' | 'custom';
   name: string;
   inputFingerprint: string;        // 输入与配置的内容哈希（sha256），不是可读拼接串
   requiredResources: string[];     // 申请占用的资源（如 ["workspace:write:root"]）
@@ -205,6 +229,7 @@ export interface Operation {
   resourceBudget?: ResourceBudget; // 显式声明的资源治理预算
   mutationRoots?: string[];        // 目标态：本操作可能改动的工作区根目录（快照 / 回滚 / 写入限制的作用范围）
   snapshotBefore?: boolean;        // 目标态：意图登记时是否先打前置快照（§3.5）
+  capabilityId?: string;           // 目标态：关联的授权 capability 标识（§0.2 裁决 9）
   status: 'pending' | 'intent_registered' | 'active' | 'stopping' | 'done';
 }
 
@@ -222,6 +247,7 @@ export type OperationResult =
 export interface BaseResult {
   durationMs: number;
   completedAt: string;
+  replayed?: true;                 // 目标态：该结果由幂等重放返回（§3.7）
 }
 
 export interface ProcessOperationResult extends BaseResult {
@@ -255,6 +281,7 @@ export interface SnapshotRef {
   roots: string[];                 // 实际覆盖的根目录
   coverage: 'worktree_non_ignored' | 'full_tree';  // git 影子引用不含被忽略文件，必须如实声明
   treeFingerprint: string;         // 快照内容指纹，用于回滚后核验
+  journalSeq: number;              // 捕获时刻事务在 journal 中的全局递增序号（§0.2 裁决 8）
   createdAt: string;
 }
 
@@ -285,6 +312,38 @@ export interface AdjudicationRecord {
   note?: string;
   residualPids?: number[];         // abandon 时如实保留残留进程事实
   decidedAt: string;
+}
+
+/**
+ * 目标态：授权 Capability（§0.2 裁决 9）
+ */
+export interface Capability {
+  id: string;
+  scope: {
+    write: string[];                 // 允许写入的工作区路径根列表（先 realpath 后判定包含）
+    exclusive: string[];             // 允许独占申请的受管资源列表
+  };
+  issuedBy: string;                  // 签发方标识（发行版策略名 / 用户）
+  expiresAt: string;                 // ISO8601 过期时刻
+  parentId?: string;                 // 派生父 capability 标识（收窄派生）
+  epoch: number;                     // 签发时的域 epoch，跨代失效
+}
+
+/**
+ * 错误类型定义（目标态 / 0.3.0）
+ */
+export class OperationIdConflictError extends Error {
+  constructor(public opId: string, public existingFingerprint: string, public incomingFingerprint: string) {
+    super(`Operation ID '${opId}' already exists with a different input fingerprint`);
+    this.name = 'OperationIdConflictError';
+  }
+}
+
+export class RecoveryRequiredError extends Error {
+  constructor(public opId: string, public existingStatus: string) {
+    super(`Operation '${opId}' is recorded as '${existingStatus}' but not active in memory; recovery must be performed before replay`);
+    this.name = 'RecoveryRequiredError';
+  }
 }
 
 export interface FilesystemOperationResult extends BaseResult {
@@ -318,7 +377,7 @@ export type IdentityVerificationResult =
 
 ---
 
-## 3. 六大核心运行协议 (Formal Protocols)
+## 3. 八大核心运行协议 (Formal Protocols)
 
 ### 3.1 启动协议：先登记意图，再执行 (Intent-First Spawn Protocol)
 杜绝“启动了进程却无记录”的崩溃盲区。规范实现采用**两段式受控启动（Gated Spawn）**：子进程在 `exec` 之前阻塞在一道门上，身份落库后才放行，从构造上消除“已执行但无身份记录”的窗口：
@@ -368,9 +427,11 @@ export type IdentityVerificationResult =
 | **操作收尾** | 该 Run 下所有发起的 Operation 均已达到终态（无 `active`/`stopping`） | 阻断 Run 结束，等待底层收尾 |
 | **资源结清** | 该 Run 占用的临时排他资源已安全释放 | 保持 Run 活跃，进行资源清理 |
 | **无悬挂不确定态** | 关键操作不存在未裁决的 `indeterminate` 状态 | 标记 Run 为 `indeterminate` 并报警 |
-| **业务验收结论** | 发行版显式提交 `reportRunSucceeded()` 或 `reportRunFailed()` | 内核仅确认执行事实完整，不自行猜测业务对错 |
+| **业务验收结论** | 发行版显式提交 `reportRunSucceeded()`、`reportRunFailed()` 或 `reportRunCancelled()` | 内核仅确认执行事实完整，不自行猜测业务对错 |
 
 > **重要规则**：内核中的 `Run.status = succeeded` 仅表示“该执行尝试在内核受管协议下已完整合法收尾”，**不代表该任务的所有业务需求在逻辑上必然完全正确**（业务验收由发行版自行断言）。
+
+> **Run 状态的来源（只有三种）**：① 发行版经 `reportRunSucceeded` / `reportRunFailed` / `reportRunCancelled` 显式上报；② 恢复协议 §3.2 第 5 步的收敛；③ 停止未确认时置 `indeterminate`。单个 Operation 的失败、超时或取消只记录在该 Operation 上，不改写 Run；已终结的 Run 拒绝登记新 Operation。发行版不得直接写 Run 状态。
 
 ### 3.4 恢复协议：凭证后置条件关联，不凭存在猜成功
 恢复已崩溃的操作时，严禁因为“目标文件存在”或“Git 有个 commit”就盲目推断为成功：
@@ -409,7 +470,11 @@ export type IdentityVerificationResult =
 ```
 
 - **快照保留与回收**：内核只提供 `pruneSnapshots(filter)` 原语，且拒绝回收仍被未终结 / 未裁决操作引用的快照；保留策略由发行版决定；
-- **首个规范驱动**：`git-shadow`——用临时 `GIT_INDEX_FILE` 执行 `add -A` + `write-tree` + `commit-tree`，写入私有 ref `refs/xioflow/snapshots/<id>`，不触碰用户 index 与分支；覆盖声明为 `worktree_non_ignored`（被忽略文件如 `node_modules` 不在快照内，必须如实声明）。
+- **首个规范驱动**：`git-shadow`——用临时 `GIT_INDEX_FILE` 执行 `add -A` + `write-tree` + `commit-tree`，写入私有 ref `refs/xioflow/snapshots/<id>`，不触碰用户 index 与分支；覆盖声明为 `worktree_non_ignored`（被忽略文件如 `node_modules` 不在快照内，必须如实声明）；
+- **快照绑定 Journal Seq**：捕获事务内写入 `SNAPSHOT_CAPTURED` 事件，并将该事件在 journal 中的全局递增序号记录到 `SnapshotRef.journalSeq`。语义是「工作区在事件 seq N 时的状态」。发行版回退对话到 seq N 时，据此查询 `journalSeq <= N` 的最近快照，内核不触碰对话状态；
+- **分叉工作区（Materialize 与 Dematerialize）**：
+  - `snapshot.materialize(snapshotId, newRoot)`：在新根目录生成独立工作区（首个驱动使用 `git worktree add --detach <newRoot> refs/xioflow/snapshots/<snapshotId>`），登记为受管独占资源 `workspace:write:<newRoot>`；源工作区、用户 index、HEAD 与分支保持不变；
+  - `snapshot.dematerialize(newRoot)`：回收临时工作区（`git worktree remove --force <newRoot>`），释放对应资源租约。用于并行候选尝试（如 best-of-N 生成）。
 
 ### 3.6 人工裁决协议：indeterminate 必须有受审计的出口（目标态）
 `indeterminate` 保留租约是正确的，但必须提供唯一、受审计的出口，否则资源会被永久冻结，调用方只能绕过协议直接改库：
@@ -425,6 +490,41 @@ adjudicate(opId, verdict, actor, note?)
 
 - 内核不自动裁决、不设超时自动释放；是否向用户提问、采用何种策略由发行版决定；
 - 任何绕过本协议的租约释放入口（如直接调用内部 `releaseResources`）都不属于公开 API。
+
+### 3.7 幂等重放协议：同 opId 至多执行一次，如实审计重放事实（目标态 / 0.3.0）
+xioflow 不做 workflow 引擎；它是 durable 引擎（Temporal、Restate、LangGraph、DBOS 等）底层的副作用执行层。durable 引擎重放节点时，内核根据 `opId` 与 `inputFingerprint` 保证副作用至多执行一次：
+
+```text
+executeProcess(op) 准入与重放判定表：
+┌────────────────────────┬─────────────────────┬────────────────────────────────────────────────────────┐
+│ 数据库与活跃状态        │ inputFingerprint 比对│ 内核动作与返回结果                                      │
+├────────────────────────┼─────────────────────┼────────────────────────────────────────────────────────┤
+│ 记录不存在             │ -                   │ 正常执行全新操作，登记意图并启动子进程                 │
+│ 记录已存在             │ 不一致               │ 抛出 OperationIdConflictError，原操作事实与租约不受影响 │
+│ 记录已存在且内存处于 active │ 一致                │ 重放命中在飞操作：挂载到同一活跃句柄，等待并返回同一结果 │
+│ 记录已存在且状态为终态   │ 一致                │ 命中已结清事实：返回已记录结果，标记 replayed: true     │
+│ 记录已存在且为 indeterminate│ 一致             │ 原样返回 IndeterminateResult，绝不盲目重跑，租约保持   │
+│ 记录已存在但未终结且不在内存│ 一致             │ 属于未恢复崩溃现场：抛出 RecoveryRequiredError，拒绝重放 │
+└────────────────────────┴─────────────────────┴────────────────────────────────────────────────────────┘
+```
+
+- **可审计性**：每次命中重放返回事实时，内核在 journal 中追加一条 `OPERATION_REPLAYED` 事件，记录 `opId`、`runId`、`originalRunId`、`fingerprint`，保证「没有盲目重执行」本身有明确审计证据；
+- **与 Run 的关系**：`opId` 在执行域内全局唯一，跨 Run 生效（D17）。Run 始终代表「单次执行尝试」。当崩溃后需要续跑任务时，上层必须开启新 Run，原 Run 终结，新 Run 中提交同 `opId` 触发重放，返回原 Run 下记录的事实；
+- **与两段式启动（Gated Spawn）的关系**：当崩溃现场存在意图但无 OS 身份记录时：若 `gatedSpawn: true`，可确知子进程未实际 `exec`，允许重执行；若 `gatedSpawn: false`，无法排除子进程已在崩溃瞬间启动的可能，必须置 `indeterminate`（契约 #49）。
+
+### 3.8 service 生命周期协议：受监督的长驻进程（目标态）
+针对 MCP stdio server、开发调试服务器等长驻进程，内核提供 `kind: 'service'` 原语：
+- **实例即 Process Op**：每个 service 包含若干生命周期实例，每个实例本质上就是一个普通 process op（opId 形式为 `<serviceId>#<instanceIndex>`）。启动、停止确认、身份核验、崩溃恢复完全复用已有流水线，不建立第二套并行状态机；
+- **双向 stdio 通信模式**：
+  - `stdinMode: 'stream'`：标准输入为长驻可写流，允许宿主多次写入消息，直到宿主主动 end 或进入停止流水线；
+  - `stdout` 直通消费：stdout 采用直通（passthrough / stream chunk）供调用方消费，内核在内存中不进行 Head+Tail 保留，避免长驻进程内存无界膨胀；可配置旁路落盘转储；stderr 仍按现有有界排空与转储规则治理；
+- **就绪事实探测 (Readiness)**：
+  - 声明 `readiness: 'spawned' | { stdoutLine: RegExp }`；
+  - 命中就绪特征行后，写 journal 事件 `SERVICE_READY`，唤醒上层等待方；
+- **声明式重启策略 (Restart Specification, D19)**：
+  - 内核提供最小声明式规格：`restart: 'never' | { policy: 'on-failure', maxRestarts: number, backoffMs: number }`；
+  - 发生非预期退出时，若满足策略，内核登记新实例 op，写入 `SERVICE_RESTARTED` 并按退避延迟拉起；超过 `maxRestarts` 上限则停止拉起，service 终态标记为 `failed`；
+- **宿主崩溃与清场**：宿主重启后，恢复引擎将所有 service 实例与普通 op 同等核验身份并清场终止，**恢复引擎绝不自动拉起 service**；是否重新启动由新宿主进程显式决策。
 
 ---
 
@@ -491,6 +591,7 @@ export interface SnapshotDriver {
 
 /**
  * 目标态：写入限制驱动（可选，服务于回滚正确性，不是安全边界）
+ * 注：writableRoots 的来源由关联的 Capability 决定（§0.2 裁决 9），不再由各处散落配置。
  */
 export interface ConfinementDriver {
   name: string;                      // 'bubblewrap' | 'sandbox-exec' | 'srt' | 第三方
@@ -511,7 +612,8 @@ export interface StructuredCommand {
   execPath: string;
   args: string[];                    // argv，永不经 shell 包装
   cwd: string;
-  stdin?: string | Uint8Array;       // 一次性 stdin 管道，写入后关闭
+  stdin?: string | Uint8Array;       // 一次性 stdin 管道，写入后关闭（兼容 stdinMode: 'once'）
+  stdinMode?: 'once' | 'stream';     // 目标态：输入模式，缺省 'once'；service 实例可使用 'stream'（§3.8）
   envWhiteList?: Record<string, string>; // 精确环境：给什么就是什么，不注入 PATH，绝不落盘全量 env
   inheritEnv?: boolean;              // 仅在无白名单时生效；false 得到空环境
 }
@@ -522,7 +624,7 @@ export interface ProcessIdentity {
   jobId?: string;                    // Windows Job Object 标识
   cgroupPath?: string;               // Linux cgroup v2 路径
   osStartTime?: string;              // 内核记录的进程创建时间（见下方身份核验规则）
-  bootId?: string;                   // 宿主启动标识（Linux /proc/sys/kernel/random/boot_id 等），跨重启判等
+  bootId?: string;                   // 宿主启动标识（Linux /proc/sys/kernel/random/boot_id 等），跨重启判等；0.2.0 起在 spawn 登记时写入
   spawnTime: string;                 // ISO8601（宿主记录，仅供展示，不作为身份证据）
   commandFingerprint: string;        // execPath + args 的 sha256，辅助核验
 }
@@ -671,11 +773,11 @@ domainBudget = {
   |---|---|---|
   | `domain.status` | 域所有者、epoch、活跃操作、租约、未裁决 indeterminate | 是 |
   | `task.save` / `run.open` | 登记 Task 与 Run | 否 |
-  | `run.reportSucceeded` / `run.reportFailed` | §3.3 Run 完成协议 | 否 |
+  | `run.reportSucceeded` / `run.reportFailed` / `run.reportCancelled` | §3.3 Run 完成协议 | 否 |
   | `op.execProcess` | §3.1 启动协议；参数含 `mutationRoots`、`snapshotBefore`、`confine` | 否 |
   | `op.cancel` | §4.2 停止流水线 | 否 |
   | `op.adjudicate` | §3.6 人工裁决 | 否 |
-  | `snapshot.capture` / `snapshot.rollback` / `snapshot.prune` | §3.5 | 否 |
+  | `snapshot.capture` / `snapshot.rollback` / `snapshot.prune` / `snapshot.materialize` / `snapshot.dematerialize` | §3.5 快照与分叉 | 否 |
   | `artifacts.read` / `artifacts.prune` | 按引用分段读取转储产物 / 回收 | 读：是 |
   | `recovery.run` / `recovery.lastReport` | §3.2 恢复协议 | 读报告：是 |
   | `journal.read` / `journal.subscribe` | 按序号读取 / 订阅事件 | 是 |
@@ -744,17 +846,17 @@ xiocode 发行版
 |---|---|---|---|
 | 1 | L1 | 错误命令启动立即显式失败，绝不产生假 running，`spawnFailure` 与退出码 127 可区分 | S1 |
 | 2 | L1 | 大输出有界排空：50MB 输出顺畅退出，逐流标记截断 | S2 |
-| 3 | L1 | 内存保留 Head + Tail，截断点落在 UTF-8 边界 | 计划 |
-| 4 | L1 | 50MB 输出完整转储：`fsync`，引用与对落盘内容计算的哈希可独立校验 | S15 |
-| 5 | L1 | 转储失败可见：`spillError` 出现时不返回引用 | 计划 |
+| 3 | L1 | 内存保留 Head + Tail，截断点落在 UTF-8 边界 | S25 |
+| 4 | L1 | 50MB 输出完整转储：`fsync`，引用与对落盘内容计算的哈希可独立校验 | S15（落盘哈希同链：R） |
+| 5 | L1 | 转储失败可见：`spillError` 出现时不返回引用 | S26 |
 | 6 | L1 | 未确认停止保留租约：停止未确认前排他资源不释放 | S3 |
-| 7 | L1 | 资源冲突可诊断，FIFO 排队放行 | S4（FIFO 计划） |
+| 7 | L1 | 资源冲突可诊断，FIFO 排队放行 | S4（FIFO：R） |
 | 8 | L1 | 整组终止可靠收敛：5 个孙进程随整组停止 | S9 |
 | 9 | L1 | 逃逸后代诚实上报：`setsid` 残留进程 ⇒ `residualPids`，禁止 `confirmed_stopped` | S10 |
 | 10 | L1 | 根进程退出后仍持有管道的后代被回收，保留真实退出事实 | S17 |
-| 11 | L1 | 超时 + 逃逸后代：操作在有界时间内返回 `indeterminate`，不挂到逃逸进程退出 | R |
-| 12 | L1 | 停止不存在 / 已终结的操作返回显式错误 | R |
-| 13 | L1 | 域级并发上限：超标排队、释放后放行；不申请资源的操作同样计入 `maxConcurrentOps` | S14（无资源计数：计划） |
+| 11 | L1 | 超时 + 逃逸后代：操作在有界时间内返回 `indeterminate`，不挂到逃逸进程退出 | S19 |
+| 12 | L1 | 停止不存在 / 已终结的操作返回显式错误 | S20 |
+| 13 | L1 | 域级并发上限：超标排队、释放后放行；不申请资源的操作同样计入 `maxConcurrentOps` | S14（无资源计数：R） |
 | 14 | L1 | stdin 一次性管道：完整透传后关闭，EPIPE 不是启动失败 | S16 |
 | 15 | L1 | 流式投影：chunk 按流转发，回调抛错或丢弃不影响事实 | S18 |
 | 16 | L1 | 平台能力缺失与 Hard 请求在准入期显式拒绝 | S7、S13 |
@@ -763,11 +865,11 @@ xiocode 发行版
 | 19 | L2 | 崩溃可靠恢复：已提交事实与 epoch 重启后完整重现 | S6 |
 | 20 | L2 | Epoch 栅栏：旧所有者复活写入被拒绝 | S11 |
 | 21 | L2 | Run 完成协议：未完成或不确定操作阻断 Run 成功 | S12 |
-| 22 | L2 | 僵尸 leader + 存活后代：恢复按组清场后才结清 | R |
-| 23 | L2 | PID 复用不误判：无关同名进程占用原 PID 时不得判为原进程、不得被终止 | 计划 |
-| 24 | L2 | 身份登记前崩溃：受控启动下不会执行；非受控启动下存在匹配进程则 `indeterminate` 且保留租约 | 计划 |
-| 25 | L2 | 恢复后 Run 状态收敛，不停留在 running | 计划 |
-| 26 | L2 | 人工裁决：唯一出口、写 journal、受 epoch 栅栏约束、残留存活时拒绝 `confirmed_stopped` | 计划 |
+| 22 | L2 | 僵尸 leader + 存活后代：恢复按组清场后才结清 | S21 |
+| 23 | L2 | PID 复用不误判：无关同名进程占用原 PID 时不得判为原进程、不得被终止 | R |
+| 24 | L2 | 身份登记前崩溃：受控启动下不会执行；非受控启动下存在匹配进程则 `indeterminate` 且保留租约 | R |
+| 25 | L2 | 恢复后 Run 状态收敛，不停留在 running | S23 |
+| 26 | L2 | 人工裁决：唯一出口、写 journal、受 epoch 栅栏约束、残留存活时拒绝 `confirmed_stopped` | S24 |
 | 27 | L2 | Schema 版本：旧版本显式迁移，新版本拒绝打开 | 计划 |
 | 28 | L3 | 回滚后指纹核验：`restored` / `partial` / `failed` 如实区分 | 计划 |
 | 29 | L3 | 无写入限制时回滚 `coverage` 不得为 `complete`，`outOfScopeEffects = 'possible'` | 计划 |
@@ -781,15 +883,32 @@ xiocode 发行版
 | 37 | H | 硬内存限制（Linux cgroup `memory.max` / Windows Job）生效并记录 `memory_exceeded` | 计划 |
 | 38 | H | 进程数上限（`pids.max` / Job `ACTIVE_PROCESS`）拦截 fork 炸弹，宿主不受影响 | 计划 |
 | 39 | H | 域级内存总额度：占满后新操作排队，释放后按序放行 | 计划 |
+| 40 | L1 | 重复 opId 被显式拒绝（0.2.0：`DuplicateOperationError`）；原操作的租约、活跃状态与可取消性不受影响 | S22 |
+| 41 | L1 | 每个 op 恰好一条 `OPERATION_RESULT_RECORDED`；未观测字段为 `null`，不得填默认信号或退出码 | R |
+| 42 | L2 | 按 pgid 清场需要 `bootId` 一致且成员启动时间不早于 op spawn；证据不足 ⇒ `indeterminate`，零信号；组信号失败不退回单 PID | R |
+| 43 | L2 | 单个 op 的失败不改写 Run；已终结 Run 拒绝登记新 op；发行版经 `reportRunCancelled` 取消 Run | R |
+| 44 | L1 | 未截断转储在结清时删除；`pruneArtifacts` 拒绝回收未终结 / 未裁决 op 的产物 | S27 |
+| 45 | L2 | 同 opId 同指纹重放返回已记录结果，不产生新进程，写 `OPERATION_REPLAYED` | 计划 |
+| 46 | L2 | 同 opId 不同指纹 ⇒ `OperationIdConflictError`，不改动已有 op 的任何事实 | 计划 |
+| 47 | L2 | 重放命中在飞 op ⇒ 两个调用拿到同一结果，进程只启动一次 | 计划 |
+| 48 | L2 | 重放命中 `indeterminate` ⇒ 原样返回，不重跑，租约保持 | 计划 |
+| 49 | L2 | 有意图无身份的崩溃现场：`gatedSpawn=true` 可判未执行并执行一次；`false` ⇒ `indeterminate` | 计划 |
+| 50 | L1 | service 实例 `stdinMode: 'stream'` 双向通信；stdout 直通不进内存保留；停止走标准流水线 | 计划 |
+| 51 | L1 | service `on-failure` 按退避重启且不超过上限；每次重启是新实例 op 并写 journal；超限 ⇒ `failed` | 计划 |
+| 52 | L2 | 宿主崩溃后 service 实例被核验并清场，恢复引擎不自动重启 | 计划 |
+| 53 | L3 | `SnapshotRef.journalSeq` 与捕获事件 seq 一致；可按 seq 查询不晚于它的最近快照 | 计划 |
+| 54 | L3 | materialize 生成的工作区独立；源工作区、用户 index、HEAD 与分支不变；dematerialize 后无残留 worktree | 计划 |
+| 55 | L3 | capability 结构校验失败（过期 / 旧 epoch / 越界路径 / 越界资源）在准入期显式拒绝并写 journal | 计划 |
+| 56 | L3 | 无 `ConfinementDriver` 时回滚 `coverage` 不得为 `complete`；有且受限执行时才可能为 `complete` | 计划 |
 
 ---
 
 ## 8. 明确不做的边界声明 (Explicit Non-Goals)
 
 为防范投机性抽象与无界范围膨胀，明确保留以下设计边界：
-1. **不做安全沙箱 (Firecracker / microVM / 对抗性隔离)**：xioflow 信任由受管组件与用户授权启动的开发工具，聚焦于进程治理与失控遏制，不承担防御恶意逃逸的职责。§0.2 裁决 4 的写入限制驱动只服务于回滚正确性，任何文档与 API 都不得把它宣传为安全边界；
+1. **不做安全沙箱 (Firecracker / microVM / 对抗性隔离)**：xioflow 信任由受管组件与用户授权启动的开发工具，聚焦于进程治理与失控遏制，不承担防御恶意逃逸的职责。§0.2 裁决 4 的写入限制驱动与裁决 9 的 capability 只服务于回滚正确性与授权事实的完整性约束，任何文档与 API 都不得把它们宣传为安全边界；
 2. **不做 IO 频次限制、网络访问策略与 GPU 配额**：核心痛点在于内存爆仓、孤儿进程与失控死循环，无真实业务驱动不预先引入复杂的网络与 GPU 编排器；
-3. **不做 agent 调度与组件模型**：内核只提供执行原语（§0.0），不管理 agent / turn 的优先级、抢占与编排，不提供插件生命周期；这些属于发行版；
+3. **不做 agent 调度与组件模型**：内核只提供执行原语（§0.0），不管理 agent / turn 的优先级、抢占与编排，不提供插件生命周期（service 是受监督的长驻进程，不是插件系统）；这些属于发行版；
 4. **不管理 LLM 调用、提示词与模型成本**：它们不是本地执行事实，属于发行版；
 5. **不做跨机分布式调度、远程执行后端与网络监听**：专注于工作区级单机执行域；daemon 只监听本机 IPC 端点；
 6. **不做 eBPF 探针注入**：常规开发机器不具备 root/CAP_SYS_ADMIN 权限，进程表与 `/proc` 采样足以满足开发期可观测性。

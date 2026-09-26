@@ -20,13 +20,15 @@
 | 阶段 | 目标 | 关键产出 | 出口条件 | 依赖 |
 |---|---|---|---|---|
 | **P0 止血** | 修掉 0.1.x 上已被证实的诚实性与挂起缺陷，保护 xiocode 现网用户 | Trusted Publishing 跑通；`0.1.5`；`0.2.0` | §2.4 | — |
-| **P1 协议与契约冻结 v1** | 把 ABI 从 TypeScript 代码里剥离成语言无关的规范 | JSON Schema、schema v1 与迁移、黑盒 conformance、`xf-fixture` | §3.3 | P0（与产品观察期并行） |
+| **0.3.0 幂等执行** | opId 域内唯一、幂等重放与审计事件（契约 #45–#49） | `quickRun`、durable 引擎重放套件（Temporal/LangGraph）、设计伙伴切入 | 0.3.0 发布与采用门判定 | P0 出口（0.2.0 发布） |
+| **service 监督** | 长驻子进程（如 MCP stdio server）生命周期受管与重启（契约 #50–#52） | `kind: 'service'`、stdio stream 模式、readiness 探测、声明式重启 | 通过契约 #50–#52 | P0 出口（0.2.0 发布） |
+| **P1 协议与契约冻结 v1** | 把 ABI 从 TypeScript 代码里剥离成语言无关的规范 | JSON Schema、schema v1 与迁移、黑盒 conformance、`xf-fixture` | §3.3 | P0 + 采用门放行（§7，D11） |
 | **P2 Rust 核心 MVP（嵌入模式）** | 规范实现落地，三平台可用 | Rust crates、Node / Python 绑定、`@xioflow/kernel` 1.0 | §4.4 | P1 |
-| **P3 快照回滚与写入限制** | 兑现“进程 + 文件系统变更”的管辖范围 | `git-shadow` 快照驱动、写入限制驱动 | §5.3 | P2 |
-| **P4 daemon 与多客户端** | 兑现“一个工作区一个仲裁者” | `xioflowd`、客户端模式绑定 | §6.3 | P2（与 P3 可并行） |
-| **P5 生态与采用** | 让第三方框架真正接入 | 设计伙伴、集成指南、英文规范 | §7 | 从 P1 起并行 |
+| **P3 快照回滚与写入限制** | 兑现“进程 + 文件系统变更”的管辖范围 | `git-shadow` 快照驱动、materialize 分叉、capability、写入限制驱动 | §5.3 | P2（TS 实现先行，D21） |
+| **P4 daemon 与多客户端** | 兑现“一个工作区一个仲裁者” | `xioflowd`、客户端模式绑定、service client_lost | §6.3 | P2（与 P3 可并行） |
+| **P5 生态与采用** | 让第三方框架真正接入 | 设计伙伴、集成指南、英文规范 | §7 | 从 P0 出口起并行（采用门在 P1 之前判定） |
 
-关键路径与并行：产品侧关键路径为 **P0 → 观察期（≥5工作日） → 2.0-cut**；内核仓推进 **P0 → P1 → P2 → P3 / P4**。P0 出口（0.2.0 发布并在 xiocode 完成适配）后，产品侧启动 5 工作日真实观察期，内核仓同步启动 P1 阶段（Step 6–8 协议/schema），两轨并行推进，互不阻塞。P5 从 P1 开始贯穿全程。
+关键路径与并行：产品侧关键路径为 **P0 → 观察期（≥5工作日） → 2.0-cut**；内核仓推进 **P0 → 采用门 → P1 → P2 → P3 / P4**。P0 出口（0.2.0 发布并在 xiocode 完成适配）后，产品侧启动 5 工作日真实观察期；内核仓在同一窗口做 0.3.0 接入体验并外联设计伙伴，观察期结束时按 §7 判定采用门，放行才启动 P1。P3 / P4 的阶段依赖将随 D21（新原语先在 TS 落地）在下一次规范修订中调整。
 
 ---
 
@@ -65,16 +67,29 @@ xiocode 默认走内核路径，下列缺陷此刻就在用户机器上发生。
 | P0-13 | 资源等待靠 50ms 轮询竞争，非 FIFO | §4.4.3 | 等待队列按登记顺序放行 | #7 |
 | P0-14 | 僵尸 leader 恢复用例只在仓内测试中，未进共享套件 | §7.2 | 提升进 `@xioflow/kernel/testing` | #22 |
 
+**2026-09-24 / 09-25 新审出（N 系列）**：代码审查发现，未登记在上表。「证据」列标明是黑盒实测还是代码审查；代码审查项在所属批次先写失败测试补齐实测。批次 B1 已完成，B2–B4 为 0.2.0 的后续批次。
+
+| ID | 缺陷 | 证据 | 违反 | 修复方向 | 契约 | 批次 |
+|---|---|---|---|---|---|---|
+| N1 | 编造执行事实：恢复与停止路径硬写 `exitCode: 137` / `signal: 'SIGKILL'`，journal 同一 op 出现两条结果事件 | 实测 | README Guarantees、§3.4 | 结果只由 `executeProcess` 写一次；未观测字段写 `null` | #41 | B1 ✅ |
+| N2 | 按 pgid 清场没有身份证据：宿主重启或 pgid 复用时会误杀无关进程组 | 代码审查 | §4.1.1 | 清场前要求 `bootId` 一致且成员启动时间不早于 op spawn；否则 `indeterminate` | #42 | B2 |
+| N3 | 单个 op 失败改写整个 Run；已终结 Run 仍接受新 op | 实测 | §3.3 | Run 状态只由发行版上报、恢复收敛、停止未确认三种来源改变；已终结 Run 拒绝新 op | #43 | B1 ✅ |
+| N4 | spawn 后写 `active` 失败时子进程成为孤儿 | 代码审查 | §3.1 | 登记失败先经停止流水线终止子进程，再结清 | — | B2 |
+| N5 | 组信号失败（含 ESRCH）退回 `kill(pid)`，该 pid 可能已被复用 | 代码审查 | §4.1.1 | 删除单 PID 退路，失败如实上报 | #42 | B2 |
+| N6 | 资源释放不经 epoch 栅栏、不写 journal | 代码审查 | §0.2 裁决 1 | 私有释放 API 走栅栏并写 `RESOURCES_RELEASED` | #26 | B2 |
+| N7 | 未截断的转储文件既不引用也不删除，无限累积 | 实测 | §4.3 第 2 条 | 结清时删除；最小 `pruneArtifacts` | #44 | B3 |
+| N8 | 在飞 opId 重复提交：原操作的排他租约被释放，第三方随即并发进入同一资源，原操作变得不可取消 | 实测 | README Guarantees、§0.2 裁决 2 | 入口显式拒绝（`DuplicateOperationError`），原操作不受影响；0.3.0 放宽为幂等重放 | #40 | B2 |
+
 非代码漂移（本次文档修订已处理）：CHANGELOG 把共享套件写成 19 项（实际 18 项，僵尸用例在仓内测试）；ARCHITECTURE 旧 §6 标题“十五项”与正文“18 项”矛盾且列出了未实现的 cgroup 条目。
 xiocode 侧待办：`kernel-adapter.ts` 头注释仍写“内核不转发 onOutput”，与已使用的 `onStreamChunk` 不符。
 
 ### 2.3 版本策略
 - `0.1.5`：只包含 `main` 上已有的修复，完成 §2.1 配置后立即经 Trusted Publishing 发布。
-- `0.2.0`：P0-1 至 P0-14。按 D2 已接受以下行为变更（取消不存在的操作会抛错、`releaseResources` 不再公开、能力字段 `accurateStartTime` → `startTimeSource` / `gatedSpawn`），在 CHANGELOG 中逐条列出；xiocode 同步适配后再发产品版本。
+- `0.2.0`：P0-1 至 P0-14 与 N1–N8。按 D2 已接受以下行为变更（取消不存在的操作会抛错、`releaseResources` 不再公开、能力字段 `accurateStartTime` → `startTimeSource` / `gatedSpawn`），另含重复 opId 抛 `DuplicateOperationError`、新增 `adjudicate()` 与 `reportRunCancelled()`（D22），在 CHANGELOG 中逐条列出；xiocode 同步适配后再发产品版本。
 
 ### 2.4 出口条件
-- 每个 P0 项都有“修复前失败、修复后通过”的测试；契约 #3、#5、#7、#11–#13、#22–#26 在共享套件中由“计划”变为已实现。
-- 性能基线：4 个并发操作下宿主事件循环延迟 p99 < 20ms（当前 p99 201ms），作为 CI 中的独立检查。
+- 每个 P0 项与 N 项都有“修复前失败、修复后通过”的测试；契约 #3、#5、#7、#11–#13、#22–#26、#40–#44 在共享套件中由“计划”变为已实现。
+- 性能（D13）：常规 CI 只放确定性代理——执行、取消、恢复热路径上同步子进程调用为 0（静态门禁）；4 个并发操作下宿主事件循环延迟 p99 < 20ms（当前 p99 201ms）放进独立的 perf workflow，只报告、不阻断合并，发版前人工核对。
 - `pnpm typecheck`、`pnpm test`、`pnpm verify:package` 全绿；xiocode 在 `0.2.0` 上全量测试通过，并完成一次 `kill -9` 恢复演练。
 
 ---
@@ -89,7 +104,7 @@ xiocode 侧待办：`kernel-adapter.ts` 头注释仍写“内核不转发 onOutp
 | 夹具程序 `xf-fixture` | `conformance/fixture/`（Rust） | `spawn-tree`、`escape-setsid`、`flood-output`、`hold-pipe-after-exit`、`ignore-signals`、`write-files`；它也是第一个 Rust 产物，用来提前打通 Rust 工具链与三平台构建 |
 | 黑盒 conformance 套件 | `conformance/harness/` | 经 stdio 上的 §5 协议驱动被测实现；迁移现有 18 项 + 仓内僵尸用例 + P0 新增条目；能力门控条目报告 `unsupported` |
 | TypeScript stdio 适配器 | `adapters/ts-stdio/` | 让 0.x 参考实现以协议形式接受 conformance 测试 |
-| 停止结果三态 | TypeScript 实现 | `StopProcessResult.stopped` 从布尔改为三态，与 §4.1 对齐 |
+| 停止结果三态 | TypeScript 实现 | `StopProcessResult.stopped` 从布尔改为三态，与 §4.1 对齐（已在 0.2.0 B4 提前落地收口，包含 `confirmed_stopped` \| `not_stopped` \| `cannot_determine`） |
 | 英文规范 | `ARCHITECTURE.en.md`（至少 §0、§3、§5、§7） | 框架作者以英文读者为主 |
 
 ### 3.2 规则
@@ -134,15 +149,16 @@ xiocode 侧待办：`kernel-adapter.ts` 头注释仍写“内核不转发 onOutp
 ## 5. P3 — 快照回滚与写入限制
 
 ### 5.1 快照驱动
-1. **`git-shadow`（首个，规范驱动）**：临时 `GIT_INDEX_FILE` 执行 `add -A` → `write-tree` → `commit-tree`，写入 `refs/xioflow/snapshots/<id>`。恢复时用临时 index 执行 `read-tree` + `checkout-index`，删除快照中不存在的**未被忽略**文件，绝不触碰被忽略文件、用户 index、HEAD 与分支。覆盖声明为 `worktree_non_ignored`。
+1. **`git-shadow`（首个，规范驱动）**：临时 `GIT_INDEX_FILE` 执行 `add -A` → `write-tree` → `commit-tree`，写入 `refs/xioflow/snapshots/<id>`。恢复时用临时 index 执行 `read-tree` + `checkout-index`，删除快照中不存在的**未被忽略**文件，绝不触碰被忽略文件、用户 index、HEAD 与分支。覆盖声明为 `worktree_non_ignored`。支持 `materialize` 分叉临时工作区（`git worktree add --detach`）与 `dematerialize` 回收，用于并行候选尝试（契约 #53–#54）。
 2. **`apfs-clonefile`（macOS）**、**`btrfs`（Linux 子卷）**：覆盖声明为 `full_tree`，在 git-shadow 通过 L3 之后再做。
 
-### 5.2 写入限制驱动
+### 5.2 写入限制与 Capability 驱动
 - Linux：bubblewrap；macOS：`sandbox-exec`；可选接入 Anthropic `srt`。Windows 首版不提供，回滚一律声明 `declared_roots`。
+- 引入结构化 `Capability`（§0.2 裁决 9），统一受管租约、快照根目录与写入限制范围（契约 #55–#56）。
 - 文档与 API 中只能称为“回滚正确性保障”，不得称为安全边界（§8 第 1 条）。
 
 ### 5.3 出口条件
-- `git-shadow` 在三平台通过 L3（#28–#32）；写入限制在 Linux / macOS 可用。
+- `git-shadow` 在三平台通过 L3（#28–#32、#53–#54）；写入限制与 capability 在 Linux / macOS 可用（#55–#56）。
 - 发布“快照驱动 × 写入限制 × 平台”的覆盖矩阵，每一格都有 conformance 结果支撑。
 - xiocode 基于该原语提供检查点 / 回退功能（发行版侧交互）。
 
@@ -151,7 +167,7 @@ xiocode 侧待办：`kernel-adapter.ts` 头注释仍写“内核不转发 onOutp
 ## 6. P4 — daemon 与多客户端
 
 ### 6.1 产出
-- `xioflowd`：Unix domain socket / named pipe、JSON-RPC 2.0、握手协商、对端凭据校验、Observer 只读连接、`client_lost` 处理、启动时自动恢复。
+- `xioflowd`：Unix domain socket / named pipe、JSON-RPC 2.0、握手协商、对端凭据校验、Observer 只读连接、`client_lost` 处理、启动时自动恢复。service 的 `client_lost` 停止流水线在 daemon 模式补齐。
 - 生命周期：由绑定按需拉起（`connectOrSpawn`），空闲退出；daemon 进程身份登记在域锁中。
 - 绑定：检测到域由 daemon 持有时自动切换为客户端模式（#34）。
 
@@ -165,13 +181,13 @@ xiocode 侧待办：`kernel-adapter.ts` 头注释仍写“内核不转发 onOutp
 
 ---
 
-## 7. P5 — 生态与采用（从 P1 起并行）
+## 7. P5 — 生态与采用（从 P0 出口起并行）
 
-- **设计伙伴**：1–2 个在宿主机直接执行命令的开源 agent 项目（TypeScript 或 Python）。筛选依据：其 issue 中出现过孤儿进程、超时失控、输出撑爆或回滚需求。
-- **集成材料**：TypeScript 与 Python 集成指南；“用 xioflow 替换你的 subprocess 封装”示例；conformance 等级徽章。
+- **设计伙伴**：1–2 个在宿主机直接执行命令的开源 agent 项目（TypeScript 或 Python）。筛选依据：其 issue 中出现过孤儿进程、超时失控、输出撑爆、回滚需求，或 retry / resume 后命令被重复执行。
+- **集成材料**：0.3.0 的 `quickRun`、op 幂等执行与 durable 引擎示例（Temporal activity、LangGraph node）；“用 xioflow 替换你的 subprocess 封装”示例；英文规范；conformance 等级徽章。
 - **反馈闭环**：设计伙伴报告的每个 bug 先落成 §7.2 契约条目。
 - **观测指标**：进行中 / 已合并的外部集成数；通过 conformance 的实现数；来自外部的 issue 数。
-- **止损线**：P2 出口时，如果没有任何外部设计伙伴处于集成中，收缩为“xiocode 专用底座”：保留 P2 成果，暂停 P4 与 Python 绑定，P3 只做 `git-shadow`。
+- **止损线（采用门，D11：前移到 P1 之前）**：观察期结束时判定。至少 1 个外部项目进入实际集成（对方仓库里有分支或 PR）⇒ 放行 P1。否则收缩为“xiocode 专用底座”：暂停 P1、Rust、Python 绑定与 daemon；只按 xiocode 的真实需求做功能（TS 版 `git-shadow` 检查点、service 监督）。
 
 ---
 
@@ -213,6 +229,18 @@ xiocode 侧待办：`kernel-adapter.ts` 头注释仍写“内核不转发 onOutp
 | D7 | TypeScript 实现的生命周期 | P2 出口后冻结，一个发行周期后弃用 | P2 |
 | D8 | 设计伙伴名单 | 由你决定 | P1 |
 | D9 | Trusted Publishing 跑通后，是否在 npm 包设置中开启“要求 2FA 并禁止 token 发布” | 开启；彻底关闭 token 发包路径 | P0（0.1.5 发布成功后） |
+| D11 | 采用门的位置 | **已决定**：P1 之前（§7） | 已定 |
+| D12 | P0-3 的实现路线 | 先做 `/bin/sh` 门管道受控启动 spike，成立则 `gatedSpawn: true`，否则退回进程表 argv 匹配 | 0.2.0 批次 B4 |
+| D13 | 性能门禁策略 | **已决定**：常规 CI 用确定性代理，墙钟指标放独立 perf workflow 只报告（§2.4） | 已定 |
+| D15 | P3 / P4 的先后 | 由采用门结论与设计伙伴诉求决定 | 采用门判定后 |
+| D16 | 0.2.0 适配后 xiocode 是否先发 1.4.0 | **已决定**：先发 1.4.0（保留逃生开关） | 已定 |
+| D17 | opId 幂等的范围 | **已决定**：执行域内跨 Run 生效；Run 仍是单次尝试，崩溃后续跑开新 Run | 已定（规范落地于 ARCHITECTURE 下一次修订） |
+| D18 | capability 是否签名 | **已决定**：嵌入模式只做结构校验、不签名；daemon 模式再议 | 已定（同上） |
+| D19 | service 重启策略归属 | **已决定**：内核提供最小声明式规格 `never \| on-failure(maxRestarts, backoffMs)` | 已定（同上） |
+| D20 | 门控后续任务是否提前建立 | **已决定**：提前建为 `todo`，门控条件随任务记录 | 已定 |
+| D21 | 新原语的实现语言 | **已决定**：先在 TS 参考实现落地；Rust 仍由 Windows / Python / 亚秒级身份需求驱动 | 已定（§1 阶段依赖随下一次修订调整） |
+| D22 | 发行版取消 Run 的公开出口 | **已决定**：0.2.0 新增 `reportRunCancelled(runId, reason)`（§3.3） | 已定 |
+| D23 | `indeterminate` 的用户出口形式（xiocode） | **已决定**：CLI 子命令 `xio kernel adjudicate <opId>` | 已定 |
 
 ---
 
@@ -227,22 +255,26 @@ xiocode 侧待办：`kernel-adapter.ts` 头注释仍写“内核不转发 onOutp
 | §0.2 裁决 4 回滚诚实性 | 未实现 | P3 |
 | §0.2 裁决 5 ABI（协议 / schema / 契约） | 仅 TypeScript API | P1 |
 | §1.2 schema 版本与迁移 | 无 `user_version` | P1 |
-| §3.1 两段式受控启动 | 否 | P0（进程表匹配兜底）/ P2（受控启动） |
-| §3.2 第 5 步 Run 状态收敛 | 否 | P0 |
+| §3.1 两段式受控启动 | 已实现（POSIX 门管道跳板 `gatedSpawn: true`） | 0.2.0（B4）/ P2（Rust pre_exec） |
+| §3.2 第 5 步 Run 状态收敛 | 已实现 | 0.2.0（B2） |
 | §3.4 后置条件恢复 | 未实现，`inputFingerprint` 未被使用 | P3（经快照指纹） |
 | §3.5 快照与回滚 | 未实现 | P3 |
-| §3.6 人工裁决 | 未实现 | P0 |
-| §4.1 `StopProcessResult` 三态 | 布尔 | P1 |
-| §4.1.1 身份核验 | 命令行子串匹配 | P0（OS 创建时间）/ P2 |
-| §4.2 第 5 条 有界等待 | 超时分支缺失 | P0 |
-| §4.2 第 6 条 停止请求必须有对象 | 返回虚假成功 | P0 |
-| §4.3 Head + Tail | 仅 Head | P0 |
-| §4.3 转储失败可见 | 静默吞掉 | P0 |
-| §4.3 产物回收 `pruneArtifacts` | 无 | P1（TypeScript）/ P2 |
-| §4.4.3 计数口径 / FIFO / 预算持久化 | 部分实现（只有并发上限，且可被绕过） | P0 / P2 |
+| §3.6 人工裁决 | 已实现（`adjudicate` 唯一审计出口） | 0.2.0（B2） |
+| §4.1 `StopProcessResult` 三态 | 已实现（`confirmed_stopped \| not_stopped \| cannot_determine`） | 0.2.0（B4） |
+| §4.1.1 身份核验 | 已实现（OS 启动时间 + bootId） | 0.2.0（B4）/ P2 |
+| §4.2 第 5 条 有界等待 | 已实现（超时等待 `onRootExit` 有界排空） | 0.2.0（B1） |
+| §4.2 第 6 条 停止请求必须有对象 | 已实现（抛 `OperationNotActiveError`） | 0.2.0（B1） |
+| §4.3 Head + Tail | 已实现（Head 75% + Tail 25% 字符安全截断） | 0.2.0（B3） |
+| §4.3 转储失败可见 | 已实现（`spillError` + 失败不返引用） | 0.2.0（B3） |
+| §4.3 产物回收 `pruneArtifacts` | 已实现（自动清理未截断转储 + 域级 prune） | 0.2.0（B3） |
+| §4.4.3 计数口径 / FIFO / 预算持久化 | 已实现（独立并发计数 + FIFO 严格排队） | 0.2.0（B2） |
 | §4.4.3 域级内存 / 输出总额度 | 未实现 | P2（H 等级） |
 | §4.4.4 Linux cgroup v2 | 未实现 | P2 之后（H 等级） |
 | §4.4.4 Windows Job Object | 不支持 | P2 |
-| §4.4.5 第 4 条 不阻塞宿主 | 违反 | P0 |
+| §4.4.5 第 4 条 不阻塞宿主 | 已实现（全域异步采样器，热路径零同步子进程） | 0.2.0（B4） |
 | §5 协议 | 无 | P1（协议 + stdio 适配器）/ P4（daemon） |
-| §7 conformance | 18 项 TypeScript 共享套件 | P1 |
+| §7 conformance | 27 项 TypeScript 共享套件（已包含 P0/N 项提升） | 0.2.0 / P1 迁移 |
+| §0.2 裁决 6 / §3.7 op 幂等重放 | 0.2.0 显式拒绝（#40） | 0.3.0（TS 实现）/ P2（Rust） |
+| §0.2 裁决 7 / §3.8 service 监督 | 未实现 | 0.2.0 之后独立批次（TS 实现）/ P2 |
+| §0.2 裁决 8 / §3.5 快照 seq 与分叉 | 未实现 | P3（TS 实现先行） |
+| §0.2 裁决 9 capability 结构校验 | 未实现 | P3（TS 实现先行） |

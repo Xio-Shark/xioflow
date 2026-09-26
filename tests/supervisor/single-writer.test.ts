@@ -77,7 +77,7 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
 
     // 发起优雅取消（SIGINT 即可停止 Node 进程）
     const cancelResult = await supervisor.cancelOperation(opId, 1500);
-    expect(cancelResult.stopped).toBe(true);
+    expect(cancelResult.stopped).toBe('confirmed_stopped');
 
     const result = await execPromise;
     expect(result.status).toBe('cancelled');
@@ -217,7 +217,7 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
 
     // 调用 cancelOperation 取消处于 waiting_resources 的操作
     const cancelRes = await supervisor.cancelOperation(opWaitingId);
-    expect(cancelRes.stopped).toBe(true);
+    expect(cancelRes.stopped).toBe('confirmed_stopped');
 
     const execResult = await execPromise;
     expect(execResult.status).toBe('cancelled');
@@ -230,7 +230,7 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
     expect(opInStore?.result?.status).toBe('cancelled');
 
     // 释放占位资源
-    domain.releaseResources('op-holder', ['res:busy-port']);
+    (domain as any).internalReleaseResources('op-holder', ['res:busy-port']);
   });
 
   // --------------------------------------------------------------------------
@@ -244,6 +244,8 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
     const originalSpawn = driver.spawn.bind(driver);
     driver.spawn = async (command) => {
       const handle = await originalSpawn(command);
+      // 若受控启动门存在，先予放行使得目标命令得以执行产生输出
+      handle.releaseGate?.();
       // 等待子进程启动并输出第一段内容，随后暂停流并将数据放回头部，确保 supervisor 的 drainer 能够接收
       await new Promise<void>((resolve) => {
         handle.stdout.once('data', (chunk) => {
@@ -331,7 +333,7 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
       return true;
     });
 
-    domain.releaseResources('op-holder', ['res:contended']);
+    (domain as any).internalReleaseResources('op-holder', ['res:contended']);
   });
 
   // --------------------------------------------------------------------------
@@ -382,7 +384,7 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
 
     expect(res.status).toBe('failed');
     const cancelRes = await cancelPromise;
-    expect(cancelRes.stopped).toBe(true);
+    expect(cancelRes.stopped).toBe('confirmed_stopped');
     expect((supervisor as any).activeOperations.has(cancelFailOpId)).toBe(false);
 
     driver.spawn = originalSpawn;
@@ -528,6 +530,10 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
 
       // op 在有界时间内返回（无论是否因逃逸后代被裁决为 indeterminate 还是 succeeded，均已进入终态并 finalize）
       expect(['indeterminate', 'succeeded']).toContain(result.status);
+      if (result.status === 'succeeded') {
+        expect((result as any).residualPids).toBeDefined();
+        expect((result as any).residualPids.length).toBeGreaterThan(0);
+      }
 
       // 等待 300ms，让逃逸孙进程在 op 返回后继续向管道输出
       await new Promise((r) => setTimeout(r, 300));
