@@ -6,6 +6,40 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-26
+
+### Added
+- **Operation Idempotency Protocol & Adjudication Table (ARCHITECTURE §3.7, Contracts #45–#49)**:
+  - `supervisor.executeProcess` now implements the canonical §3.7 idempotency matrix:
+    - **In-flight join (`mode: 'joined'`)**: Concurrent submissions with identical `opId` and fingerprint share the active execution promise and receive subsequent stream chunks without spawning a second child process.
+    - **Cancellation isolation**: In-flight joining callers can abort their own waiting `AbortSignal` without affecting the underlying process or the original caller.
+    - **Terminal recorded replay (`mode: 'recorded'`)**: Completed operations return existing facts with `replayed: true` and the original `runId`.
+    - **Indeterminate replay prevention (`mode: 'indeterminate'`)**: Indeterminate operations return `IndeterminateResult` as-is, never auto-retrying and preserving resource leases.
+    - **Fingerprint conflict**: Differing input fingerprints for the same `opId` throw `OperationIdConflictError`, leaving existing facts intact.
+    - **Crash guard**: Unfinalized operations in database absent from memory throw `RecoveryRequiredError`, requiring recovery before replay.
+    - **Domain-wide across Runs (D17)**: `opId` is unique across the entire execution domain, allowing durable engines to resume across new Runs while referencing original facts.
+- **`OPERATION_REPLAYED` Journal Event**:
+  - Written under epoch fencing upon every idempotency hit, recording `opId`, `runId`, `originalRunId`, and `mode` for tamper-proof audit trails.
+- **`quickRun(command, opts)` One-Line Supervised Execution Entrypoint**:
+  - Automatically manages execution domain lifecycle, assigns Task and Run, and runs commands under kernel supervision in a single function call.
+  - Supports optional `opts.opId` for out-of-the-box idempotency.
+- **`domain.status` & `domain.getStatus()` State Observability**:
+  - Exposes runtime snapshot of the domain: owner, epoch, tasks, runs, active operations, held leases, and unadjudicated indeterminate operations without raw database access.
+- **New Error Types & Backward Compatibility**:
+  - Added `OperationIdConflictError` and `RecoveryRequiredError`.
+  - Deprecated `DuplicateOperationError`: retained as a backwards-compatible alias (subclassed by `OperationIdConflictError`) until 0.4.0.
+- **Adoption Kit & Production Examples (`examples/`)**:
+  - `examples/replace-subprocess-wrapper`: Demonstrates 0 orphan leaks, bounded Head+Tail output preservation, and disk spill versus native `spawn + timeout`.
+  - `examples/temporal-activity`: Integration with Temporal TypeScript SDK simulating worker crashes (`kill -9`) and proving activity retries execute side effects at most once.
+  - `examples/langgraph-node`: Integration with LangGraph checkpoint persistence proving resumed graph nodes replay from journal without duplicate tool side effects.
+- **Shared Contract Suite Expansion (27 -> 32 items)**:
+  - Promoted contracts #45, #46, #47, #48, and #49 into `@xioflow/kernel/testing`.
+- **English Specification**:
+  - Added `ARCHITECTURE.en.md` covering §0 (North Star & Decisions 1–9), §3 (Core Execution Protocols §3.1–§3.8), and §7 (Conformance Suite & Contracts #1–#56).
+
+### Changed
+- `package.json` files field strictly encapsulates distribution bundle (`files: ["dist", "README.md", "LICENSE"]`), preventing example projects or dev assets from leaking into published tarballs.
+
 ## [0.2.0] - 2026-09-26
 
 ### Added

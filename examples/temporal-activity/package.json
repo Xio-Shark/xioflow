@@ -1,0 +1,19 @@
+{
+  "name": "example-temporal-activity",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node worker.mjs",
+    "trigger": "node client.mjs",
+    "simulate": "node simulate-activity-retry.mjs",
+    "crash-test": "bash kill-worker-midway.sh"
+  },
+  "dependencies": {
+    "@xioflow/kernel": "file:../../",
+    "@temporalio/activity": "^1.24.0",
+    "@temporalio/workflow": "^1.24.0",
+    "@temporalio/client": "^1.24.0",
+    "@temporalio/worker": "^1.24.0"
+  }
+}

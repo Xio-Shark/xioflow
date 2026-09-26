@@ -216,6 +216,20 @@ export class SqliteStore {
     };
   }
 
+  public getAllTasks(domainId?: string): Task[] {
+    const stmt = domainId
+      ? this.db.prepare('SELECT * FROM tasks WHERE domain_id = ? ORDER BY created_at ASC')
+      : this.db.prepare('SELECT * FROM tasks ORDER BY created_at ASC');
+    const rows = (domainId ? stmt.all(domainId) : stmt.all()) as any[];
+    return rows.map((row) => ({
+      id: row.id,
+      domainId: row.domain_id,
+      name: row.name,
+      createdAt: row.created_at,
+      meta: row.meta ? JSON.parse(row.meta) : undefined,
+    }));
+  }
+
   public saveRun(run: Run): void {
     this.verifyEpochFencing(run.domainId);
     const existing = this.getRun(run.id);
@@ -371,6 +385,24 @@ export class SqliteStore {
   public getActiveRuns(domainId: string): Run[] {
     const stmt = this.db.prepare('SELECT * FROM runs WHERE domain_id = ? AND status = ?');
     const rows = stmt.all(domainId, 'running') as any[];
+    return rows.map((row) => ({
+      id: row.id,
+      taskId: row.task_id,
+      domainId: row.domain_id,
+      owner: row.owner,
+      status: row.status as KernelRunStatus,
+      terminationReason: row.termination_reason as TerminationReason | undefined,
+      startedAt: row.started_at,
+      endedAt: row.ended_at || undefined,
+      configSnapshotWhiteList: row.config_snapshot ? JSON.parse(row.config_snapshot) : undefined,
+    }));
+  }
+
+  public getAllRuns(domainId?: string): Run[] {
+    const stmt = domainId
+      ? this.db.prepare('SELECT * FROM runs WHERE domain_id = ? ORDER BY started_at ASC')
+      : this.db.prepare('SELECT * FROM runs ORDER BY started_at ASC');
+    const rows = (domainId ? stmt.all(domainId) : stmt.all()) as any[];
     return rows.map((row) => ({
       id: row.id,
       taskId: row.task_id,
@@ -602,6 +634,30 @@ export class SqliteStore {
         payload: { result, releaseResources },
         timestamp: result.completedAt || new Date().toISOString(),
       });
+    });
+  }
+
+  public recordReplay(
+    domainId: string,
+    opId: string,
+    mode: 'joined' | 'recorded' | 'indeterminate',
+    callingRunId: string
+  ): void {
+    this.verifyEpochFencing(domainId);
+    const op = this.getOperation(opId);
+    this.recordEventAndTransitionState({
+      domainId,
+      runId: callingRunId,
+      operationId: opId,
+      type: 'OPERATION_REPLAYED',
+      payload: {
+        mode,
+        opId,
+        callingRunId,
+        originalRunId: op?.runId,
+        originalStatus: op?.status,
+      },
+      timestamp: new Date().toISOString(),
     });
   }
 

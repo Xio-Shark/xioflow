@@ -5,3 +5,7 @@ dist/
 .*.tar.gz
 *.bundle
 .xioflow/
+.xioflow-kernel/
+*-kernel/
+effects.log
+*.log

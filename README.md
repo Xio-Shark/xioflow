@@ -4,9 +4,10 @@
 [![npm](https://img.shields.io/npm/v/@xioflow/kernel.svg)](https://www.npmjs.com/package/@xioflow/kernel)
 [![Node](https://img.shields.io/badge/Node.js-22.5%2B-green.svg)](https://nodejs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Docs](https://img.shields.io/badge/spec-ARCHITECTURE.md-informational.svg)](./ARCHITECTURE.md)
+[![Docs (EN)](https://img.shields.io/badge/spec-ARCHITECTURE.en.md-informational.svg)](./ARCHITECTURE.en.md)
+[![Docs (ZH)](https://img.shields.io/badge/spec-ARCHITECTURE.md-informational.svg)](./ARCHITECTURE.md)
 
-A supervised execution kernel for AI agent runtimes. Zero runtime dependencies.
+A supervised execution kernel for AI agent runtimes. Zero runtime dependencies. (See [Architecture & Protocol Specification (EN)](./ARCHITECTURE.en.md) / [中文规范](./ARCHITECTURE.md)).
 
 Agent runtimes usually call `spawn()` (or `exec()`) and hope for the best. When the host crashes mid-tool-call, or a cancel cannot be confirmed, they are left with orphan processes, double-applied side effects, and no honest record of what actually happened. This kernel makes those states first-class instead of silent.
 
@@ -37,6 +38,36 @@ npm install @xioflow/kernel
 ```
 
 ## Quickstart
+
+### 1. Simplest Usage (`quickRun`)
+
+For standard tool calls and durable activity execution, `quickRun` automatically manages domain acquisition, Task and Run records, and lock lifecycles:
+
+```js
+import { quickRun } from '@xioflow/kernel';
+
+// 1. One-line supervised execution
+const result = await quickRun({
+  execPath: 'npm',
+  args: ['test'],
+  cwd: '/path/to/workspace',
+});
+
+console.log(result.status, result.exitCode, result.stdout);
+
+// 2. Idempotent execution (safe retry for Temporal / LangGraph / durable workflows)
+const idemResult = await quickRun(
+  { execPath: 'git', args: ['commit', '-m', 'chore: update'], cwd: '/path/to/workspace' },
+  { opId: 'workflow-step-42' } // Passing opId guarantees at-most-once execution across retries
+);
+if (idemResult.replayed) {
+  console.log('Result retrieved from journal without re-executing process');
+}
+```
+
+### 2. Full Architecture & Fine-Grained Supervision
+
+When you need granular control over Tasks, Runs, resource locks, streaming output, or multi-phase workflows:
 
 ```js
 import { ExecutionDomain, NodePlatformDriver, ProcessSupervisor } from '@xioflow/kernel';
@@ -88,6 +119,9 @@ domain.close(); // releases the owner lease and the domain lock
 | `inheritEnv` | only when no whitelist is given; `false` yields an empty environment |
 
 To cancel, call `await supervisor.cancelOperation('op-1', graceMs)`. It returns `{ stopped, scope, residualPids? }`. The pending `executeProcess` promise then resolves with `status: 'cancelled'`, or with `status: 'indeterminate'` when the driver cannot confirm that the process actually stopped, in which case its leases stay locked.
+
+> **Note on In-Flight Join and Cancellation**:
+> When an in-flight operation with the same `opId` and fingerprint is joined concurrently, passing an `abortSignal` to the secondary caller only cancels the secondary caller's own wait promise—it never aborts the underlying process or the primary caller's execution. To deliberately terminate the underlying process, explicitly call `supervisor.cancelOperation(opId)`.
 
 ## Crash recovery
 

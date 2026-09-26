@@ -20,6 +20,8 @@ import {
   UnsupportedCapabilityError,
   OperationNotActiveError,
   DuplicateOperationError,
+  OperationIdConflictError,
+  RecoveryRequiredError,
 } from '../types.js';
 
 export interface ExecuteProcessOptions {
@@ -35,6 +37,7 @@ export interface ExecuteProcessOptions {
   resourceBudget?: ResourceBudget;
   waitTimeoutMs?: number;
   artifactsDir?: string;
+  abortSignal?: AbortSignal;
   /**
    * 流式投影：每个 stdout/stderr chunk 原样转发，不做缓冲或截断。
    * 回调抛错不会中断排空，首个错误以 result.streamCallbackError 记录。
@@ -113,6 +116,9 @@ interface ActiveOperationState {
   runId: string;
   phase: 'waiting_resources' | 'intent_registered' | 'spawning' | 'active' | 'stopping' | 'done';
   startTime: number;
+  inputFingerprint: string;
+  resultPromise?: Promise<ProcessOperationResult>;
+  streamSubscribers: Set<(stream: 'stdout' | 'stderr', chunk: Buffer) => void>;
   handle?: ManagedProcessHandle;
   command?: StructuredCommand;
   cancelRequested: boolean;
@@ -178,14 +184,129 @@ export class ProcessSupervisor {
       }
     }
 
-    // N8 守卫（契约 #40）：显式拒绝已存在或在飞的 opId，在触碰任何内存状态或 DB 租约之前同步拦截
-    if (this.activeOperations.has(options.opId)) {
-      const existing = this.activeOperations.get(options.opId)!;
-      throw new DuplicateOperationError(options.opId, existing.phase, existing.runId);
+    const inputFingerprint = options.inputFingerprint || computeInputFingerprint(options);
+
+    // 0. 验证调用 Run 状态（N3 契约）：终态 Run 禁止登记或重放操作
+    const callingRun = this.domain.getStore().getRun(options.runId);
+    if (!callingRun) {
+      throw new Error(
+        `Run "${options.runId}" is not registered in domain "${this.domain.domainId}". ` +
+          'Register the task and run first (store.saveTask() + store.saveRun()), then execute operations for that run.'
+      );
     }
+    if (
+      callingRun.status === 'succeeded' ||
+      callingRun.status === 'failed' ||
+      callingRun.status === 'cancelled' ||
+      callingRun.status === 'indeterminate'
+    ) {
+      throw new Error(
+        `Cannot register operation "${options.opId}" for Run "${options.runId}" because the Run is already finalized with status "${callingRun.status}".`
+      );
+    }
+
+    // 1. 在飞操作重放判定（ARCHITECTURE §3.7 / 契约 #46）
+    if (this.activeOperations.has(options.opId)) {
+      const inFlight = this.activeOperations.get(options.opId)!;
+      if (inFlight.inputFingerprint !== inputFingerprint) {
+        throw new OperationIdConflictError(
+          options.opId,
+          inFlight.inputFingerprint,
+          inputFingerprint,
+          inFlight.phase,
+          inFlight.runId
+        );
+      }
+
+      this.domain.getStore().recordReplay(this.domain.domainId, options.opId, 'joined', options.runId);
+      if (options.onStreamChunk) {
+        inFlight.streamSubscribers.add(options.onStreamChunk);
+      }
+
+      if (options.abortSignal) {
+        const signal = options.abortSignal;
+        if (signal.aborted) {
+          if (options.onStreamChunk) {
+            inFlight.streamSubscribers.delete(options.onStreamChunk);
+          }
+          throw signal.reason || new Error('Operation wait aborted');
+        }
+        return await new Promise<ProcessOperationResult>((resolve, reject) => {
+          const onAbort = () => {
+            if (options.onStreamChunk) {
+              inFlight.streamSubscribers.delete(options.onStreamChunk);
+            }
+            reject(signal.reason || new Error('Operation wait aborted'));
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+          inFlight.resultPromise!.then(
+            (res) => {
+              signal.removeEventListener('abort', onAbort);
+              if (options.onStreamChunk) {
+                inFlight.streamSubscribers.delete(options.onStreamChunk);
+              }
+              resolve({ ...res, replayed: true });
+            },
+            (err) => {
+              signal.removeEventListener('abort', onAbort);
+              if (options.onStreamChunk) {
+                inFlight.streamSubscribers.delete(options.onStreamChunk);
+              }
+              reject(err);
+            }
+          );
+        });
+      }
+
+      const res = await inFlight.resultPromise!;
+      if (options.onStreamChunk) {
+        inFlight.streamSubscribers.delete(options.onStreamChunk);
+      }
+      return {
+        ...res,
+        replayed: true,
+      };
+    }
+
+    // 2. 已持久化操作重放判定（ARCHITECTURE §3.7 / 契约 #45, #47, #48, #49）
     const existingRecorded = this.domain.getStore().getOperation(options.opId);
     if (existingRecorded) {
-      throw new DuplicateOperationError(options.opId, existingRecorded.status, existingRecorded.runId);
+      if (existingRecorded.inputFingerprint !== inputFingerprint) {
+        throw new OperationIdConflictError(
+          options.opId,
+          existingRecorded.inputFingerprint,
+          inputFingerprint,
+          existingRecorded.status,
+          existingRecorded.runId
+        );
+      }
+
+      // 未终结状态且不在内存中 → 必须先执行恢复（崩溃残留现场）
+      if (existingRecorded.status !== 'done') {
+        throw new RecoveryRequiredError(
+          options.opId,
+          existingRecorded.status,
+          existingRecorded.runId
+        );
+      }
+
+      // indeterminate 状态：绝不重跑，原样返回，保留租约
+      if (existingRecorded.result?.status === 'indeterminate') {
+        this.domain.getStore().recordReplay(this.domain.domainId, options.opId, 'indeterminate', options.runId);
+        return {
+          ...existingRecorded.result,
+          replayed: true,
+          runId: existingRecorded.runId,
+        } as unknown as ProcessOperationResult;
+      }
+
+      // 已结清终态 (succeeded / failed / cancelled)：返回已持久化结果
+      this.domain.getStore().recordReplay(this.domain.domainId, options.opId, 'recorded', options.runId);
+      return {
+        ...existingRecorded.result,
+        replayed: true,
+        runId: existingRecorded.runId,
+      } as ProcessOperationResult;
     }
 
     const op: Operation = {
@@ -193,39 +314,60 @@ export class ProcessSupervisor {
       runId: options.runId,
       kind: 'process',
       name: options.name,
-      inputFingerprint: options.inputFingerprint || computeInputFingerprint(options),
+      inputFingerprint,
       requiredResources: options.requiredResources,
       timeoutMs: options.timeoutMs,
       resourceBudget: options.resourceBudget,
       status: 'pending',
     };
 
+    const streamSubscribers = new Set<(stream: 'stdout' | 'stderr', chunk: Buffer) => void>();
+    if (options.onStreamChunk) {
+      streamSubscribers.add(options.onStreamChunk);
+    }
+
     const opState: ActiveOperationState = {
       opId: options.opId,
       runId: options.runId,
       phase: 'waiting_resources',
       startTime,
+      inputFingerprint,
+      streamSubscribers,
       cancelRequested: false,
       timedOut: false,
     };
     this.activeOperations.set(options.opId, opState);
 
-    let timeoutTimer: NodeJS.Timeout | null = null;
-    let samplingInterval: NodeJS.Timeout | null = null;
-
-    try {
-      // 1. [资源分配与排队等待]
-      await this.domain.allocateResourcesWithWait(
-        options.opId,
-        options.requiredResources || [],
-        options.waitTimeoutMs ?? 0,
-        options.resourceBudget,
-        () => opState.cancelRequested === true
-      );
-
-      if (opState.cancelRequested) {
-        return this.handlePreSpawnCancellation(options, opState, startTime);
+    if (options.abortSignal) {
+      if (options.abortSignal.aborted) {
+        opState.cancelRequested = true;
+      } else {
+        const onAbort = () => {
+          this.cancelOperation(options.opId).catch(() => {});
+        };
+        options.abortSignal.addEventListener('abort', onAbort, { once: true });
       }
+    }
+
+    const executionPromise = (async (): Promise<ProcessOperationResult> => {
+      let timeoutTimer: NodeJS.Timeout | null = null;
+      let samplingInterval: NodeJS.Timeout | null = null;
+      let stdoutDrainer: StreamDrainer | undefined;
+      let stderrDrainer: StreamDrainer | undefined;
+
+      try {
+        // 1. [资源分配与排队等待]
+        await this.domain.allocateResourcesWithWait(
+          options.opId,
+          options.requiredResources || [],
+          options.waitTimeoutMs ?? 0,
+          options.resourceBudget,
+          () => opState.cancelRequested === true
+        );
+
+        if (opState.cancelRequested) {
+          return this.handlePreSpawnCancellation(options, opState, startTime);
+        }
 
       // 2. [启动协议步骤 1] 写入 SQLite (status: intent_registered)
       try {
@@ -354,11 +496,12 @@ export class ProcessSupervisor {
 
       let streamCallbackError: string | undefined;
       const forwardChunk = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
-        if (!options.onStreamChunk) return;
-        try {
-          options.onStreamChunk(stream, chunk);
-        } catch (err) {
-          streamCallbackError ??= err instanceof Error ? err.message : String(err);
+        for (const subscriber of opState.streamSubscribers) {
+          try {
+            subscriber(stream, chunk);
+          } catch (err) {
+            streamCallbackError ??= err instanceof Error ? err.message : String(err);
+          }
         }
       };
       stdoutDrainer = this.setupStreamDrainer(
@@ -653,7 +796,11 @@ export class ProcessSupervisor {
       }
       this.activeOperations.delete(options.opId);
     }
-  }
+  })();
+
+  opState.resultPromise = executionPromise;
+  return await executionPromise;
+}
 
   /**
    * 停止确认流水线 (Stopping Pipeline)
@@ -827,6 +974,9 @@ export class ProcessSupervisor {
       throw new Error(
         `Cannot finalize operation "${opId}": operation is already finalized with status "${existing.status}"`
       );
+    }
+    if (existing) {
+      result.runId = existing.runId;
     }
 
     if (result.kind === 'process') {

@@ -114,6 +114,8 @@ export type OperationResult =
 export interface BaseResult {
   durationMs: number;
   completedAt: string;
+  replayed?: true;
+  runId?: string;
 }
 
 export interface ProcessOperationResult extends BaseResult {
@@ -333,17 +335,66 @@ export class OperationNotActiveError extends Error {
 
 /**
  * 重复提交相同 opId 时抛出的显式异常（契约 #40 / N8）
+ * @deprecated 0.3.0 起由 OperationIdConflictError 代替（仅在指纹不匹配时抛出）。保留此别名以保证向后兼容。
  */
 export class DuplicateOperationError extends Error {
-  constructor(
-    public readonly opId: string,
-    public readonly existingStatus: string,
-    public readonly existingRunId: string
-  ) {
+  public readonly opId: string;
+  public readonly existingStatus: string;
+  public readonly existingRunId: string;
+
+  constructor(opId: string, existingStatus: string, existingRunId: string) {
     super(
       `Operation '${opId}' already exists with status '${existingStatus}' in run '${existingRunId}'`
     );
     this.name = 'DuplicateOperationError';
+    this.opId = opId;
+    this.existingStatus = existingStatus;
+    this.existingRunId = existingRunId;
+  }
+}
+
+/**
+ * opId 冲突异常：相同 opId 再次提交但输入指纹不同（ARCHITECTURE §3.7 / 契约 #45）
+ */
+export class OperationIdConflictError extends DuplicateOperationError {
+  public readonly existingFingerprint: string;
+  public readonly requestedFingerprint: string;
+
+  constructor(
+    opId: string,
+    existingFingerprint: string,
+    requestedFingerprint: string,
+    existingStatus: string,
+    existingRunId: string
+  ) {
+    super(opId, existingStatus, existingRunId);
+    this.name = 'OperationIdConflictError';
+    this.existingFingerprint = existingFingerprint;
+    this.requestedFingerprint = requestedFingerprint;
+    this.message = `Operation ID conflict for '${opId}': existing operation in run '${existingRunId}' with status '${existingStatus}' has fingerprint '${existingFingerprint}', but requested fingerprint is '${requestedFingerprint}'`;
+  }
+}
+
+/**
+ * 恢复必需异常：已有操作处于未终结状态但不在内存中，需要先恢复再执行（ARCHITECTURE §3.7 / 契约 #49）
+ */
+export class RecoveryRequiredError extends Error {
+  public readonly opId: string;
+  public readonly status: string;
+  public readonly runId: string;
+
+  constructor(
+    opId: string,
+    status: string,
+    runId: string
+  ) {
+    super(
+      `Recovery required for operation '${opId}': operation is in unfinalized state '${status}' in run '${runId}', but is not active in process memory. Call recover() first.`
+    );
+    this.name = 'RecoveryRequiredError';
+    this.opId = opId;
+    this.status = status;
+    this.runId = runId;
   }
 }
 
