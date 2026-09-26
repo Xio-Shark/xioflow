@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import {
   ExecutionDomain,
   SqliteStore,
@@ -11,6 +12,8 @@ import {
   ResourceConflictError,
   UnsupportedCapabilityError,
   EpochFencedError,
+  OperationNotActiveError,
+  DuplicateOperationError,
 } from '../index.js';
 
 export interface ConsumerContext {
@@ -48,7 +51,7 @@ export function defineContractTestSuite(
   consumerName: string,
   createContext: () => Promise<ConsumerContext>
 ) {
-  describe(`18-Item Consistency Contract Suite: [${consumerName}]`, () => {
+  describe(`Consistency Contract Suite: [${consumerName}]`, () => {
     let ctx: ConsumerContext;
 
     beforeEach(async () => {
@@ -139,7 +142,7 @@ export function defineContractTestSuite(
           return 'cannot_determine';
         },
         async terminate() {
-          return { stopped: false, scope: 'unknown', errorDetails: 'Cannot confirm exit' };
+          return { stopped: 'cannot_determine', scope: 'unknown', errorDetails: 'Cannot confirm exit' };
         },
       };
 
@@ -158,7 +161,7 @@ export function defineContractTestSuite(
 
       await new Promise((r) => setTimeout(r, 100));
       const cancelRes = await customSupervisor.cancelOperation('op-c3-stubborn');
-      expect(cancelRes.stopped).toBe(false);
+      expect(cancelRes.stopped).toBe('cannot_determine');
 
       // 核心断言：未确认停止前，排他锁绝不释放！
       expect(domain.isResourceLocked('res:c3-lock')).toBe(true);
@@ -191,12 +194,12 @@ export function defineContractTestSuite(
 
       // 2. 带排队等待异步放行
       setTimeout(() => {
-        domain.releaseResources('op-owner-A', ['res:exclusive-port']);
+        domain.internalReleaseResources('op-owner-A', ['res:exclusive-port']);
       }, 50);
 
       await domain.allocateResourcesWithWait('op-requester-B', ['res:exclusive-port'], 300);
       expect(domain.getResourceOwner('res:exclusive-port')).toBe('op-requester-B');
-      domain.releaseResources('op-requester-B');
+      domain.internalReleaseResources('op-requester-B');
     });
 
     it('契约 5: 不确定副作用防重放，重启恢复时阻断自动重试并保留隔离', async () => {
@@ -438,7 +441,7 @@ export function defineContractTestSuite(
       // 执行整组停止流水线
       const stopRes = await supervisor.cancelOperation('op-c9-group', 1500);
 
-      expect(stopRes.stopped).toBe(true);
+      expect(stopRes.stopped).toBe('confirmed_stopped');
       expect(domain.isResourceLocked('res:c9-group')).toBe(false);
 
       // 核心真实断言：整组 kill(-pgid) 广播后，同组孙进程必须确定性死亡，绝不泄漏为 PID 1 孤儿！
@@ -514,8 +517,8 @@ export function defineContractTestSuite(
         // 调用停止流水线：NodePlatformDriver 真实后代树扫描探测到逃逸残留
         const cancelRes = await supervisor.cancelOperation('op-c10-escape', 1000);
 
-        // 真实上报 stopped: false，且 residualPids 包含逃逸孤儿 PID
-        expect(cancelRes.stopped).toBe(false);
+        // 真实上报 stopped: cannot_determine，且 residualPids 包含逃逸孤儿 PID
+        expect(cancelRes.stopped).toBe('cannot_determine');
         expect(cancelRes.residualPids).toBeDefined();
         expect(cancelRes.residualPids).toContain(escapedPid);
 
@@ -657,12 +660,12 @@ export function defineContractTestSuite(
       }).toThrowError(ResourceConflictError);
 
       setTimeout(() => {
-        domain.releaseResources('op-first');
+        domain.internalReleaseResources('op-first');
       }, 60);
 
       await domain.allocateResourcesWithWait('op-second', ['res:op2'], 300);
       expect(domain.getResourceOwner('res:op2')).toBe('op-second');
-      domain.releaseResources('op-second');
+      domain.internalReleaseResources('op-second');
     });
 
     it('契约 15: 大输出流式落盘转储与 fsync 校验 (Spill to Artifacts)', async () => {
@@ -835,6 +838,343 @@ export function defineContractTestSuite(
       expect(throwing.status).toBe('succeeded');
       expect(throwing.stdout).toBe('captured-anyway');
       expect(throwing.streamCallbackError).toBe('consumer projection failed');
+    });
+
+    it('契约 19: 超时 + 逃逸后代持有管道，操作在有界时间内返回 indeterminate，不挂到逃逸进程退出', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c19', 'run-c19');
+      const subPidFile = path.join(tempDir, 'sub-c19.pid');
+      const runnerScript = `
+        const { spawn } = require('node:child_process');
+        const fs = require('node:fs');
+        const sub = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 8000);'], {
+          detached: true,
+          stdio: ['ignore', 'inherit', 'inherit']
+        });
+        fs.writeFileSync(${JSON.stringify(subPidFile)}, String(sub.pid));
+        setInterval(() => {}, 1000);
+      `;
+
+      const startedAt = Date.now();
+      const result = await supervisor.executeProcess({
+        runId: 'run-c19',
+        opId: 'op-c19-timeout-bounded',
+        name: 'timeout-bounded-op',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', runnerScript],
+          cwd: tempDir,
+        },
+        requiredResources: ['res:c19-bounded'],
+        timeoutMs: 600,
+        drainTimeoutMs: 300,
+      });
+
+      const duration = Date.now() - startedAt;
+      expect(duration).toBeLessThan(3500);
+      expect(result.status).toBe('indeterminate');
+      expect(domain.isResourceLocked('res:c19-bounded')).toBe(true);
+
+      // 清理逃逸孙进程
+      if (fs.existsSync(subPidFile)) {
+        try {
+          const pid = parseInt(fs.readFileSync(subPidFile, 'utf8'), 10);
+          process.kill(pid, 'SIGKILL');
+        } catch {}
+      }
+    }, 15_000);
+
+    it('契约 20: 停止不存在或已终结的操作返回显式 OperationNotActiveError', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c20', 'run-c20');
+
+      // 1. 不存在的操作
+      await expect(supervisor.cancelOperation('op-c20-nonexistent')).rejects.toSatisfy((err: any) => {
+        expect(err).toBeInstanceOf(OperationNotActiveError);
+        expect(err.reason).toBe('not_found');
+        return true;
+      });
+
+      // 2. 已终结的操作
+      const completedOpId = 'op-c20-completed';
+      await supervisor.executeProcess({
+        runId: 'run-c20',
+        opId: completedOpId,
+        name: 'completed-op',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', 'process.exit(0);'],
+          cwd: tempDir,
+        },
+        requiredResources: [],
+      });
+
+      await expect(supervisor.cancelOperation(completedOpId)).rejects.toSatisfy((err: any) => {
+        expect(err).toBeInstanceOf(OperationNotActiveError);
+        expect(err.reason).toBe('already_completed');
+        return true;
+      });
+    });
+
+    it('契约 21: 僵尸 leader + 存活后代：恢复按组清场后才结清', async () => {
+      const { domain, driver, tempDir } = ctx;
+      const opId = 'op-c21-zombie';
+      const runId = 'run-c21';
+      ensureTaskAndRun(domain, 'task-c21', runId);
+
+      domain.registerOperationIntent({
+        id: opId,
+        runId,
+        kind: 'process',
+        name: 'process:zombie-with-orphan',
+        inputFingerprint: 'fp-c21',
+        requiredResources: ['res:c21'],
+        status: 'intent_registered',
+      });
+
+      const descendant = spawn(
+        process.execPath,
+        ['-e', 'process.on("SIGTERM",()=>{}); setInterval(()=>{},1000)'],
+        { detached: true, stdio: ['ignore', 'inherit', 'inherit'] }
+      );
+      const descendantPid = descendant.pid!;
+      descendant.unref();
+
+      domain.getStore().updateOperationStatus(opId, 'active', {
+        pid: descendantPid,
+        pgid: descendantPid,
+        spawnTime: new Date().toISOString(),
+        commandFingerprint: `${process.execPath}:-e`,
+      });
+      domain.getStore().updateOperationStatus(opId, 'stopping');
+      const stored = domain.getStore().getOperation(opId)!;
+      domain.getStore().updateOperationStatus(opId, 'active', {
+        ...stored.processIdentity!,
+        pid: 2_147_483_000,
+      });
+
+      try {
+        const report = await new RecoveryEngine(domain, driver).recover();
+        expect(report.recoveredOperations).toHaveLength(1);
+        expect(report.recoveredOperations[0].action).toBe('marked_dead');
+        expect(report.recoveredOperations[0].resourcesReleased).toBe(true);
+
+        expect(domain.isResourceLocked('res:c21')).toBe(false);
+        const result = domain.getStore().getOperation(opId)!.result!;
+        expect(result.status).toBe('failed');
+        expect(result.kind === 'process' ? result.stderr : '').toContain('reaped during recovery');
+      } finally {
+        try {
+          process.kill(-descendantPid, 'SIGKILL');
+        } catch {}
+      }
+    }, 20_000);
+
+    it('契约 22: 重复 opId 提交抛出 DuplicateOperationError，原操作租约与可取消性不受影响', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c22', 'run-c22');
+      const opId = 'op-c22-duplicate';
+
+      const execPromise = supervisor.executeProcess({
+        runId: 'run-c22',
+        opId,
+        name: 'sleep-op',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', 'setInterval(() => {}, 1000);'],
+          cwd: tempDir,
+        },
+        requiredResources: ['res:c22'],
+      });
+
+      await new Promise((r) => setTimeout(r, 100));
+
+      // 重复提交相同 opId 必须抛出 DuplicateOperationError
+      await expect(
+        supervisor.executeProcess({
+          runId: 'run-c22',
+          opId,
+          name: 'duplicate-op',
+          command: {
+            execPath: process.execPath,
+            args: ['-e', 'process.exit(0);'],
+            cwd: tempDir,
+          },
+          requiredResources: ['res:c22'],
+        })
+      ).rejects.toThrow(DuplicateOperationError);
+
+      // 原操作排他租约未被破坏
+      expect(domain.isResourceLocked('res:c22')).toBe(true);
+
+      // 原操作仍可成功取消
+      const stopRes = await supervisor.cancelOperation(opId, 1000);
+      expect(stopRes.stopped).toBe('confirmed_stopped');
+
+      const opResult = await execPromise;
+      expect(opResult.status).toBe('cancelled');
+    });
+
+    it('契约 23: 恢复后 Run 状态收敛，无未终结操作时 Run 不停留在 running', async () => {
+      const { domain, driver } = ctx;
+      const taskId = 'task-c23';
+      const runId = 'run-c23';
+      ensureTaskAndRun(domain, taskId, runId);
+
+      domain.registerOperationIntent({
+        id: 'op-c23-1',
+        runId,
+        kind: 'process',
+        name: 'clean-crashed-op',
+        inputFingerprint: 'f'.repeat(64),
+        requiredResources: ['res:c23-clean'],
+        status: 'intent_registered',
+      });
+
+      const recovery = new RecoveryEngine(domain, driver);
+      await recovery.recover();
+
+      const runAfter = domain.getStore().getRun(runId);
+      expect(runAfter?.status).toBe('failed');
+      expect(runAfter?.terminationReason).toBe('crash_detected');
+    });
+
+    it('契约 24: 人工裁决受审计出口：仅对 indeterminate 生效，写 journal 并受代际栅栏约束', async () => {
+      const { domain } = ctx;
+      const opId = 'op-c24-indet';
+      const runId = 'run-c24';
+      ensureTaskAndRun(domain, 'task-c24', runId);
+
+      domain.registerOperationIntent({
+        id: opId,
+        runId,
+        kind: 'process',
+        name: 'indet-op',
+        inputFingerprint: 'f'.repeat(64),
+        requiredResources: ['res:c24'],
+        status: 'intent_registered',
+      });
+
+      // 写入 indeterminate 结果
+      domain.getStore().recordOperationResult(
+        opId,
+        {
+          kind: 'indeterminate',
+          status: 'indeterminate',
+          reason: 'Process cannot be determined',
+          recoveryGuidance: 'Check manually',
+          durationMs: 10,
+          completedAt: new Date().toISOString(),
+        },
+        false // 不释放租约
+      );
+
+      expect(domain.isResourceLocked('res:c24')).toBe(true);
+
+      // 人工裁决 confirmed_stopped 成功释放租约
+      const record = await domain.adjudicate(opId, 'confirmed_stopped', 'admin-user', 'Manual verified dead');
+      expect(record.verdict).toBe('confirmed_stopped');
+      expect(domain.isResourceLocked('res:c24')).toBe(false);
+
+      const events = domain.getStore().getJournalEvents(domain.domainId);
+      const adjEvent = events.find((e) => e.type === 'OPERATION_ADJUDICATED' && e.operationId === opId);
+      expect(adjEvent).toBeDefined();
+    });
+
+    it('契约 25: 内存保留 Head + Tail，截断点落在 UTF-8 边界', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c25', 'run-c25');
+
+      const result = await supervisor.executeProcess({
+        runId: 'run-c25',
+        opId: 'op-c25-head-tail',
+        name: 'head-tail-op',
+        command: {
+          execPath: process.execPath,
+          args: [
+            '-e',
+            'process.stdout.write("HEAD-START-12345\\n" + "x".repeat(120 * 1024) + "\\nTAIL-END-67890");',
+          ],
+          cwd: tempDir,
+        },
+        requiredResources: [],
+        maxOutputBytes: 10 * 1024,
+      });
+
+      expect(result.status).toBe('succeeded');
+      expect(result.isTruncated).toBe(true);
+      expect(result.stdout).toContain('HEAD-START-12345');
+      expect(result.stdout).toContain('TAIL-END-67890');
+      expect(result.stdout).toContain('[... truncated');
+    });
+
+    it('契约 26: 转储失败可见：spillError 出现时不返回引用', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c26', 'run-c26');
+
+      const nonWritablePath = path.join(tempDir, 'non-writable-file');
+      fs.writeFileSync(nonWritablePath, 'block');
+
+      const result = await supervisor.executeProcess({
+        runId: 'run-c26',
+        opId: 'op-c26-spill-err',
+        name: 'spill-err-op',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', 'process.stdout.write("hello-spill-fail");'],
+          cwd: tempDir,
+        },
+        requiredResources: [],
+        artifactsDir: nonWritablePath,
+      });
+
+      expect(result.status).toBe('succeeded');
+      expect(result.spillError).toBeDefined();
+      expect(result.outputRef).toBeUndefined();
+      expect(result.stdout).toBe('hello-spill-fail');
+    });
+
+    it('契约 27: 未截断转储在结清时删除；pruneArtifacts 拒绝回收未终结 / 未裁决 op 的产物', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c27', 'run-c27');
+      const artifactsDir = path.join(tempDir, 'artifacts');
+
+      // 1. 未截断转储在结清时自动删除
+      const untruncated = await supervisor.executeProcess({
+        runId: 'run-c27',
+        opId: 'op-c27-untruncated',
+        name: 'untruncated-op',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', 'process.stdout.write("short text");'],
+          cwd: tempDir,
+        },
+        requiredResources: [],
+        artifactsDir,
+      });
+      expect(untruncated.status).toBe('succeeded');
+      expect(untruncated.isTruncated).toBe(false);
+      expect(untruncated.outputRef).toBeUndefined();
+      const files = fs.existsSync(artifactsDir) ? fs.readdirSync(artifactsDir) : [];
+      expect(files.filter((f) => f.includes('op-c27-untruncated'))).toHaveLength(0);
+
+      // 2. pruneArtifacts 拒绝回收未终结 / 未裁决 op 的产物
+      domain.registerOperationIntent({
+        id: 'op-c27-active',
+        runId: 'run-c27',
+        kind: 'process',
+        name: 'active-op',
+        inputFingerprint: 'f'.repeat(64),
+        requiredResources: [],
+        status: 'intent_registered',
+      });
+      fs.mkdirSync(artifactsDir, { recursive: true });
+      const activeFile = path.join(artifactsDir, 'op-c27-active-stdout.log');
+      fs.writeFileSync(activeFile, 'active artifact');
+
+      const pruneResult = domain.pruneArtifacts();
+      expect(pruneResult.retained).toContain(activeFile);
+      expect(fs.existsSync(activeFile)).toBe(true);
     });
   });
 }

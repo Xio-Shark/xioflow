@@ -27,10 +27,13 @@ export interface ProcessIdentity {
   startTimeMonotonic?: number; // 纳秒/微秒级时钟
   spawnTime: string;
   commandFingerprint?: string;
+  bootId?: string;             // 宿主启动标识（Linux /proc/sys/kernel/random/boot_id 等），跨重启判等；0.2.0 起在 spawn 登记时写入
 }
 
+export type StopProcessStatus = 'confirmed_stopped' | 'not_stopped' | 'cannot_determine';
+
 export interface StopProcessResult {
-  stopped: boolean;                // 是否确认完全停止
+  stopped: StopProcessStatus;       // 是否确认完全停止 (0.2.0 三态化)
   scope: 'direct_child' | 'process_group' | 'containment_cgroup' | 'unknown';
   residualPids?: number[];         // 存疑的残留进程 PID
   errorDetails?: string;
@@ -47,15 +50,22 @@ export interface ManagedProcessHandle {
   onRootExit?: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>;
   onExit: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>;
   rawProcess?: any;
+  /**
+   * 门管道受控启动控制 (P0-3)
+   */
+  releaseGate?: () => void;
+  destroyGate?: () => void;
 }
 
 export interface PlatformCapabilities {
   processGroupKill: boolean;       // 是否支持杀死整个进程组 (PGID)
-  accurateStartTime: boolean;      // 是否支持微秒级系统进程创建时钟核验
+  accurateStartTime: boolean;      // 是否支持微秒级系统进程创建时钟核验 (兼容字段)
+  startTimeSource?: 'procfs' | 'ps_lstart' | 'none'; // 真实时钟事实来源 (0.2.0 P0-1)
   memoryHardLimit: boolean;        // 是否支持 OS 级硬内存限制 (Linux cgroup v2)
   pidsLimit: boolean;              // 是否支持后代进程总数限制
   cpuLimit: boolean;               // 是否支持 CPU 时间硬限制
   descendantEnumeration: 'full' | 'cgroup' | 'none'; // 后代枚举与逃逸检测能力
+  gatedSpawn?: boolean;            // 是否支持门管道受控启动 (0.2.0 P0-3)
 }
 
 export interface PlatformDriver {
@@ -73,4 +83,12 @@ export interface PlatformDriver {
    */
   terminateGroup?(pgid: number, graceMs: number): Promise<StopProcessResult>;
   sampleMetrics?(identity: ProcessIdentity): Promise<{ rssBytes: number; pidsCount: number; cpuTimeMs: number }>;
+  /**
+   * 异步读取宿主启动唯一标识（N2 / 契约 #42）
+   */
+  readBootId?(): Promise<string | null>;
+  /**
+   * 异步读取指定进程组的所有成员与启动时间事实（N2 / 契约 #42）
+   */
+  getGroupEvidence?(pgid: number): Promise<{ pid: number; startTimeMs: number | null }[]>;
 }

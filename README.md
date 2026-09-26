@@ -42,7 +42,7 @@ npm install @xioflow/kernel
 import { ExecutionDomain, NodePlatformDriver, ProcessSupervisor } from '@xioflow/kernel';
 
 // The domain directory will hold domain.db, domain.lock and artifacts/.
-const domain = ExecutionDomain.acquire('/path/to/workspace/.xioflow', 'my-domain');
+const domain = ExecutionDomain.acquire('/path/to/workspace/.xioflow/kernel', 'my-domain');
 const supervisor = new ProcessSupervisor(domain, new NodePlatformDriver());
 
 // Every operation belongs to a Run, and every Run to a Task. Register them first:
@@ -96,7 +96,7 @@ After a restart, reacquire the domain and run the recovery engine:
 ```js
 import { ExecutionDomain, NodePlatformDriver, RecoveryEngine } from '@xioflow/kernel';
 
-const domain = ExecutionDomain.acquire('/path/to/workspace/.xioflow', 'my-domain');
+const domain = ExecutionDomain.acquire('/path/to/workspace/.xioflow/kernel', 'my-domain');
 const report = await new RecoveryEngine(domain, new NodePlatformDriver()).recover();
 ```
 

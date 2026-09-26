@@ -91,6 +91,7 @@ export interface Operation {
     startTimeMonotonic?: number;
     spawnTime: string;
     commandFingerprint?: string;
+    bootId?: string;
   };
 }
 
@@ -139,6 +140,10 @@ export interface ProcessOperationResult extends BaseResult {
   cpuTimeMs?: number;
   residualProcessesReaped?: boolean; // 根进程退出后仍持有管道的后代已被停止流水线回收
   streamCallbackError?: string;      // onStreamChunk 回调抛出的首个错误（不中断排空）
+  spillError?: string;               // 转储打开/写入/fsync/关闭失败记录（P0-9）
+  stdoutSpillError?: string;         // stdout 转储失败错误
+  stderrSpillError?: string;         // stderr 转储失败错误
+  residualPids?: number[];           // 逃逸或未完全停止的残留进程 PID 列表
   identityVerification: IdentityVerificationResult;
   evidence?: 'observed' | 'unobserved';
 }
@@ -324,5 +329,33 @@ export class OperationNotActiveError extends Error {
     );
     this.name = 'OperationNotActiveError';
   }
+}
+
+/**
+ * 重复提交相同 opId 时抛出的显式异常（契约 #40 / N8）
+ */
+export class DuplicateOperationError extends Error {
+  constructor(
+    public readonly opId: string,
+    public readonly existingStatus: string,
+    public readonly existingRunId: string
+  ) {
+    super(
+      `Operation '${opId}' already exists with status '${existingStatus}' in run '${existingRunId}'`
+    );
+    this.name = 'DuplicateOperationError';
+  }
+}
+
+/**
+ * 人工裁决记录（§3.6 / P0-7）
+ */
+export interface AdjudicationRecord {
+  operationId: string;
+  verdict: 'confirmed_stopped' | 'abandon_with_residuals';
+  actor: string;
+  note?: string;
+  residualPids?: number[];
+  decidedAt: string;
 }
 
