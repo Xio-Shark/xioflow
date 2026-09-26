@@ -75,7 +75,7 @@ export interface DomainBudget {
 export interface Operation {
   id: string;
   runId: string;
-  kind: 'process' | 'filesystem' | 'gate' | 'custom';
+  kind: 'process' | 'filesystem' | 'gate' | 'custom' | 'service';
   name: string;
   inputFingerprint: string;        // 输入与配置哈希指纹
   requiredResources: string[];     // 申请占用的资源（如 ["workspace:write:root"]）
@@ -409,4 +409,51 @@ export interface AdjudicationRecord {
   residualPids?: number[];
   decidedAt: string;
 }
+
+/**
+ * 长驻 service op 重启规格 (ARCHITECTURE §3.8 / D19)
+ */
+export type ServiceRestartPolicy =
+  | 'never'
+  | { policy: 'on-failure'; maxRestarts: number; backoffMs: number };
+
+/**
+ * 长驻 service op 规格 (ARCHITECTURE §3.8)
+ */
+export interface ServiceSpec {
+  serviceId: string;
+  runId: string;
+  command: import('./driver/types.js').StructuredCommand;
+  requiredResources?: string[];
+  readiness?: 'spawned' | { stdoutLine: RegExp; timeoutMs?: number };
+  restart?: ServiceRestartPolicy;
+  maxStderrBytes?: number;
+  artifactsDir?: string;
+  graceMs?: number;
+}
+
+/**
+ * service 就绪事实 (ARCHITECTURE §3.8)
+ */
+export interface ReadyFact {
+  serviceId: string;
+  instanceIndex: number;
+  readyAt: string;
+  matchedLine?: string;
+}
+
+/**
+ * service 句柄 (ARCHITECTURE §3.8)
+ */
+export interface ServiceHandle {
+  serviceId: string;
+  runId: string;
+  stdin: NodeJS.WritableStream;
+  stdout: NodeJS.ReadableStream;
+  ready: Promise<ReadyFact>;
+  stop: (graceMs?: number) => Promise<void>;
+  onInstanceExit: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>;
+  currentInstanceOpId: string;
+}
+
 

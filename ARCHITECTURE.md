@@ -893,9 +893,9 @@ xiocode 发行版
 | 47 | L2 | 重放命中在飞 op ⇒ 两个调用拿到同一结果，进程只启动一次 | S47 |
 | 48 | L2 | 重放命中 `indeterminate` ⇒ 原样返回，不重跑，租约保持 | S48 |
 | 49 | L2 | 有意图无身份的崩溃现场：`gatedSpawn=true` 可判未执行并执行一次；`false` ⇒ `indeterminate` | S49 |
-| 50 | L1 | service 实例 `stdinMode: 'stream'` 双向通信；stdout 直通不进内存保留；停止走标准流水线 | 计划 |
-| 51 | L1 | service `on-failure` 按退避重启且不超过上限；每次重启是新实例 op 并写 journal；超限 ⇒ `failed` | 计划 |
-| 52 | L2 | 宿主崩溃后 service 实例被核验并清场，恢复引擎不自动重启 | 计划 |
+| 50 | L1 | service 实例 `stdinMode: 'stream'` 双向通信；stdout 直通不进内存保留；停止走标准流水线 | S50 |
+| 51 | L1 | service `on-failure` 按退避重启且不超过上限；每次重启是新实例 op 并写 journal；超限 ⇒ `failed` | S51 |
+| 52 | L2 | 宿主崩溃后 service 实例被核验并清场，恢复引擎不自动重启 | S52 |
 | 53 | L3 | `SnapshotRef.journalSeq` 与捕获事件 seq 一致；可按 seq 查询不晚于它的最近快照 | 计划 |
 | 54 | L3 | materialize 生成的工作区独立；源工作区、用户 index、HEAD 与分支不变；dematerialize 后无残留 worktree | 计划 |
 | 55 | L3 | capability 结构校验失败（过期 / 旧 epoch / 越界路径 / 越界资源）在准入期显式拒绝并写 journal | 计划 |

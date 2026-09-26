@@ -2,12 +2,20 @@ import { ExecutionDomain } from '../domain.js';
 import { PlatformDriver } from '../driver/types.js';
 import { Operation, ProcessOperationResult, IndeterminateResult } from '../types.js';
 
+export interface RecoveredServiceSummary {
+  serviceId: string;
+  instanceOpIds: string[];
+  action: 'cleaned_unspawned' | 'stopped_alive_process' | 'marked_dead' | 'isolated_indeterminate';
+  resourcesReleased: boolean;
+}
+
 export interface RecoveryReport {
   recoveredOperations: {
     opId: string;
     action: 'cleaned_unspawned' | 'stopped_alive_process' | 'marked_dead' | 'isolated_indeterminate';
     resourcesReleased: boolean;
   }[];
+  recoveredServices?: RecoveredServiceSummary[];
 }
 
 export class RecoveryEngine {
@@ -26,6 +34,34 @@ export class RecoveryEngine {
     const unfinishedOps = store.getUnfinishedOperations(this.domain.domainId);
     const report: RecoveryReport = { recoveredOperations: [] };
 
+    const releaseOpAndServiceResources = (op: Operation) => {
+      this.domain.internalReleaseResources(op.id, op.requiredResources);
+      if (op.kind === 'service' || op.id.includes('#')) {
+        const serviceId = op.id.split('#')[0];
+        this.domain.internalReleaseResources(`service:${serviceId}`, op.requiredResources);
+      }
+    };
+
+    const recordServiceStoppedIfNeeded = (op: Operation, action: string) => {
+      if (op.kind === 'service' || op.id.includes('#')) {
+        const serviceId = op.id.split('#')[0];
+        store.recordEventAndTransitionState({
+          domainId: this.domain.domainId,
+          runId: op.runId,
+          operationId: op.id,
+          type: 'SERVICE_STOPPED',
+          payload: {
+            serviceId,
+            runId: op.runId,
+            instanceOpId: op.id,
+            reason: 'recovered_after_crash',
+            action,
+          },
+          timestamp: new Date().toISOString(),
+        });
+      }
+    };
+
     for (const op of unfinishedOps) {
       if (op.status === 'intent_registered' && !op.processIdentity) {
         // 场景 1：意图登记后崩溃，驱动未启动（无进程身份）
@@ -43,7 +79,8 @@ export class RecoveryEngine {
           completedAt: new Date().toISOString(),
         };
         store.recordOperationResult(op.id, failResult, true);
-        this.domain.internalReleaseResources(op.id, op.requiredResources);
+        releaseOpAndServiceResources(op);
+        recordServiceStoppedIfNeeded(op, 'cleaned_unspawned');
         report.recoveredOperations.push({
           opId: op.id,
           action: 'cleaned_unspawned',
@@ -79,7 +116,8 @@ export class RecoveryEngine {
               completedAt: new Date().toISOString(),
             };
             store.recordOperationResult(op.id, cancelResult, true);
-            this.domain.internalReleaseResources(op.id, op.requiredResources);
+            releaseOpAndServiceResources(op);
+            recordServiceStoppedIfNeeded(op, 'stopped_alive_process');
             report.recoveredOperations.push({
               opId: op.id,
               action: 'stopped_alive_process',
@@ -96,6 +134,7 @@ export class RecoveryEngine {
               completedAt: new Date().toISOString(),
             };
             store.recordOperationResult(op.id, indetResult, false);
+            recordServiceStoppedIfNeeded(op, 'isolated_indeterminate');
             report.recoveredOperations.push({
               opId: op.id,
               action: 'isolated_indeterminate',
@@ -205,7 +244,8 @@ export class RecoveryEngine {
             completedAt: new Date().toISOString(),
           };
           store.recordOperationResult(op.id, deadResult, true);
-          this.domain.internalReleaseResources(op.id, op.requiredResources);
+          releaseOpAndServiceResources(op);
+          recordServiceStoppedIfNeeded(op, 'marked_dead');
           report.recoveredOperations.push({
             opId: op.id,
             action: 'marked_dead',
@@ -222,6 +262,7 @@ export class RecoveryEngine {
             completedAt: new Date().toISOString(),
           };
           store.recordOperationResult(op.id, indetResult, false);
+          recordServiceStoppedIfNeeded(op, 'isolated_indeterminate');
           report.recoveredOperations.push({
             opId: op.id,
             action: 'isolated_indeterminate',
@@ -248,6 +289,80 @@ export class RecoveryEngine {
         }
       }
     }
+
+    // 6. [Service 维度聚合] (ARCHITECTURE §3.8 / Step 5)
+    const serviceMap = new Map<string, {
+      instanceOpIds: string[];
+      actions: Set<'cleaned_unspawned' | 'stopped_alive_process' | 'marked_dead' | 'isolated_indeterminate'>;
+      resourcesReleased: boolean;
+    }>();
+
+    for (const rec of report.recoveredOperations) {
+      const op = unfinishedOps.find((o) => o.id === rec.opId);
+      const isService = op?.kind === 'service' || rec.opId.includes('#');
+      if (isService) {
+        const serviceId = rec.opId.split('#')[0];
+        let entry = serviceMap.get(serviceId);
+        if (!entry) {
+          entry = {
+            instanceOpIds: [],
+            actions: new Set(),
+            resourcesReleased: true,
+          };
+          serviceMap.set(serviceId, entry);
+        }
+        entry.instanceOpIds.push(rec.opId);
+        entry.actions.add(rec.action);
+        if (!rec.resourcesReleased) {
+          entry.resourcesReleased = false;
+        }
+      }
+    }
+
+    // 检查并释放处于重启 backoff 间隙遗留的 service 租约（无活跃 op）
+    const persistedLeases = store.getPersistedResourceLeases(this.domain.domainId);
+    for (const lease of persistedLeases) {
+      if (lease.operationId.startsWith('service:')) {
+        const serviceId = lease.operationId.slice('service:'.length);
+        this.domain.internalReleaseResources(lease.operationId, [lease.resourceId]);
+        if (!serviceMap.has(serviceId)) {
+          serviceMap.set(serviceId, {
+            instanceOpIds: [],
+            actions: new Set(['stopped_alive_process']),
+            resourcesReleased: true,
+          });
+          store.recordEventAndTransitionState({
+            domainId: this.domain.domainId,
+            type: 'SERVICE_STOPPED',
+            payload: {
+              serviceId,
+              reason: 'recovered_after_crash',
+              action: 'cleared_backoff_lease',
+            },
+            timestamp: new Date().toISOString(),
+          });
+        }
+      }
+    }
+
+    report.recoveredServices = Array.from(serviceMap.entries()).map(([serviceId, entry]) => {
+      let action: 'cleaned_unspawned' | 'stopped_alive_process' | 'marked_dead' | 'isolated_indeterminate';
+      if (entry.actions.has('isolated_indeterminate')) {
+        action = 'isolated_indeterminate';
+      } else if (entry.actions.has('stopped_alive_process')) {
+        action = 'stopped_alive_process';
+      } else if (entry.actions.has('marked_dead')) {
+        action = 'marked_dead';
+      } else {
+        action = 'cleaned_unspawned';
+      }
+      return {
+        serviceId,
+        instanceOpIds: entry.instanceOpIds,
+        action,
+        resourcesReleased: entry.resourcesReleased,
+      };
+    });
 
     return report;
   }

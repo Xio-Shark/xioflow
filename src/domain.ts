@@ -541,6 +541,10 @@ export class ExecutionDomain {
     this.driver = driver;
   }
 
+  public getDriver(): PlatformDriver | undefined {
+    return this.driver;
+  }
+
   /**
    * 内部私有资源释放（走代际栅栏并记录 RESOURCES_RELEASED 事件，§0.2 裁决 1 / N6）
    * @internal 仅供 supervisor、recovery engine 与 adjudicate 等内核内部组件调用
