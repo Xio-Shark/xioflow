@@ -1388,5 +1388,184 @@ export function defineContractTestSuite(
       expect(res.replayed).toBe(true);
       expect(res.runId).toBe('run-c49');
     });
+
+    it('契约 50: service 实例 stdinMode: "stream" 双向通信；stdout 直通不进内存保留；停止走标准流水线', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      const runId = 'run-c50';
+      ensureTaskAndRun(domain, 'task-c50', runId);
+
+      const script = `
+        const readline = require('readline');
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: false });
+        rl.on('line', (line) => console.log('REPLY:' + line));
+      `;
+
+      const handle = await supervisor.startService({
+        serviceId: 'service-c50',
+        runId,
+        command: {
+          execPath: process.execPath,
+          args: ['-e', script],
+          cwd: tempDir,
+        },
+        readiness: 'spawned',
+      });
+
+      expect(handle.currentInstanceOpId).toBe('service-c50#1');
+      await handle.ready;
+
+      // 验证双向 stdin/stdout 流式交互
+      const receivedLines: string[] = [];
+      handle.stdout.on('data', (chunk: Buffer) => {
+        const lines = chunk.toString().split('\n');
+        for (const l of lines) {
+          if (l.trim()) receivedLines.push(l.trim());
+        }
+      });
+
+      handle.stdin.write('ping-50\n');
+
+      const start = Date.now();
+      while (!receivedLines.includes('REPLY:ping-50') && Date.now() - start < 3000) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(receivedLines).toContain('REPLY:ping-50');
+
+      // 停止 service 走标准流水线
+      await handle.stop(1000);
+
+      const events = domain.getStore().getJournalEvents(domain.domainId);
+      const startEvt = events.find((e) => e.type === 'SERVICE_STARTED' && (e.payload as any)?.serviceId === 'service-c50');
+      const readyEvt = events.find((e) => e.type === 'SERVICE_READY' && (e.payload as any)?.serviceId === 'service-c50');
+      const stopEvt = events.find((e) => e.type === 'SERVICE_STOPPED' && (e.payload as any)?.serviceId === 'service-c50');
+
+      expect(startEvt).toBeDefined();
+      expect(readyEvt).toBeDefined();
+      expect(stopEvt).toBeDefined();
+    });
+
+    it('契约 51: service on-failure 按退避重启且不超过上限；每次重启是新实例 op 并写 journal；超限 => failed', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      const runId = 'run-c51';
+      ensureTaskAndRun(domain, 'task-c51', runId);
+
+      const script = `
+        const readline = require('readline');
+        const rl = readline.createInterface({ input: process.stdin, terminal: false });
+        rl.once('line', () => process.exit(42));
+      `;
+
+      const handle = await supervisor.startService({
+        serviceId: 'service-c51',
+        runId,
+        command: {
+          execPath: process.execPath,
+          args: ['-e', script],
+          cwd: tempDir,
+        },
+        readiness: 'spawned',
+        restart: { policy: 'on-failure', maxRestarts: 2, backoffMs: 50 },
+      });
+
+      await handle.ready;
+      expect(handle.currentInstanceOpId).toBe('service-c51#1');
+
+      // 退出 instance #1
+      handle.stdin.write('die-1\n');
+      const start1 = Date.now();
+      while (handle.currentInstanceOpId !== 'service-c51#2' && Date.now() - start1 < 3000) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(handle.currentInstanceOpId).toBe('service-c51#2');
+
+      // 退出 instance #2
+      handle.stdin.write('die-2\n');
+      const start2 = Date.now();
+      while (handle.currentInstanceOpId !== 'service-c51#3' && Date.now() - start2 < 3000) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(handle.currentInstanceOpId).toBe('service-c51#3');
+
+      // 退出 instance #3（达到上限）
+      handle.stdin.write('die-3\n');
+      const start3 = Date.now();
+      let events = domain.getStore().getJournalEvents(domain.domainId);
+      while (!events.some((e) => e.type === 'SERVICE_FAILED' && (e.payload as any)?.serviceId === 'service-c51') && Date.now() - start3 < 3000) {
+        await new Promise((r) => setTimeout(r, 20));
+        events = domain.getStore().getJournalEvents(domain.domainId);
+      }
+
+      events = domain.getStore().getJournalEvents(domain.domainId);
+      const restarts = events.filter((e) => e.type === 'SERVICE_RESTARTED' && (e.payload as any)?.serviceId === 'service-c51');
+      expect(restarts.length).toBe(2);
+
+      const failed = events.find((e) => e.type === 'SERVICE_FAILED' && (e.payload as any)?.serviceId === 'service-c51');
+      expect(failed).toBeDefined();
+      expect((failed?.payload as any)?.maxRestartsExceeded).toBe(true);
+    });
+
+    it('契约 52: 宿主崩溃后 service 实例被核验并清场，恢复引擎不自动重启', async () => {
+      const { supervisor, domain, driver, tempDir } = ctx;
+      const runId = 'run-c52';
+      ensureTaskAndRun(domain, 'task-c52', runId);
+      const resource = 'res:c52-service';
+
+      const script = `
+        console.log('READY');
+        setInterval(() => {}, 1000);
+      `;
+
+      const handle = await supervisor.startService({
+        serviceId: 'service-c52',
+        runId,
+        command: { execPath: process.execPath, args: ['-e', script], cwd: tempDir },
+        requiredResources: [resource],
+        readiness: { stdoutLine: /^READY$/ },
+        restart: { policy: 'on-failure', maxRestarts: 3, backoffMs: 50 },
+      });
+
+      await handle.ready;
+      expect(domain.isResourceLocked(resource)).toBe(true);
+
+      const op = domain.getStore().getOperation('service-c52#1');
+      const childPid = op?.processIdentity?.pid;
+      expect(childPid).toBeDefined();
+
+      // 模拟宿主崩溃：关闭 domain，但不主动停止 service 实例
+      domain.close();
+
+      // 新宿主 acquire 并执行恢复
+      const restartedDomain = ExecutionDomain.acquire(tempDir, domain.domainId);
+      expect(restartedDomain.isResourceLocked(resource)).toBe(true);
+
+      const recoveryEngine = new RecoveryEngine(restartedDomain, driver);
+      const report = await recoveryEngine.recover();
+
+      expect(report.recoveredServices).toBeDefined();
+      const srvReport = report.recoveredServices!.find((s) => s.serviceId === 'service-c52');
+      expect(srvReport).toBeDefined();
+      expect(srvReport?.resourcesReleased).toBe(true);
+      expect(srvReport?.instanceOpIds).toContain('service-c52#1');
+
+      // 资源租约已完全释放
+      expect(restartedDomain.isResourceLocked(resource)).toBe(false);
+
+      // 进程已停止
+      let isAlive = true;
+      try {
+        process.kill(childPid!, 0);
+      } catch (err: any) {
+        if (err.code === 'ESRCH') isAlive = false;
+      }
+      expect(isAlive).toBe(false);
+
+      // 不会自动重启新实例
+      await new Promise((r) => setTimeout(r, 150));
+      const allOps = restartedDomain.getStore().getOperationsByRun(runId);
+      expect(allOps.find((o) => o.id === 'service-c52#2')).toBeUndefined();
+
+      restartedDomain.close();
+    });
   });
 }
+

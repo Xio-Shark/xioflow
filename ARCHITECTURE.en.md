@@ -359,9 +359,9 @@ Status column: `S<n>` indicates implementation as test #n in the shared conforma
 | 47 | L2 | Replay hitting in-flight operation joins same promise; exactly one underlying process spawned. | S47 |
 | 48 | L2 | Replay hitting `indeterminate` operation returns indeterminate result as-is without re-running; preserves leases. | S48 |
 | 49 | L2 | Crash recovery scene with intent but no identity: `gatedSpawn=true` verifies non-execution; `false` escalates to `indeterminate`. | S49 |
-| 50 | L1 | Service instance bidirectional stdio via `stdinMode: 'stream'`; passthrough stdout; standard stop pipeline. | Planned |
-| 51 | L1 | Service restarts on-failure with exponential backoff up to limit; each restart is a new instance op logging to journal. | Planned |
-| 52 | L2 | Host crash cleans up and terminates service instances; recovery engine never automatically restarts services. | Planned |
+| 50 | L1 | Service instance bidirectional stdio via `stdinMode: 'stream'`; passthrough stdout; standard stop pipeline. | S50 |
+| 51 | L1 | Service restarts on-failure with exponential backoff up to limit; each restart is a new instance op logging to journal. | S51 |
+| 52 | L2 | Host crash cleans up and terminates service instances; recovery engine never automatically restarts services. | S52 |
 | 53 | L3 | `SnapshotRef.journalSeq` matches event seq; enables querying nearest snapshot not exceeding given sequence number. | Planned |
 | 54 | L3 | Workspaces materialized from snapshots are isolated; source worktree, index, HEAD, and branch unaffected; dematerialize leaves no residue. | Planned |
 | 55 | L3 | Capability validation failure (expired / stale epoch / path out of bounds / resource out of bounds) rejected at admission. | Planned |

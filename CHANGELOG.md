@@ -6,6 +6,27 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+- **Long-Running Service Supervision (`supervisor.startService`, ARCHITECTURE §3.8, Contracts #50–#52)**:
+  - Added `ServiceSupervisor` managing long-running service processes (e.g. MCP stdio servers, dev servers).
+  - Each service instance is a managed kernel operation (`opId = <serviceId>#<instanceIndex>`) registered in SQLite store with `kind: 'service'`.
+  - Passthrough stdout: caller directly consumes streaming output without accumulating unbounded Head+Tail in kernel memory.
+  - Bounded stderr drain & spill (B3): retains Head+Tail in memory, and spills complete stderr to disk (`artifacts/<opId>.stderr.log`) when `artifactsDir` is provided.
+  - Readiness probe: supports `'spawned'` (ready on spawn) and `{ stdoutLine: RegExp, timeoutMs }` (matches pattern, unhooks listener upon readiness).
+  - Declarative restart policy: supports `'never'` and `{ policy: 'on-failure', maxRestarts, backoffMs }`.
+  - Service-level resource lease retention: during restart backoff intervals, leases remain locked under `service:<serviceId>` to prevent concurrent preemption.
+- **Continuous Bidirectional stdio Streaming (`stdinMode: 'stream'`)**:
+  - `StructuredCommand.stdinMode` supports `'stream'`, keeping the `stdin` pipe open for continuous interactive writing instead of closing on first write.
+- **Service Lifecycle Journal Events**:
+  - Emits `SERVICE_STARTED`, `SERVICE_READY`, `SERVICE_RESTARTED`, `SERVICE_STOPPED`, and `SERVICE_FAILED` events into journal under epoch fencing.
+- **Crash Recovery Service Dimension Aggregation**:
+  - `RecoveryEngine.recover()` aggregates affected services into `report.recoveredServices`, cleans up surviving processes, releases `service:<serviceId>` leases, and strictly prevents automatic restarts after host crashes.
+- **Model Context Protocol (MCP) Stdio Transport Example (`examples/mcp-stdio-transport`)**:
+  - Demonstrates `KernelStdioTransport` implementing official `@modelcontextprotocol/sdk` `Transport` interface on top of `@xioflow/kernel`.
+  - End-to-end verified with official MCP Client and Server: runs `initialize`, `tools/list`, and `tools/call`, closing with verified 0 orphan processes leaked in OS.
+- **Shared Contract Suite Expansion (32 -> 35 items)**:
+  - Promoted contracts #50, #51, and #52 into `@xioflow/kernel/testing`.
+
 ## [0.3.0] - 2026-09-26
 
 ### Added

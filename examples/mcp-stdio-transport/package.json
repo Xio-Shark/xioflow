@@ -1,0 +1,13 @@
+{
+  "name": "example-mcp-stdio-transport",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "demo": "node run-mcp-demo.mjs"
+  },
+  "dependencies": {
+    "@xioflow/kernel": "file:../../",
+    "@modelcontextprotocol/sdk": "^1.6.0"
+  }
+}

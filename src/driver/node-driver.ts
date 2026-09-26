@@ -102,6 +102,9 @@ export class NodePlatformDriver implements PlatformDriver {
       let gatePipe: any = null;
       let gateReleased = false;
 
+      const isStreamStdin = command.stdinMode === 'stream';
+      const stdinOption = (isStreamStdin || stdinPayload !== undefined) ? 'pipe' : 'ignore';
+
       try {
         if (useGatedSpawn) {
           const springboard = 'IFS= read -r _ <&3 || exit 125; exec 3<&-; exec "$0" "$@";';
@@ -109,7 +112,7 @@ export class NodePlatformDriver implements PlatformDriver {
             cwd: command.cwd,
             env: childEnv,
             detached: true,
-            stdio: [stdinPayload === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe', 'pipe'],
+            stdio: [stdinOption, 'pipe', 'pipe', 'pipe'],
           });
           gatePipe = child.stdio[3];
         } else {
@@ -117,7 +120,7 @@ export class NodePlatformDriver implements PlatformDriver {
             cwd: command.cwd,
             env: childEnv,
             detached: true,
-            stdio: [stdinPayload === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+            stdio: [stdinOption, 'pipe', 'pipe'],
           });
         }
       } catch (err) {
@@ -205,6 +208,7 @@ export class NodePlatformDriver implements PlatformDriver {
 
         const handle: ManagedProcessHandle = {
           identity,
+          stdin: isStreamStdin ? (child.stdin ?? undefined) : undefined,
           stdout: child.stdout!,
           stderr: child.stderr!,
           onRootExit: rootExitPromise,
@@ -216,8 +220,15 @@ export class NodePlatformDriver implements PlatformDriver {
 
         this.activeHandles.set(pid, { handle, child, startTime: startTimeMonotonic });
 
-        // 一次性 stdin：写入后关闭。子进程不读就退出的 EPIPE 不是启动失败，由退出码体现。
-        if (stdinPayload !== undefined && child.stdin) {
+        if (isStreamStdin) {
+          if (child.stdin) {
+            child.stdin.on('error', () => {});
+            if (stdinPayload !== undefined) {
+              child.stdin.write(stdinPayload);
+            }
+          }
+        } else if (stdinPayload !== undefined && child.stdin) {
+          // 一次性 stdin：写入后关闭。子进程不读就退出的 EPIPE 不是启动失败，由退出码体现。
           child.stdin.on('error', () => {});
           child.stdin.end(stdinPayload);
         }

@@ -10,6 +10,12 @@ export interface StructuredCommand {
    */
   stdin?: string | Uint8Array;
   /**
+   * stdin 模式：
+   * - 'once'（默认）：提供 stdin 时写入后立即关闭管道
+   * - 'stream'：保持 stdin 管道开放供调用方持续写入，由 ManagedProcessHandle.stdin 暴露
+   */
+  stdinMode?: 'once' | 'stream';
+  /**
    * 显式环境变量白名单：提供时按原样使用，绝不注入宿主 PATH。
    * 需要 PATH 时请自行放入白名单（发行版通常有更严格的密钥剔除策略）。
    */
@@ -41,6 +47,7 @@ export interface StopProcessResult {
 
 export interface ManagedProcessHandle {
   identity: ProcessIdentity;
+  stdin?: NodeJS.WritableStream;
   stdout: NodeJS.ReadableStream;
   stderr: NodeJS.ReadableStream;
   /**
