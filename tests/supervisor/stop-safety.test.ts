@@ -128,7 +128,7 @@ describe('内核 0.2.0 批次 2 (B2): 停止安全与资源收口 [N8, N2, N5, N
       expect(opResult.status).toBe('cancelled');
     });
 
-    it('1.3 [N8] 已结清的 opId 再次提交同样抛 DuplicateOperationError；同 tick 内并发提交恰好一个被拒绝', async () => {
+    it('1.3 [N8] 已结清的 opId 再次提交（不同指纹）同样抛 DuplicateOperationError/OperationIdConflictError；同 tick 内并发提交不同指纹恰好一个被拒绝', async () => {
       // 先正常执行一个短暂操作并结清
       const finishedOpId = 'op-n8-finished';
       const firstResult = await supervisor.executeProcess({
@@ -144,7 +144,7 @@ describe('内核 0.2.0 批次 2 (B2): 停止安全与资源收口 [N8, N2, N5, N
       });
       expect(firstResult.status).toBe('succeeded');
 
-      // 再次以 finishedOpId 提交，断言抛 DuplicateOperationError
+      // 再次以 finishedOpId 提交不同指纹指令，断言抛 DuplicateOperationError (OperationIdConflictError)
       let duplicateErr: any = null;
       try {
         await supervisor.executeProcess({
@@ -153,7 +153,7 @@ describe('内核 0.2.0 批次 2 (B2): 停止安全与资源收口 [N8, N2, N5, N
           name: 'quick-op-retry',
           command: {
             execPath: process.execPath,
-            args: ['-e', 'process.exit(0);'],
+            args: ['-e', 'process.exit(1);'],
             cwd: tempDir,
           },
           requiredResources: [],
@@ -166,7 +166,7 @@ describe('内核 0.2.0 批次 2 (B2): 停止安全与资源收口 [N8, N2, N5, N
       expect(duplicateErr.existingStatus).toBe('done');
       expect(duplicateErr.existingRunId).toBe('run-b2');
 
-      // 同一 tick 内两次并发 executeProcess(concurrentOpId)，不 await 第一个
+      // 同一 tick 内两次并发以不同指纹 executeProcess(concurrentOpId)，不 await 第一个
       const concurrentOpId = 'op-n8-concurrent';
       const results: { success: boolean; error?: any }[] = [];
 
@@ -189,7 +189,7 @@ describe('内核 0.2.0 批次 2 (B2): 停止安全与资源收口 [N8, N2, N5, N
         name: 'concurrent-2',
         command: {
           execPath: process.execPath,
-          args: ['-e', 'setTimeout(() => {}, 50);'],
+          args: ['-e', 'setTimeout(() => {}, 100);'],
           cwd: tempDir,
         },
         requiredResources: [],

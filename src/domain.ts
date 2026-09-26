@@ -15,9 +15,24 @@ import {
   EpochFencedError,
   TerminationReason,
   AdjudicationRecord,
+  Task,
+  Run,
 } from './types.js';
 
 export { DomainLockedError, ResourceConflictError, EpochFencedError, AdjudicationRecord };
+
+export interface DomainStatus {
+  domainId: string;
+  domainPath: string;
+  epoch: number;
+  owner: OwnerRecord;
+  tasks: Task[];
+  runs: Run[];
+  activeRuns: Run[];
+  operations: (Operation & { domainId: string })[];
+  unfinishedOperations: (Operation & { domainId: string })[];
+  leases: (ResourceLease & { budget?: ResourceBudget })[];
+}
 
 export class ExecutionDomain {
   public readonly domainPath: string;
@@ -193,6 +208,25 @@ export class ExecutionDomain {
 
   public getDomainBudget(): DomainBudget | undefined {
     return this.domainBudget;
+  }
+
+  public get status(): DomainStatus {
+    return this.getStatus();
+  }
+
+  public getStatus(): DomainStatus {
+    return {
+      domainId: this.domainId,
+      domainPath: this.domainPath,
+      epoch: this.getEpoch(),
+      owner: this.getOwnerRecord(),
+      tasks: this.store.getAllTasks(this.domainId),
+      runs: this.store.getAllRuns(this.domainId),
+      activeRuns: this.store.getActiveRuns(this.domainId),
+      operations: this.store.getAllOperations(this.domainId),
+      unfinishedOperations: this.store.getUnfinishedOperations(this.domainId),
+      leases: this.store.getPersistedResourceLeases(this.domainId),
+    };
   }
 
   /**

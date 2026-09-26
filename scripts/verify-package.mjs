@@ -50,7 +50,7 @@ for (const required of [
     throw new Error(`tarball is missing ${required}`);
   }
 }
-const leaked = packed.filter((file) => file.startsWith('src/') || file.startsWith('tests/'));
+const leaked = packed.filter((file) => file.startsWith('src/') || file.startsWith('tests/') || file.startsWith('examples/'));
 if (leaked.length > 0) {
   throw new Error(`tarball leaks repository-only files: ${leaked.join(', ')}`);
 }

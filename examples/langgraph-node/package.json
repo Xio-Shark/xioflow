@@ -1,0 +1,15 @@
+{
+  "name": "example-langgraph-node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node run-langgraph-checkpoint.mjs",
+    "resume-demo": "node run-langgraph-checkpoint.mjs"
+  },
+  "dependencies": {
+    "@xioflow/kernel": "file:../../",
+    "@langchain/langgraph": "^1.4.18",
+    "@langchain/core": "^1.1.48"
+  }
+}

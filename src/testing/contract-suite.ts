@@ -14,6 +14,10 @@ import {
   EpochFencedError,
   OperationNotActiveError,
   DuplicateOperationError,
+  OperationIdConflictError,
+  RecoveryRequiredError,
+  computeInputFingerprint,
+  ProcessOperationResult,
 } from '../index.js';
 
 export interface ConsumerContext {
@@ -1175,6 +1179,214 @@ export function defineContractTestSuite(
       const pruneResult = domain.pruneArtifacts();
       expect(pruneResult.retained).toContain(activeFile);
       expect(fs.existsSync(activeFile)).toBe(true);
+    });
+
+    it('契约 45: 同 opId 同指纹重放返回已记录结果，不产生新进程，写 OPERATION_REPLAYED', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c45', 'run-c45');
+      const counterFile = path.join(tempDir, 'counter-c45.log');
+
+      const options = {
+        runId: 'run-c45',
+        opId: 'op-c45-recorded',
+        name: 'op-c45',
+        requiredResources: [],
+        command: {
+          execPath: process.execPath,
+          args: ['-e', `require('fs').appendFileSync(process.argv[1], '1\\n'); console.log('c45-out');`, counterFile],
+          cwd: tempDir,
+        },
+      };
+
+      const res1 = await supervisor.executeProcess(options);
+      expect(res1.status).toBe('succeeded');
+      expect(res1.replayed).toBeUndefined();
+      expect(res1.stdout).toContain('c45-out');
+
+      const res2 = await supervisor.executeProcess(options);
+      expect(res2.status).toBe('succeeded');
+      expect(res2.replayed).toBe(true);
+      expect(res2.stdout).toContain('c45-out');
+
+      // 验证副作用仅发生 1 次
+      const lines = fs.readFileSync(counterFile, 'utf8').trim().split('\n');
+      expect(lines.length).toBe(1);
+
+      // journal 记录 OPERATION_REPLAYED
+      const events = domain.getStore().getJournalEvents(domain.domainId);
+      const replayEvt = events.find((e) => e.type === 'OPERATION_REPLAYED' && e.operationId === 'op-c45-recorded');
+      expect(replayEvt).toBeDefined();
+      expect(replayEvt?.payload.mode).toBe('recorded');
+    });
+
+    it('契约 46: 同 opId 不同指纹 => OperationIdConflictError，不改动已有 op 的任何事实', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c46', 'run-c46');
+
+      const options1 = {
+        runId: 'run-c46',
+        opId: 'op-c46-conflict',
+        name: 'op-c46-orig',
+        requiredResources: [],
+        command: {
+          execPath: process.execPath,
+          args: ['-e', 'console.log("c46-orig");'],
+          cwd: tempDir,
+        },
+      };
+
+      const res1 = await supervisor.executeProcess(options1);
+      expect(res1.status).toBe('succeeded');
+
+      const options2 = {
+        runId: 'run-c46',
+        opId: 'op-c46-conflict',
+        name: 'op-c46-conflict',
+        requiredResources: [],
+        command: {
+          execPath: process.execPath,
+          args: ['-e', 'console.log("c46-diff");'], // 不同 args
+          cwd: tempDir,
+        },
+      };
+
+      await expect(supervisor.executeProcess(options2)).rejects.toThrow(OperationIdConflictError);
+
+      const op = domain.getStore().getOperation('op-c46-conflict');
+      expect(op?.status).toBe('done');
+      expect(op?.result?.status).toBe('succeeded');
+    });
+
+    it('契约 47: 重放命中在飞 op => 两个调用拿到同一结果，进程只启动一次', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c47', 'run-c47');
+      const counterFile = path.join(tempDir, 'counter-c47.log');
+
+      const options = {
+        runId: 'run-c47',
+        opId: 'op-c47-inflight',
+        name: 'op-c47',
+        requiredResources: [],
+        command: {
+          execPath: process.execPath,
+          args: ['-e', `require('fs').appendFileSync(process.argv[1], '1\\n'); setTimeout(() => console.log('c47-out'), 300);`, counterFile],
+          cwd: tempDir,
+        },
+      };
+
+      const [res1, res2] = await Promise.all([
+        supervisor.executeProcess(options),
+        supervisor.executeProcess(options),
+      ]);
+
+      expect(res1.status).toBe('succeeded');
+      expect(res2.status).toBe('succeeded');
+      expect(res2.replayed).toBe(true);
+
+      const lines = fs.readFileSync(counterFile, 'utf8').trim().split('\n');
+      expect(lines.length).toBe(1);
+
+      const events = domain.getStore().getJournalEvents(domain.domainId);
+      const replayEvt = events.find((e) => e.type === 'OPERATION_REPLAYED' && e.operationId === 'op-c47-inflight');
+      expect(replayEvt?.payload.mode).toBe('joined');
+    });
+
+    it('契约 48: 重放命中 indeterminate => 原样返回，不重跑，租约保持', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c48', 'run-c48');
+      const opId = 'op-c48-indet';
+      const store = domain.getStore();
+
+      const options = {
+        runId: 'run-c48',
+        opId,
+        name: 'test-indet',
+        requiredResources: ['res:c48'],
+        command: {
+          execPath: process.execPath,
+          args: ['-e', 'process.exit(0)'],
+          cwd: tempDir,
+        },
+      };
+
+      store.registerOperationIntent({
+        id: opId,
+        runId: 'run-c48',
+        kind: 'process',
+        name: 'test-indet',
+        inputFingerprint: computeInputFingerprint(options),
+        requiredResources: ['res:c48'],
+        status: 'pending',
+      }, domain.domainId);
+
+      const indetResult: ProcessOperationResult = {
+        kind: 'process',
+        status: 'indeterminate' as any,
+        exitCode: null,
+        signal: null,
+        stdout: '',
+        stderr: 'indeterminate residual',
+        isTruncated: false,
+        identityVerification: 'cannot_determine',
+        durationMs: 50,
+        completedAt: new Date().toISOString(),
+      };
+      store.recordOperationResult(opId, indetResult, false);
+
+      const res = await supervisor.executeProcess(options);
+      expect(res.status).toBe('indeterminate');
+      expect(res.replayed).toBe(true);
+
+      const leases = store.getPersistedResourceLeases(domain.domainId);
+      expect(leases.some((l) => l.operationId === opId && l.resourceId === 'res:c48')).toBe(true);
+    });
+
+    it('契约 49: 有意图无身份的崩溃现场：未恢复时提交抛 RecoveryRequiredError；恢复后结清重放命中已记录事实', async () => {
+      const { supervisor, domain, driver, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c49', 'run-c49');
+      const opId = 'op-c49-unrecovered';
+      const store = domain.getStore();
+
+      const options = {
+        runId: 'run-c49',
+        opId,
+        name: 'test-unrecovered',
+        requiredResources: [],
+        command: {
+          execPath: process.execPath,
+          args: ['-e', 'console.log(1)'],
+          cwd: tempDir,
+        },
+      };
+
+      // 构造崩溃残留：intent_registered 且不在内存活跃表中
+      store.registerOperationIntent({
+        id: opId,
+        runId: 'run-c49',
+        kind: 'process',
+        name: 'test-unrecovered',
+        inputFingerprint: computeInputFingerprint(options),
+        requiredResources: [],
+        status: 'intent_registered',
+      }, domain.domainId);
+
+      // 未调用 recover() 前调用，抛 RecoveryRequiredError
+      await expect(supervisor.executeProcess(options)).rejects.toThrow(RecoveryRequiredError);
+
+      // 执行崩溃恢复
+      const recoveryEngine = new RecoveryEngine(domain, driver);
+      await recoveryEngine.recover();
+
+      // 恢复后该意图被收敛为 failed(never spawned)，新 Run 再次发起重放应命中已记录结果
+      ensureTaskAndRun(domain, 'task-c49', 'run-c49-new');
+      const replayOptions = {
+        ...options,
+        runId: 'run-c49-new',
+      };
+      const res = await supervisor.executeProcess(replayOptions);
+      expect(res.status).toBe('failed');
+      expect(res.replayed).toBe(true);
+      expect(res.runId).toBe('run-c49');
     });
   });
 }

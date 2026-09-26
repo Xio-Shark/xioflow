@@ -888,11 +888,11 @@ xiocode 发行版
 | 42 | L2 | 按 pgid 清场需要 `bootId` 一致且成员启动时间不早于 op spawn；证据不足 ⇒ `indeterminate`，零信号；组信号失败不退回单 PID | R |
 | 43 | L2 | 单个 op 的失败不改写 Run；已终结 Run 拒绝登记新 op；发行版经 `reportRunCancelled` 取消 Run | R |
 | 44 | L1 | 未截断转储在结清时删除；`pruneArtifacts` 拒绝回收未终结 / 未裁决 op 的产物 | S27 |
-| 45 | L2 | 同 opId 同指纹重放返回已记录结果，不产生新进程，写 `OPERATION_REPLAYED` | 计划 |
-| 46 | L2 | 同 opId 不同指纹 ⇒ `OperationIdConflictError`，不改动已有 op 的任何事实 | 计划 |
-| 47 | L2 | 重放命中在飞 op ⇒ 两个调用拿到同一结果，进程只启动一次 | 计划 |
-| 48 | L2 | 重放命中 `indeterminate` ⇒ 原样返回，不重跑，租约保持 | 计划 |
-| 49 | L2 | 有意图无身份的崩溃现场：`gatedSpawn=true` 可判未执行并执行一次；`false` ⇒ `indeterminate` | 计划 |
+| 45 | L2 | 同 opId 同指纹重放返回已记录结果，不产生新进程，写 `OPERATION_REPLAYED` | S45 |
+| 46 | L2 | 同 opId 不同指纹 ⇒ `OperationIdConflictError`，不改动已有 op 的任何事实 | S46 |
+| 47 | L2 | 重放命中在飞 op ⇒ 两个调用拿到同一结果，进程只启动一次 | S47 |
+| 48 | L2 | 重放命中 `indeterminate` ⇒ 原样返回，不重跑，租约保持 | S48 |
+| 49 | L2 | 有意图无身份的崩溃现场：`gatedSpawn=true` 可判未执行并执行一次；`false` ⇒ `indeterminate` | S49 |
 | 50 | L1 | service 实例 `stdinMode: 'stream'` 双向通信；stdout 直通不进内存保留；停止走标准流水线 | 计划 |
 | 51 | L1 | service `on-failure` 按退避重启且不超过上限；每次重启是新实例 op 并写 journal；超限 ⇒ `failed` | 计划 |
 | 52 | L2 | 宿主崩溃后 service 实例被核验并清场，恢复引擎不自动重启 | 计划 |
