@@ -7,3 +7,6 @@ export * from './driver/node-driver.js';
 export * from './supervisor/supervisor.js';
 export * from './recovery/engine.js';
 export * from './quick-run.js';
+export * from './snapshot/git-shadow.js';
+export * from './capability/index.js';
+export * from './confinement/index.js';

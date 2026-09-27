@@ -73,6 +73,7 @@ export interface PlatformCapabilities {
   cpuLimit: boolean;               // 是否支持 CPU 时间硬限制
   descendantEnumeration: 'full' | 'cgroup' | 'none'; // 后代枚举与逃逸检测能力
   gatedSpawn?: boolean;            // 是否支持门管道受控启动 (0.2.0 P0-3)
+  confinement?: string[];          // 支持的写入限制驱动名称列表 (契约 #56)
 }
 
 export interface PlatformDriver {

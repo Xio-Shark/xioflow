@@ -24,17 +24,30 @@ import {
   RecoveryRequiredError,
   ServiceSpec,
   ServiceHandle,
+  SnapshotDriver,
+  SnapshotRef,
+  SnapshotOperationResult,
+  RollbackOperationResult,
+  ResourceConflictError,
+  ConfinementDriver,
 } from '../types.js';
 import { NodePlatformDriver } from '../driver/node-driver.js';
+import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
 import { ServiceSupervisor } from './service.js';
 import { setupStreamDrainer, StreamDrainer } from './drainer.js';
+import { isPathContained, resolveRealPath } from '../capability/index.js';
+import { createConfinementDriver } from '../confinement/index.js';
 
 export interface ExecuteProcessOptions {
   runId: string;
   opId: string;
   name: string;
   command: StructuredCommand;
-  requiredResources: string[];
+  requiredResources?: string[];
+  mutationRoots?: string[];
+  capabilityId?: string;
+  confinement?: boolean | string;
+  confinementDriver?: ConfinementDriver;
   timeoutMs?: number;
   inputFingerprint?: string;
   maxOutputBytes?: number;
@@ -48,6 +61,38 @@ export interface ExecuteProcessOptions {
    * 回调抛错不会中断排空，首个错误以 result.streamCallbackError 记录。
    */
   onStreamChunk?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void;
+}
+
+export interface CaptureSnapshotOptions {
+  runId: string;
+  opId: string;
+  roots?: string[];
+  capabilityId?: string;
+  includeIgnored?: boolean;
+  maxTreeSizeBytes?: number;
+  timeoutMs?: number;
+}
+
+export interface RollbackOptions {
+  runId: string;
+  opId: string;
+  snapshotId: string;
+  roots?: string[];
+  capabilityId?: string;
+  force?: boolean;
+  timeoutMs?: number;
+}
+
+export function normalizeResourceName(res: string): string {
+  if (res.startsWith('workspace:write:')) {
+    const raw = res.slice('workspace:write:'.length);
+    try {
+      return `workspace:write:${fs.realpathSync(raw)}`;
+    } catch {
+      return `workspace:write:${path.resolve(raw)}`;
+    }
+  }
+  return res;
 }
 
 /**
@@ -85,6 +130,7 @@ export function computeInputFingerprint(options: ExecuteProcessOptions): string 
       : null,
     stdinHash,
     timeoutMs: options.timeoutMs ?? null,
+    capabilityId: options.capabilityId ?? null,
   };
 
   const canonicalJson = JSON.stringify(canonical);
@@ -112,13 +158,20 @@ interface ActiveOperationState {
 export class ProcessSupervisor {
   private activeOperations: Map<string, ActiveOperationState> = new Map();
   private serviceSupervisor: ServiceSupervisor;
+  private snapshotDriver: SnapshotDriver;
+  private confinementDriver?: ConfinementDriver;
 
   constructor(
     private readonly domain: ExecutionDomain,
-    private readonly driver: PlatformDriver = domain.getDriver?.() || new NodePlatformDriver()
+    private readonly driver: PlatformDriver = domain.getDriver?.() || new NodePlatformDriver(),
+    snapshotDriver?: SnapshotDriver,
+    confinementDriver?: ConfinementDriver
   ) {
     this.domain.setDriver?.(driver);
     this.serviceSupervisor = new ServiceSupervisor(domain, driver, this);
+    this.snapshotDriver = snapshotDriver || new GitShadowSnapshotDriver();
+    this.confinementDriver = confinementDriver;
+    this.domain.setSnapshotDriver?.(this.snapshotDriver);
   }
 
   public getDomain(): ExecutionDomain {
@@ -129,14 +182,521 @@ export class ProcessSupervisor {
     return this.driver;
   }
 
+  public getSnapshotDriver(): SnapshotDriver {
+    return this.snapshotDriver;
+  }
+
+  public setConfinementDriver(driver: ConfinementDriver): void {
+    this.confinementDriver = driver;
+  }
+
+  public getConfinementDriver(): ConfinementDriver | undefined {
+    return this.confinementDriver;
+  }
+
   public async startService(spec: ServiceSpec): Promise<ServiceHandle> {
     return this.serviceSupervisor.startService(spec);
+  }
+
+  /**
+   * 快照捕获协议 (ARCHITECTURE §3.5 / 契约 #32, #53)
+   */
+  public async captureSnapshot(options: CaptureSnapshotOptions): Promise<SnapshotOperationResult> {
+    const startTime = Date.now();
+    let targetRoots = options.roots;
+    let capAdmission: any;
+
+    if (options.capabilityId) {
+      capAdmission = this.domain.checkCapabilityAdmission({
+        capabilityId: options.capabilityId,
+        mutationRoots: targetRoots,
+        runId: options.runId,
+        opId: options.opId,
+      });
+      if (!targetRoots || targetRoots.length === 0) {
+        targetRoots = capAdmission.effectiveMutationRoots;
+      }
+    }
+
+    if (!targetRoots || targetRoots.length === 0) {
+      throw new Error('captureSnapshot requires at least one root directory');
+    }
+
+    const realRoots = targetRoots.map((r) => path.resolve(r));
+    const requiredResources = realRoots.map((r) => `workspace:write:${r}`);
+
+    if (this.snapshotDriver instanceof GitShadowSnapshotDriver) {
+      try {
+        const { commonDir } = await this.snapshotDriver.assertGitRepo(realRoots[0]);
+        requiredResources.push(`git:objects:${commonDir}`);
+      } catch {}
+    }
+
+    const inputFingerprint = crypto
+      .createHash('sha256')
+      .update(
+        JSON.stringify({
+          kind: 'snapshot',
+          roots: realRoots,
+          includeIgnored: !!options.includeIgnored,
+          maxTreeSizeBytes: options.maxTreeSizeBytes,
+          capabilityId: options.capabilityId ?? null,
+        })
+      )
+      .digest('hex');
+
+    const op: Operation = {
+      id: options.opId,
+      runId: options.runId,
+      kind: 'snapshot',
+      name: `snapshot:${realRoots[0]}`,
+      inputFingerprint,
+      requiredResources,
+      mutationRoots: realRoots,
+      capabilityId: options.capabilityId,
+      timeoutMs: options.timeoutMs,
+      status: 'intent_registered',
+    };
+
+    this.domain.registerOperationIntent(op);
+    this.domain.getStore().updateOperationStatus(options.opId, 'active');
+    this.domain.getStore().recordEventAndTransitionState({
+      domainId: this.domain.domainId,
+      runId: options.runId,
+      operationId: options.opId,
+      type: 'OPERATION_STATUS_TRANSITION',
+      payload: { status: 'active' },
+      timestamp: new Date().toISOString(),
+    });
+
+    if (options.capabilityId && capAdmission) {
+      this.domain.getStore().recordJournalEvent({
+        domainId: this.domain.domainId,
+        runId: options.runId,
+        operationId: options.opId,
+        type: 'CAPABILITY_USED',
+        payload: {
+          capabilityId: options.capabilityId,
+          scope: capAdmission.capability.scope,
+          actor: capAdmission.capability.issuedBy,
+        },
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    try {
+      const snapRef = await this.snapshotDriver.capture(realRoots, {
+        id: options.opId,
+        domainId: this.domain.domainId,
+        opId: options.opId,
+        includeIgnored: options.includeIgnored,
+        maxTreeSizeBytes: options.maxTreeSizeBytes,
+      });
+
+      let result: SnapshotOperationResult;
+
+      this.domain.getStore().transaction(() => {
+        const seq = this.domain.getStore().recordEventAndTransitionState({
+          domainId: this.domain.domainId,
+          runId: options.runId,
+          operationId: options.opId,
+          type: 'SNAPSHOT_CAPTURED',
+          payload: {
+            snapshotId: snapRef.id,
+            roots: snapRef.roots,
+            treeFingerprint: snapRef.treeFingerprint,
+            commitHash: snapRef.commitHash,
+          },
+          timestamp: new Date().toISOString(),
+        });
+        snapRef.journalSeq = seq;
+        this.domain.getStore().recordSnapshot(snapRef);
+
+        result = {
+          kind: 'snapshot',
+          status: 'succeeded',
+          snapshot: snapRef,
+          capabilityId: options.capabilityId,
+          durationMs: Date.now() - startTime,
+          completedAt: new Date().toISOString(),
+        };
+
+        this.domain.getStore().recordOperationResult(options.opId, result);
+        this.domain.getStore().updateOperationStatus(options.opId, 'done');
+        this.domain.getStore().recordEventAndTransitionState({
+          domainId: this.domain.domainId,
+          runId: options.runId,
+          operationId: options.opId,
+          type: 'OPERATION_RESULT_RECORDED',
+          payload: { status: 'succeeded', snapshotId: snapRef.id },
+          timestamp: new Date().toISOString(),
+        });
+      });
+
+      this.domain.internalReleaseResources(options.opId);
+      return result!;
+    } catch (err: any) {
+      const failResult: SnapshotOperationResult = {
+        kind: 'snapshot',
+        status: 'failed',
+        errorMessage: err.message,
+        durationMs: Date.now() - startTime,
+        completedAt: new Date().toISOString(),
+      };
+      try {
+        this.domain.getStore().recordOperationResult(options.opId, failResult);
+        this.domain.getStore().updateOperationStatus(options.opId, 'done');
+      } catch {}
+      this.domain.internalReleaseResources(options.opId);
+      throw err;
+    }
+  }
+
+  /**
+   * 回滚协议 (ARCHITECTURE §3.5 / 契约 #28–#30, #56)
+   */
+  public async rollback(options: RollbackOptions): Promise<RollbackOperationResult> {
+    const startTime = Date.now();
+    const snapshot = this.domain.getStore().getSnapshot(options.snapshotId);
+    if (!snapshot) {
+      throw new Error(`Snapshot not found: ${options.snapshotId}`);
+    }
+
+    let targetRoots = (options.roots || snapshot.roots).map((r) => path.resolve(r));
+    let capAdmission: any;
+
+    if (options.capabilityId) {
+      capAdmission = this.domain.checkCapabilityAdmission({
+        capabilityId: options.capabilityId,
+        mutationRoots: targetRoots,
+        runId: options.runId,
+        opId: options.opId,
+      });
+      targetRoots = capAdmission.effectiveMutationRoots;
+    }
+
+    // 0. 前置条件检查（契约 #30）：目标根目录上不存在 active / stopping / 未裁决 indeterminate 的操作
+    for (const root of targetRoots) {
+      let realRoot = root;
+      try {
+        realRoot = fs.realpathSync(root);
+      } catch {}
+      const res1 = `workspace:write:${root}`;
+      const res2 = `workspace:write:${realRoot}`;
+
+      if (this.domain.isResourceLocked(res1)) {
+        throw new ResourceConflictError(res1, this.domain.getResourceOwner(res1) || 'unknown', options.opId, 0);
+      }
+      if (this.domain.isResourceLocked(res2)) {
+        throw new ResourceConflictError(res2, this.domain.getResourceOwner(res2) || 'unknown', options.opId, 0);
+      }
+    }
+
+    const unfinishedOps = this.domain.getStore().getUnfinishedOperations(this.domain.domainId);
+    for (const op of unfinishedOps) {
+      if (op.id === options.opId) continue;
+      for (const root of targetRoots) {
+        let realRoot = root;
+        try {
+          realRoot = fs.realpathSync(root);
+        } catch {}
+        const writeRes1 = `workspace:write:${root}`;
+        const writeRes2 = `workspace:write:${realRoot}`;
+        if (
+          op.requiredResources.includes(writeRes1) ||
+          op.requiredResources.includes(writeRes2) ||
+          op.mutationRoots?.some((mr) => {
+            const resolved = path.resolve(mr);
+            return resolved === root || resolved === realRoot;
+          })
+        ) {
+          throw new ResourceConflictError(
+            writeRes1,
+            op.id,
+            options.opId,
+            0
+          );
+        }
+      }
+    }
+
+    // 检查是否有未裁决的 indeterminate op 占用该 root
+    const leases = this.domain.getStore().getPersistedResourceLeases(this.domain.domainId);
+    for (const lease of leases) {
+      for (const root of targetRoots) {
+        let realRoot = root;
+        try {
+          realRoot = fs.realpathSync(root);
+        } catch {}
+        const writeRes1 = `workspace:write:${root}`;
+        const writeRes2 = `workspace:write:${realRoot}`;
+        if ((lease.resourceId === writeRes1 || lease.resourceId === writeRes2) && lease.operationId !== options.opId) {
+          throw new ResourceConflictError(
+            lease.resourceId,
+            lease.operationId,
+            options.opId,
+            0
+          );
+        }
+      }
+    }
+
+    const requiredResources = targetRoots.map((r) => `workspace:write:${r}`);
+    const inputFingerprint = crypto
+      .createHash('sha256')
+      .update(
+        JSON.stringify({
+          kind: 'rollback',
+          snapshotId: options.snapshotId,
+          targetRoots,
+          capabilityId: options.capabilityId ?? null,
+        })
+      )
+      .digest('hex');
+
+    const op: Operation = {
+      id: options.opId,
+      runId: options.runId,
+      kind: 'rollback',
+      name: `rollback:${options.snapshotId}`,
+      inputFingerprint,
+      requiredResources,
+      mutationRoots: targetRoots,
+      capabilityId: options.capabilityId,
+      outputRef: options.snapshotId,
+      timeoutMs: options.timeoutMs,
+      status: 'intent_registered',
+    };
+
+    this.domain.registerOperationIntent(op);
+    this.domain.getStore().updateOperationStatus(options.opId, 'active');
+    this.domain.getStore().recordEventAndTransitionState({
+      domainId: this.domain.domainId,
+      runId: options.runId,
+      operationId: options.opId,
+      type: 'OPERATION_STATUS_TRANSITION',
+      payload: { status: 'active' },
+      timestamp: new Date().toISOString(),
+    });
+
+    if (options.capabilityId && capAdmission) {
+      this.domain.getStore().recordJournalEvent({
+        domainId: this.domain.domainId,
+        runId: options.runId,
+        operationId: options.opId,
+        type: 'CAPABILITY_USED',
+        payload: {
+          capabilityId: options.capabilityId,
+          scope: capAdmission.capability.scope,
+          actor: capAdmission.capability.issuedBy,
+        },
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    try {
+      const { unrestoredPaths } = await this.snapshotDriver.restore(snapshot, { force: options.force });
+
+      const currentFp = await this.snapshotDriver.fingerprint(targetRoots);
+      const isMatch = currentFp === snapshot.treeFingerprint;
+      let status: 'restored' | 'partial' | 'failed';
+      if (!isMatch) {
+        status = 'failed';
+      } else if (unrestoredPaths.length > 0) {
+        status = 'partial';
+      } else {
+        status = 'restored';
+      }
+
+      let allOpsConfined = false;
+      const eventsSince = snapshot.journalSeq !== undefined
+        ? this.domain.getStore().getJournalEvents(this.domain.domainId, snapshot.journalSeq)
+        : [];
+      const opResults = eventsSince.filter(
+        (e) => e.type === 'OPERATION_RESULT_RECORDED' && e.operationId !== options.opId
+      );
+
+      if (opResults.length === 0) {
+        allOpsConfined = true;
+      } else {
+        allOpsConfined = opResults.every((e) => {
+          const res = (e.payload as any)?.result || e.payload;
+          const storedOp = this.domain.getStore().getOperation(e.operationId!);
+          if (storedOp?.kind === 'snapshot' || storedOp?.kind === 'rollback') {
+            return true;
+          }
+          if (res?.confined !== true) {
+            return false;
+          }
+          const opRoots = storedOp?.mutationRoots || [];
+          if (opRoots.length === 0) return true;
+          return opRoots.every((opr) => targetRoots.some((sr) => isPathContained(sr, opr)));
+        });
+      }
+
+      let coverage: 'complete' | 'declared_roots' | 'none';
+      let outOfScopeEffects: 'none_possible' | 'possible';
+
+      if (status !== 'restored') {
+        coverage = status === 'partial' ? 'declared_roots' : 'none';
+        outOfScopeEffects = 'possible';
+      } else if (allOpsConfined) {
+        coverage = 'complete';
+        outOfScopeEffects = 'none_possible';
+      } else {
+        coverage = 'declared_roots';
+        outOfScopeEffects = 'possible';
+      }
+
+      let result: RollbackOperationResult;
+
+      this.domain.getStore().transaction(() => {
+        result = {
+          kind: 'rollback',
+          status,
+          snapshotId: options.snapshotId,
+          unrestoredPaths: unrestoredPaths.length > 0 ? unrestoredPaths : undefined,
+          coverage,
+          outOfScopeEffects,
+          capabilityId: options.capabilityId,
+          durationMs: Date.now() - startTime,
+          completedAt: new Date().toISOString(),
+        };
+
+        this.domain.getStore().recordOperationResult(options.opId, result);
+        this.domain.getStore().updateOperationStatus(options.opId, 'done');
+      });
+
+      this.domain.internalReleaseResources(options.opId);
+      return result!;
+    } catch (err: any) {
+      this.domain.internalReleaseResources(options.opId);
+      throw err;
+    }
+  }
+
+  /**
+   * 分叉工作区 Materialize (ARCHITECTURE §3.5 / 契约 #54)
+   */
+  public async materialize(snapshotId: string, newRoot: string): Promise<{ worktreePath: string }> {
+    const absNewRoot = path.resolve(newRoot);
+    const writeRes = `workspace:write:${absNewRoot}`;
+    if (this.domain.isResourceLocked(writeRes)) {
+      throw new ResourceConflictError(
+        writeRes,
+        this.domain.getResourceOwner(writeRes) || 'unknown',
+        'materialize'
+      );
+    }
+    const opId = `mat-${snapshotId}-${Date.now()}`;
+    this.domain.allocateResources(opId, [writeRes]);
+
+    try {
+      if (!this.snapshotDriver.materialize) {
+        throw new Error(`Snapshot driver ${this.snapshotDriver.name} does not support materialize`);
+      }
+      const snapshot = this.domain.getStore().getSnapshot(snapshotId);
+      const repoRoot = snapshot?.roots[0];
+      return await this.snapshotDriver.materialize(snapshotId, absNewRoot, { repoRoot });
+    } catch (err) {
+      this.domain.internalReleaseResources(opId);
+      throw err;
+    }
+  }
+
+  /**
+   * 回收分叉工作区 Dematerialize (ARCHITECTURE §3.5 / 契约 #54)
+   */
+  public async dematerialize(newRoot: string, options?: { force?: boolean }): Promise<void> {
+    const absNewRoot = path.resolve(newRoot);
+    let realNewRoot = absNewRoot;
+    try {
+      realNewRoot = fs.realpathSync(absNewRoot);
+    } catch {}
+
+    if (!this.snapshotDriver.dematerialize) {
+      throw new Error(`Snapshot driver ${this.snapshotDriver.name} does not support dematerialize`);
+    }
+    await this.snapshotDriver.dematerialize(absNewRoot, options);
+
+    const writeRes = `workspace:write:${absNewRoot}`;
+    const writeResReal = `workspace:write:${realNewRoot}`;
+    const owner1 = this.domain.getResourceOwner(writeRes);
+    const owner2 = this.domain.getResourceOwner(writeResReal);
+    if (owner1) {
+      this.domain.internalReleaseResources(owner1, [writeRes]);
+    }
+    if (owner2 && owner2 !== owner1) {
+      this.domain.internalReleaseResources(owner2, [writeResReal]);
+    }
+
+    const leases = this.domain.getStore().getPersistedResourceLeases(this.domain.domainId);
+    for (const lease of leases) {
+      if (lease.resourceId === writeRes || lease.resourceId === writeResReal) {
+        this.domain.internalReleaseResources(lease.operationId, [lease.resourceId]);
+      }
+    }
   }
 
   /**
    * 启动协议：准入检查 -> 先持久化意图 -> 请求驱动启动 -> 登记身份并转 active -> 监督运行 -> 记录结果
    */
   public async executeProcess(options: ExecuteProcessOptions): Promise<ProcessOperationResult> {
+    // 0. Capability 准入校验与字段推导（契约 #55）
+    let effectiveMutationRoots = options.mutationRoots;
+    let capAdmission: any;
+
+    if (options.capabilityId) {
+      let candidateRoots = options.mutationRoots ? [...options.mutationRoots] : [];
+      if (candidateRoots.length === 0 && options.command.cwd) {
+        candidateRoots = [options.command.cwd];
+      }
+      capAdmission = this.domain.checkCapabilityAdmission({
+        capabilityId: options.capabilityId,
+        requiredResources: options.requiredResources,
+        mutationRoots: candidateRoots.length > 0 ? candidateRoots : undefined,
+        runId: options.runId,
+        opId: options.opId,
+      });
+      options.requiredResources = capAdmission.effectiveResources;
+      effectiveMutationRoots = capAdmission.effectiveMutationRoots;
+    } else {
+      options.requiredResources = (options.requiredResources || []).map(normalizeResourceName);
+      if (!effectiveMutationRoots || effectiveMutationRoots.length === 0) {
+        effectiveMutationRoots = options.requiredResources
+          .filter((r) => r.startsWith('workspace:write:'))
+          .map((r) => r.slice('workspace:write:'.length));
+      }
+    }
+
+    // 0. ConfinementDriver 驱动解析与包装（契约 #56）
+    let activeConfinementDriver: ConfinementDriver | undefined;
+    if (options.confinementDriver) {
+      activeConfinementDriver = options.confinementDriver;
+    } else if (typeof options.confinement === 'string') {
+      const driver = createConfinementDriver(options.confinement);
+      if (!driver) {
+        throw new Error(`Confinement driver '${options.confinement}' is not available on this platform`);
+      }
+      activeConfinementDriver = driver;
+    } else if (options.confinement === true) {
+      const driver = this.confinementDriver || createConfinementDriver();
+      if (!driver) {
+        throw new Error('Confinement was requested but no confinement driver is available on this platform');
+      }
+      activeConfinementDriver = driver;
+    } else if (this.confinementDriver) {
+      activeConfinementDriver = this.confinementDriver;
+    }
+
+    let effectiveCommand = options.command;
+    const isConfined = activeConfinementDriver !== undefined;
+    const confinementDriverName = activeConfinementDriver?.name;
+
+    if (activeConfinementDriver) {
+      effectiveCommand = activeConfinementDriver.wrap(options.command, effectiveMutationRoots || []);
+    }
+
     const startTime = Date.now();
     const maxBytes = options.maxOutputBytes ?? 10 * 1024 * 1024; // 默认 10MB
     const drainTimeoutMs = options.drainTimeoutMs ?? 2000;      // 默认 2000ms
@@ -288,7 +848,9 @@ export class ProcessSupervisor {
       kind: 'process',
       name: options.name,
       inputFingerprint,
-      requiredResources: options.requiredResources,
+      requiredResources: options.requiredResources || [],
+      mutationRoots: effectiveMutationRoots,
+      capabilityId: options.capabilityId,
       timeoutMs: options.timeoutMs,
       resourceBudget: options.resourceBudget,
       status: 'pending',
@@ -359,9 +921,9 @@ export class ProcessSupervisor {
       opState.phase = 'spawning';
       try {
         // 3. [启动协议步骤 2] 请求平台驱动启动
-        handle = await this.driver.spawn(options.command);
+        handle = await this.driver.spawn(effectiveCommand);
         opState.handle = handle;
-        opState.command = options.command;
+        opState.command = effectiveCommand;
       } catch (spawnError: any) {
         opState.phase = 'done';
         opState.stopResolve?.({ stopped: 'confirmed_stopped', scope: 'direct_child', errorDetails: spawnError?.message });
@@ -375,6 +937,9 @@ export class ProcessSupervisor {
           stdout: '',
           stderr: spawnError?.message || String(spawnError),
           spawnFailure: spawnError?.message || String(spawnError),
+          capabilityId: options.capabilityId,
+          confined: isConfined,
+          confinementDriver: confinementDriverName,
           isTruncated: false,
           identityVerification: 'not_original_process',
           durationMs: Date.now() - startTime,
@@ -388,6 +953,21 @@ export class ProcessSupervisor {
         this.domain.getStore().updateOperationStatus(options.opId, 'active', handle.identity);
         opState.phase = 'active';
         handle.releaseGate?.();
+
+        if (options.capabilityId && capAdmission) {
+          this.domain.getStore().recordJournalEvent({
+            domainId: this.domain.domainId,
+            runId: options.runId,
+            operationId: options.opId,
+            type: 'CAPABILITY_USED',
+            payload: {
+              capabilityId: options.capabilityId,
+              scope: capAdmission.capability.scope,
+              actor: capAdmission.capability.issuedBy,
+            },
+            timestamp: new Date().toISOString(),
+          });
+        }
       } catch (statusError: any) {
         handle.destroyGate?.();
         // N4: spawn 成功但登记 active 失败，防止产生孤儿进程
@@ -707,6 +1287,9 @@ export class ProcessSupervisor {
         signal: exitResult.signal,
         stdout: stdoutData.content,
         stderr: stderrData.content,
+        capabilityId: options.capabilityId,
+        confined: isConfined,
+        confinementDriver: confinementDriverName,
         isTruncated,
         stdoutTruncated: stdoutData.isTruncated,
         stderrTruncated: stderrData.isTruncated,
@@ -743,6 +1326,7 @@ export class ProcessSupervisor {
             status: 'indeterminate',
             reason: `Process ${handle.identity.pid} was cancelled or stopped but could not be confirmed: ${stopRes.errorDetails || 'residual processes still alive'}`,
             recoveryGuidance: 'Residual PID detected. Inspect system processes manually before releasing resources.',
+            capabilityId: options.capabilityId,
             durationMs: Date.now() - startTime,
             completedAt: new Date().toISOString(),
           };
@@ -898,6 +1482,7 @@ export class ProcessSupervisor {
       signal: null,
       stdout: '',
       stderr: '',
+      capabilityId: options.capabilityId,
       isTruncated: false,
       terminationReason: 'user_cancelled',
       evidence: 'unobserved',
@@ -950,6 +1535,9 @@ export class ProcessSupervisor {
     }
     if (existing) {
       result.runId = existing.runId;
+      if (existing.capabilityId && !result.capabilityId) {
+        result.capabilityId = existing.capabilityId;
+      }
     }
 
     if (result.kind === 'process') {

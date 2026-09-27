@@ -75,10 +75,12 @@ export interface DomainBudget {
 export interface Operation {
   id: string;
   runId: string;
-  kind: 'process' | 'filesystem' | 'gate' | 'custom' | 'service';
+  kind: 'process' | 'filesystem' | 'gate' | 'custom' | 'service' | 'snapshot' | 'rollback';
   name: string;
   inputFingerprint: string;        // 输入与配置哈希指纹
   requiredResources: string[];     // 申请占用的资源（如 ["workspace:write:root"]）
+  mutationRoots?: string[];        // 声明发生修改的根目录列表
+  capabilityId?: string;           // 绑定的授权 Capability 标识
   timeoutMs?: number;
   resourceBudget?: ResourceBudget; // 显式声明的资源治理预算
   outputRef?: string;              // 产物文件引用路径
@@ -109,13 +111,16 @@ export type OperationResult =
   | ProcessOperationResult
   | FilesystemOperationResult
   | GenericOperationResult
-  | IndeterminateResult;
+  | IndeterminateResult
+  | SnapshotOperationResult
+  | RollbackOperationResult;
 
 export interface BaseResult {
   durationMs: number;
   completedAt: string;
   replayed?: true;
   runId?: string;
+  capabilityId?: string;           // 关联的授权 Capability 标识
 }
 
 export interface ProcessOperationResult extends BaseResult {
@@ -125,6 +130,8 @@ export interface ProcessOperationResult extends BaseResult {
   signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
+  confinementDriver?: string;      // 写入限制驱动名称
+  confined?: boolean;              // 是否在写入限制下执行
   isTruncated: boolean;            // 任一输出流达到有界上限（聚合标记）
   stdoutTruncated?: boolean;       // stdout 逐流截断标记
   stderrTruncated?: boolean;       // stderr 逐流截断标记
@@ -454,6 +461,104 @@ export interface ServiceHandle {
   stop: (graceMs?: number) => Promise<void>;
   onInstanceExit: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>;
   currentInstanceOpId: string;
+}
+
+/**
+ * 快照引用契约（ARCHITECTURE §3.5 / 契约 #28–#32, #53）
+ */
+export interface SnapshotRef {
+  id: string;
+  domainId: string;
+  opId: string;
+  driver: string;
+  roots: string[];
+  coverage: 'worktree_non_ignored' | 'full_tree';
+  treeFingerprint: string;
+  commitHash?: string;
+  journalSeq?: number;
+  createdAt: string;
+  treeSizeBytes?: number;
+}
+
+export interface SnapshotOperationResult extends BaseResult {
+  kind: 'snapshot';
+  status: 'succeeded' | 'failed';
+  snapshot?: SnapshotRef;
+  errorMessage?: string;
+}
+
+export interface RollbackOperationResult extends BaseResult {
+  kind: 'rollback';
+  status: 'restored' | 'partial' | 'failed';
+  snapshotId: string;
+  unrestoredPaths?: string[];
+  coverage: 'complete' | 'declared_roots' | 'none';
+  outOfScopeEffects: 'none_possible' | 'possible';
+  errorMessage?: string;
+}
+
+export interface SnapshotDriver {
+  name: string;
+  coverage: 'worktree_non_ignored' | 'full_tree';
+  capture(
+    roots: string[],
+    options?: {
+      id?: string;
+      domainId?: string;
+      opId?: string;
+      includeIgnored?: boolean;
+      maxTreeSizeBytes?: number;
+    }
+  ): Promise<SnapshotRef>;
+  restore(snapshot: SnapshotRef, options?: { force?: boolean }): Promise<{ unrestoredPaths: string[] }>;
+  fingerprint(roots: string[]): Promise<string>;
+  prune(snapshotIds: string[]): Promise<void>;
+  materialize?(snapshotId: string, newRoot: string, options?: { repoRoot?: string }): Promise<{ worktreePath: string }>;
+  dematerialize?(newRoot: string, options?: { force?: boolean; repoRoot?: string }): Promise<void>;
+}
+
+/**
+ * 授权 Capability 契约（ARCHITECTURE §0.2 裁决 9 / 契约 #55, #56）
+ */
+export interface CapabilityScope {
+  write: string[];                 // 允许写入的工作区路径根列表（先 realpath 后判定包含）
+  exclusive: string[];             // 允许独占申请的受管资源列表
+}
+
+export interface Capability {
+  id: string;
+  domainId: string;
+  scope: CapabilityScope;
+  issuedBy: string;
+  expiresAt: string;
+  parentId?: string;
+  epoch: number;
+  createdAt: string;
+  revokedAt?: string;
+}
+
+export class CapabilityViolationError extends Error {
+  constructor(
+    public readonly reason:
+      | 'expired'
+      | 'revoked'
+      | 'epoch_mismatch'
+      | 'out_of_scope_resource'
+      | 'out_of_scope_path'
+      | 'attenuation_widened',
+    message: string
+  ) {
+    super(message);
+    this.name = 'CapabilityViolationError';
+  }
+}
+
+/**
+ * 写入限制驱动（可选，服务于回滚正确性，不是安全边界）
+ */
+export interface ConfinementDriver {
+  name: string;
+  wrap(command: import('./driver/types.js').StructuredCommand, writableRoots: string[]): import('./driver/types.js').StructuredCommand;
 }
 
 

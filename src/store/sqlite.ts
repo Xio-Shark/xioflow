@@ -15,6 +15,8 @@ import {
   EpochFencedError,
   DomainLockedError,
   sanitizeConfigSnapshot,
+  SnapshotRef,
+  Capability,
 } from '../types.js';
 
 export class SqliteStore {
@@ -36,6 +38,8 @@ export class SqliteStore {
 
   private initSchema(): void {
     this.db.exec(SCHEMA_SQL);
+    try { this.db.exec('ALTER TABLE operations ADD COLUMN mutation_roots TEXT;'); } catch {}
+    try { this.db.exec('ALTER TABLE operations ADD COLUMN capability_id TEXT;'); } catch {}
   }
 
   private inTransaction = false;
@@ -436,8 +440,12 @@ export class SqliteStore {
       const now = new Date().toISOString();
       // 1. 写入 operation 记录，初始状态 intent_registered
       const opStmt = this.db.prepare(`
-        INSERT INTO operations (id, run_id, domain_id, kind, name, input_fingerprint, status, required_resources, timeout_ms, resource_budget, output_ref, process_identity, result)
-        VALUES (?, ?, ?, ?, ?, ?, 'intent_registered', ?, ?, ?, ?, ?, ?)
+        INSERT INTO operations (
+          id, run_id, domain_id, kind, name, input_fingerprint, status,
+          required_resources, mutation_roots, capability_id, timeout_ms,
+          resource_budget, output_ref, process_identity, result
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 'intent_registered', ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       opStmt.run(
         op.id,
@@ -447,6 +455,8 @@ export class SqliteStore {
         op.name,
         op.inputFingerprint,
         JSON.stringify(op.requiredResources || []),
+        op.mutationRoots ? JSON.stringify(op.mutationRoots) : null,
+        op.capabilityId || null,
         op.timeoutMs || null,
         op.resourceBudget ? JSON.stringify(op.resourceBudget) : null,
         op.outputRef || null,
@@ -520,8 +530,12 @@ export class SqliteStore {
         throw new Error(`Operation "${op.id}" already exists`);
       }
       const opStmt = this.db.prepare(`
-        INSERT INTO operations (id, run_id, domain_id, kind, name, input_fingerprint, status, required_resources, timeout_ms, resource_budget, output_ref, process_identity, result)
-        VALUES (?, ?, ?, ?, ?, ?, 'done', ?, ?, ?, ?, ?, ?)
+        INSERT INTO operations (
+          id, run_id, domain_id, kind, name, input_fingerprint, status,
+          required_resources, mutation_roots, capability_id, timeout_ms,
+          resource_budget, output_ref, process_identity, result
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       opStmt.run(
         op.id,
@@ -531,6 +545,8 @@ export class SqliteStore {
         op.name,
         op.inputFingerprint,
         JSON.stringify(op.requiredResources || []),
+        op.mutationRoots ? JSON.stringify(op.mutationRoots) : null,
+        op.capabilityId || null,
         op.timeoutMs || null,
         op.resourceBudget ? JSON.stringify(op.resourceBudget) : null,
         op.outputRef || null,
@@ -614,11 +630,13 @@ export class SqliteStore {
 
       const stmt = this.db.prepare(`
         UPDATE operations
-        SET status = 'done', result = ?, output_ref = COALESCE(?, output_ref)
+        SET status = 'done', result = ?, output_ref = COALESCE(?, output_ref),
+            capability_id = COALESCE(?, capability_id)
         WHERE id = ?
       `);
       const outputRef = (result as any).outputRef || null;
-      stmt.run(JSON.stringify(result), outputRef, opId);
+      const capabilityId = result.capabilityId || null;
+      stmt.run(JSON.stringify(result), outputRef, capabilityId, opId);
 
       // 若确认完成且允许释放资源，结清资源
       if (releaseResources && result.status !== 'indeterminate') {
@@ -661,10 +679,7 @@ export class SqliteStore {
     });
   }
 
-  public getOperation(id: string): (Operation & { domainId: string }) | null {
-    const stmt = this.db.prepare('SELECT * FROM operations WHERE id = ?');
-    const row = stmt.get(id) as any;
-    if (!row) return null;
+  private mapOperationRow(row: any): Operation & { domainId: string } {
     return {
       id: row.id,
       runId: row.run_id,
@@ -673,6 +688,8 @@ export class SqliteStore {
       name: row.name,
       inputFingerprint: row.input_fingerprint,
       requiredResources: JSON.parse(row.required_resources),
+      mutationRoots: row.mutation_roots ? JSON.parse(row.mutation_roots) : undefined,
+      capabilityId: row.capability_id || undefined,
       timeoutMs: row.timeout_ms || undefined,
       resourceBudget: row.resource_budget ? JSON.parse(row.resource_budget) : undefined,
       outputRef: row.output_ref || undefined,
@@ -682,24 +699,17 @@ export class SqliteStore {
     };
   }
 
+  public getOperation(id: string): (Operation & { domainId: string }) | null {
+    const stmt = this.db.prepare('SELECT * FROM operations WHERE id = ?');
+    const row = stmt.get(id) as any;
+    if (!row) return null;
+    return this.mapOperationRow(row);
+  }
+
   public getOperationsByRun(runId: string): (Operation & { domainId: string })[] {
     const stmt = this.db.prepare('SELECT * FROM operations WHERE run_id = ?');
     const rows = stmt.all(runId) as any[];
-    return rows.map((row) => ({
-      id: row.id,
-      runId: row.run_id,
-      domainId: row.domain_id,
-      kind: row.kind,
-      name: row.name,
-      inputFingerprint: row.input_fingerprint,
-      requiredResources: JSON.parse(row.required_resources),
-      timeoutMs: row.timeout_ms || undefined,
-      resourceBudget: row.resource_budget ? JSON.parse(row.resource_budget) : undefined,
-      outputRef: row.output_ref || undefined,
-      status: row.status as OperationStatus,
-      processIdentity: row.process_identity ? JSON.parse(row.process_identity) : undefined,
-      result: row.result ? JSON.parse(row.result) : undefined,
-    }));
+    return rows.map((row) => this.mapOperationRow(row));
   }
 
   public getUnfinishedOperations(domainId: string): (Operation & { domainId: string })[] {
@@ -708,21 +718,7 @@ export class SqliteStore {
       WHERE domain_id = ? AND status IN ('intent_registered', 'active', 'stopping')
     `);
     const rows = stmt.all(domainId) as any[];
-    return rows.map((row) => ({
-      id: row.id,
-      runId: row.run_id,
-      domainId: row.domain_id,
-      kind: row.kind,
-      name: row.name,
-      inputFingerprint: row.input_fingerprint,
-      requiredResources: JSON.parse(row.required_resources),
-      timeoutMs: row.timeout_ms || undefined,
-      resourceBudget: row.resource_budget ? JSON.parse(row.resource_budget) : undefined,
-      outputRef: row.output_ref || undefined,
-      status: row.status as OperationStatus,
-      processIdentity: row.process_identity ? JSON.parse(row.process_identity) : undefined,
-      result: row.result ? JSON.parse(row.result) : undefined,
-    }));
+    return rows.map((row) => this.mapOperationRow(row));
   }
 
   public getAllOperations(domainId: string): (Operation & { domainId: string })[] {
@@ -731,21 +727,7 @@ export class SqliteStore {
       WHERE domain_id = ?
     `);
     const rows = stmt.all(domainId) as any[];
-    return rows.map((row) => ({
-      id: row.id,
-      runId: row.run_id,
-      domainId: row.domain_id,
-      kind: row.kind,
-      name: row.name,
-      inputFingerprint: row.input_fingerprint,
-      requiredResources: JSON.parse(row.required_resources),
-      timeoutMs: row.timeout_ms || undefined,
-      resourceBudget: row.resource_budget ? JSON.parse(row.resource_budget) : undefined,
-      outputRef: row.output_ref || undefined,
-      status: row.status as OperationStatus,
-      processIdentity: row.process_identity ? JSON.parse(row.process_identity) : undefined,
-      result: row.result ? JSON.parse(row.result) : undefined,
-    }));
+    return rows.map((row) => this.mapOperationRow(row));
   }
 
   public getPersistedResourceLeases(domainId: string): (ResourceLease & { budget?: ResourceBudget })[] {
@@ -787,6 +769,10 @@ export class SqliteStore {
     return Number(res.lastInsertRowid);
   }
 
+  public recordJournalEvent(event: Omit<JournalEvent, 'seq'>): number {
+    return this.recordEventAndTransitionState(event);
+  }
+
   public getJournalEvents(domainId: string, fromSeq: number = 0): JournalEvent[] {
     const stmt = this.db.prepare(`
       SELECT * FROM journal_events
@@ -821,6 +807,139 @@ export class SqliteStore {
       payload: JSON.parse(row.payload),
       timestamp: row.timestamp,
     }));
+  }
+
+  public recordSnapshot(snapshot: SnapshotRef): void {
+    this.verifyEpochFencing(snapshot.domainId);
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO snapshots (
+        id, domain_id, op_id, driver, roots, coverage, tree_fingerprint, commit_hash, journal_seq, created_at, tree_size_bytes
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      snapshot.id,
+      snapshot.domainId,
+      snapshot.opId,
+      snapshot.driver,
+      JSON.stringify(snapshot.roots),
+      snapshot.coverage,
+      snapshot.treeFingerprint,
+      snapshot.commitHash ?? null,
+      snapshot.journalSeq ?? null,
+      snapshot.createdAt,
+      snapshot.treeSizeBytes ?? null
+    );
+  }
+
+  public getSnapshot(id: string): SnapshotRef | null {
+    const stmt = this.db.prepare(`SELECT * FROM snapshots WHERE id = ?`);
+    const row = stmt.get(id) as any;
+    if (!row) return null;
+    return this.mapSnapshotRow(row);
+  }
+
+  public findSnapshotAtOrBefore(domainId: string, seq: number): SnapshotRef | null {
+    const stmt = this.db.prepare(`
+      SELECT * FROM snapshots
+      WHERE domain_id = ? AND journal_seq <= ?
+      ORDER BY journal_seq DESC
+      LIMIT 1
+    `);
+    const row = stmt.get(domainId, seq) as any;
+    if (!row) return null;
+    return this.mapSnapshotRow(row);
+  }
+
+  public listSnapshots(domainId: string): SnapshotRef[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM snapshots
+      WHERE domain_id = ?
+      ORDER BY created_at ASC
+    `);
+    const rows = stmt.all(domainId) as any[];
+    return rows.map((r) => this.mapSnapshotRow(r));
+  }
+
+  public deleteSnapshot(id: string): void {
+    const stmt = this.db.prepare(`DELETE FROM snapshots WHERE id = ?`);
+    stmt.run(id);
+  }
+
+  private mapSnapshotRow(row: any): SnapshotRef {
+    return {
+      id: row.id,
+      domainId: row.domain_id,
+      opId: row.op_id,
+      driver: row.driver,
+      roots: JSON.parse(row.roots),
+      coverage: row.coverage,
+      treeFingerprint: row.tree_fingerprint,
+      commitHash: row.commit_hash || undefined,
+      journalSeq: row.journal_seq !== null ? Number(row.journal_seq) : undefined,
+      createdAt: row.created_at,
+      treeSizeBytes: row.tree_size_bytes !== null ? Number(row.tree_size_bytes) : undefined,
+    };
+  }
+
+  public recordCapability(capability: Capability): void {
+    this.verifyEpochFencing(capability.domainId);
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO capabilities (
+        id, domain_id, parent_id, issued_by, scope, epoch, expires_at, created_at, revoked_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      capability.id,
+      capability.domainId,
+      capability.parentId ?? null,
+      capability.issuedBy,
+      JSON.stringify(capability.scope),
+      capability.epoch,
+      capability.expiresAt,
+      capability.createdAt,
+      capability.revokedAt ?? null
+    );
+  }
+
+  public getCapability(id: string): Capability | null {
+    const stmt = this.db.prepare(`SELECT * FROM capabilities WHERE id = ?`);
+    const row = stmt.get(id) as any;
+    if (!row) return null;
+    return this.mapCapabilityRow(row);
+  }
+
+  public listCapabilities(domainId: string): Capability[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM capabilities
+      WHERE domain_id = ?
+      ORDER BY created_at ASC
+    `);
+    const rows = stmt.all(domainId) as any[];
+    return rows.map((r) => this.mapCapabilityRow(r));
+  }
+
+  public revokeCapability(id: string, domainId: string, revokedAt: string): void {
+    this.verifyEpochFencing(domainId);
+    const stmt = this.db.prepare(`
+      UPDATE capabilities
+      SET revoked_at = ?
+      WHERE id = ? AND domain_id = ?
+    `);
+    stmt.run(revokedAt, id, domainId);
+  }
+
+  private mapCapabilityRow(row: any): Capability {
+    return {
+      id: row.id,
+      domainId: row.domain_id,
+      parentId: row.parent_id || undefined,
+      issuedBy: row.issued_by,
+      scope: JSON.parse(row.scope),
+      epoch: Number(row.epoch),
+      expiresAt: row.expires_at,
+      createdAt: row.created_at,
+      revokedAt: row.revoked_at || undefined,
+    };
   }
 
   public close(): void {

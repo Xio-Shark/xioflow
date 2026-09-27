@@ -2,7 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import util from 'node:util';
+import { spawn, execFile } from 'node:child_process';
+const execFileAsync = util.promisify(execFile);
 import {
   ExecutionDomain,
   SqliteStore,
@@ -17,7 +19,9 @@ import {
   OperationIdConflictError,
   RecoveryRequiredError,
   computeInputFingerprint,
+  normalizeResourceName,
   ProcessOperationResult,
+  CapabilityViolationError,
 } from '../index.js';
 
 export interface ConsumerContext {
@@ -1565,6 +1569,518 @@ export function defineContractTestSuite(
       expect(allOps.find((o) => o.id === 'service-c52#2')).toBeUndefined();
 
       restartedDomain.close();
+    });
+
+    it('契约 28: 回滚后指纹核验：restored / partial / failed 如实区分', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      const repoDir = path.join(tempDir, 'repo-c28');
+      fs.mkdirSync(repoDir, { recursive: true });
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.email', 'tester@test.local'], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'main.ts'), 'version 1;\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repoDir });
+      await execFileAsync('git', ['commit', '-m', 'v1'], { cwd: repoDir });
+
+      ensureTaskAndRun(domain, 'task-c28', 'run-c28');
+
+      // 捕获快照
+      const snapRes = await supervisor.captureSnapshot({
+        runId: 'run-c28',
+        opId: 'op-c28-snap',
+        roots: [repoDir],
+      });
+      expect(snapRes.status).toBe('succeeded');
+      const snapId = snapRes.snapshot!.id;
+
+      // 修改工作区文件并增加新文件
+      fs.writeFileSync(path.join(repoDir, 'main.ts'), 'version 2 modified;\n');
+      fs.writeFileSync(path.join(repoDir, 'extra.txt'), 'extra untracked\n');
+
+      // 执行回滚
+      const rbRes = await supervisor.rollback({
+        runId: 'run-c28',
+        opId: 'op-c28-rollback-1',
+        snapshotId: snapId,
+      });
+
+      expect(rbRes.status).toBe('restored');
+      expect(fs.readFileSync(path.join(repoDir, 'main.ts'), 'utf8')).toBe('version 1;\n');
+      expect(fs.existsSync(path.join(repoDir, 'extra.txt'))).toBe(false);
+      expect(domain.isResourceLocked(`workspace:write:${path.resolve(repoDir)}`)).toBe(false);
+    });
+
+    it('契约 29: 无写入限制时回滚 coverage 不得为 complete，outOfScopeEffects = "possible"', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      const repoDir = path.join(tempDir, 'repo-c29');
+      fs.mkdirSync(repoDir, { recursive: true });
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.email', 'tester@test.local'], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'code.js'), 'let x = 1;\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repoDir });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: repoDir });
+
+      ensureTaskAndRun(domain, 'task-c29', 'run-c29');
+
+      const snapRes = await supervisor.captureSnapshot({
+        runId: 'run-c29',
+        opId: 'op-c29-snap',
+        roots: [repoDir],
+      });
+      const snapId = snapRes.snapshot!.id;
+
+      // 执行一个普通不受限的 process 操作
+      await supervisor.executeProcess({
+        runId: 'run-c29',
+        opId: 'op-c29-unconfined',
+        name: 'unconfined-cmd',
+        command: { execPath: process.execPath, args: ['-e', 'console.log(123)'], cwd: repoDir },
+        requiredResources: [],
+      });
+
+      // 回滚
+      const rbRes = await supervisor.rollback({
+        runId: 'run-c29',
+        opId: 'op-c29-rollback',
+        snapshotId: snapId,
+      });
+
+      // 契约 #29 严禁在无写入限制时声明 complete
+      expect(rbRes.coverage).not.toBe('complete');
+      expect(rbRes.coverage).toBe('declared_roots');
+      expect(rbRes.outOfScopeEffects).toBe('possible');
+    });
+
+    it('契约 30: 回滚与目标根目录上的活跃 / 未裁决操作互斥', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      const repoDir = path.join(tempDir, 'repo-c30');
+      fs.mkdirSync(repoDir, { recursive: true });
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.email', 'tester@test.local'], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'index.js'), '// initial\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repoDir });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: repoDir });
+
+      ensureTaskAndRun(domain, 'task-c30', 'run-c30');
+
+      const snapRes = await supervisor.captureSnapshot({
+        runId: 'run-c30',
+        opId: 'op-c30-snap',
+        roots: [repoDir],
+      });
+      const snapId = snapRes.snapshot!.id;
+
+      // 在目标根上持有写租约并启动长时间操作
+      const writeRes = `workspace:write:${path.resolve(repoDir)}`;
+      const activePromise = supervisor.executeProcess({
+        runId: 'run-c30',
+        opId: 'op-c30-holding',
+        name: 'holder',
+        command: { execPath: process.execPath, args: ['-e', 'setTimeout(() => {}, 2000)'], cwd: repoDir },
+        requiredResources: [writeRes],
+      });
+
+      // 等待进程启动获得租约
+      const normRes = normalizeResourceName(writeRes);
+      while (!domain.isResourceLocked(normRes)) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      // 尝试在活跃操作持有目标目录时回滚，必须被拒绝并给出持有者诊断
+      await expect(
+        supervisor.rollback({
+          runId: 'run-c30',
+          opId: 'op-c30-rollback-conflict',
+          snapshotId: snapId,
+        })
+      ).rejects.toThrow(ResourceConflictError);
+
+      await supervisor.cancelOperation('op-c30-holding');
+      await activePromise;
+    });
+
+    it('契约 31: 回滚中途崩溃：恢复按指纹判定 restored 或 indeterminate', async () => {
+      const { supervisor, domain, driver, tempDir } = ctx;
+      const repoDir = path.join(tempDir, 'repo-c31');
+      fs.mkdirSync(repoDir, { recursive: true });
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.email', 'tester@test.local'], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'tracked.txt'), 'clean v1\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repoDir });
+      await execFileAsync('git', ['commit', '-m', 'clean v1'], { cwd: repoDir });
+
+      ensureTaskAndRun(domain, 'task-c31', 'run-c31');
+
+      const snapRes = await supervisor.captureSnapshot({
+        runId: 'run-c31',
+        opId: 'op-c31-snap',
+        roots: [repoDir],
+      });
+      const snapId = snapRes.snapshot!.id;
+
+      // 场景 A: 模拟回滚中途宿主崩溃，但工作区指纹与快照一致
+      const writeRes = `workspace:write:${path.resolve(repoDir)}`;
+      domain.getStore().registerOperationIntent(
+        {
+          id: 'op-c31-crash-match',
+          runId: 'run-c31',
+          kind: 'rollback',
+          name: `rollback:${snapId}`,
+          inputFingerprint: 'fp-c31',
+          requiredResources: [writeRes],
+          mutationRoots: [path.resolve(repoDir)],
+          outputRef: snapId,
+          status: 'intent_registered',
+        },
+        domain.domainId
+      );
+      domain.getStore().updateOperationStatus('op-c31-crash-match', 'active');
+      domain.allocateResources('op-c31-crash-match', [writeRes]);
+
+      const recoveryA = new RecoveryEngine(domain, driver);
+      const repA = await recoveryA.recover();
+      const recA = repA.recoveredOperations.find((o) => o.opId === 'op-c31-crash-match');
+      expect(recA?.resourcesReleased).toBe(true);
+
+      const opA = domain.getStore().getOperation('op-c31-crash-match');
+      expect(opA?.result?.status).toBe('restored');
+      expect(domain.isResourceLocked(writeRes)).toBe(false);
+
+      // 场景 B: 模拟回滚中途宿主崩溃，且工作区被修改导致指纹不匹配
+      ensureTaskAndRun(domain, 'task-c31', 'run-c31-b');
+      fs.writeFileSync(path.join(repoDir, 'tracked.txt'), 'corrupted mid-rollback\n');
+      domain.getStore().registerOperationIntent(
+        {
+          id: 'op-c31-crash-mismatch',
+          runId: 'run-c31-b',
+          kind: 'rollback',
+          name: `rollback:${snapId}`,
+          inputFingerprint: 'fp-c31-b',
+          requiredResources: [writeRes],
+          mutationRoots: [path.resolve(repoDir)],
+          outputRef: snapId,
+          status: 'intent_registered',
+        },
+        domain.domainId
+      );
+      domain.getStore().updateOperationStatus('op-c31-crash-mismatch', 'active');
+      domain.allocateResources('op-c31-crash-mismatch', [writeRes]);
+
+      const repB = await recoveryA.recover();
+      const recB = repB.recoveredOperations.find((o) => o.opId === 'op-c31-crash-mismatch');
+      expect(recB?.resourcesReleased).toBe(false);
+
+      const opB = domain.getStore().getOperation('op-c31-crash-mismatch');
+      expect(opB?.result?.status).toBe('indeterminate');
+      expect(domain.isResourceLocked(writeRes)).toBe(true);
+
+      // 清理资源
+      domain.internalReleaseResources('op-c31-crash-mismatch', [writeRes]);
+    });
+
+    it('契约 32: git-shadow 快照不改动用户 index、HEAD 与分支，并如实声明 worktree_non_ignored', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      const repoDir = path.join(tempDir, 'repo-c32');
+      fs.mkdirSync(repoDir, { recursive: true });
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.email', 'tester@test.local'], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'base.txt'), 'base\n');
+      fs.writeFileSync(path.join(repoDir, '.gitignore'), '.env\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repoDir });
+      await execFileAsync('git', ['commit', '-m', 'base commit'], { cwd: repoDir });
+
+      // 构造用户正在工作的工作区现场
+      fs.writeFileSync(path.join(repoDir, 'staged.txt'), 'user staged change\n');
+      await execFileAsync('git', ['add', 'staged.txt'], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'unstaged.txt'), 'user unstaged change\n');
+      fs.writeFileSync(path.join(repoDir, '.env'), 'SECRET=donttouch\n');
+
+      const statusBefore = (await execFileAsync('git', ['status', '--porcelain'], { cwd: repoDir })).stdout;
+      const stageBefore = (await execFileAsync('git', ['ls-files', '--stage'], { cwd: repoDir })).stdout;
+      const headBefore = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoDir })).stdout;
+      const branchBefore = (await execFileAsync('git', ['branch'], { cwd: repoDir })).stdout;
+
+      ensureTaskAndRun(domain, 'task-c32', 'run-c32');
+      const snapRes = await supervisor.captureSnapshot({
+        runId: 'run-c32',
+        opId: 'op-c32',
+        roots: [repoDir],
+      });
+
+      expect(snapRes.status).toBe('succeeded');
+      expect(snapRes.snapshot?.coverage).toBe('worktree_non_ignored');
+
+      const statusAfter = (await execFileAsync('git', ['status', '--porcelain'], { cwd: repoDir })).stdout;
+      const stageAfter = (await execFileAsync('git', ['ls-files', '--stage'], { cwd: repoDir })).stdout;
+      const headAfter = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoDir })).stdout;
+      const branchAfter = (await execFileAsync('git', ['branch'], { cwd: repoDir })).stdout;
+
+      expect(statusAfter).toBe(statusBefore);
+      expect(stageAfter).toBe(stageBefore);
+      expect(headAfter).toBe(headBefore);
+      expect(branchAfter).toBe(branchBefore);
+    });
+
+    it('契约 53: SnapshotRef.journalSeq 与捕获事件 seq 一致；可按 seq 查询不晚于它的最近快照', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      const repoDir = path.join(tempDir, 'repo-c53');
+      fs.mkdirSync(repoDir, { recursive: true });
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.email', 'tester@test.local'], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'step.txt'), 'step 0\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repoDir });
+      await execFileAsync('git', ['commit', '-m', 'step 0'], { cwd: repoDir });
+
+      ensureTaskAndRun(domain, 'task-c53', 'run-c53');
+
+      // 捕获第 1 个快照
+      const snap1 = await supervisor.captureSnapshot({
+        runId: 'run-c53',
+        opId: 'snap-1',
+        roots: [repoDir],
+      });
+
+      const events1 = domain.getStore().getJournalEvents(domain.domainId);
+      const capEvent1 = events1.find((e) => e.type === 'SNAPSHOT_CAPTURED' && (e.payload as any)?.snapshotId === 'snap-1');
+      expect(capEvent1).toBeDefined();
+      expect(snap1.snapshot?.journalSeq).toBe(capEvent1?.seq);
+
+      fs.writeFileSync(path.join(repoDir, 'step.txt'), 'step 1\n');
+
+      // 捕获第 2 个快照
+      const snap2 = await supervisor.captureSnapshot({
+        runId: 'run-c53',
+        opId: 'snap-2',
+        roots: [repoDir],
+      });
+
+      const events2 = domain.getStore().getJournalEvents(domain.domainId);
+      const capEvent2 = events2.find((e) => e.type === 'SNAPSHOT_CAPTURED' && (e.payload as any)?.snapshotId === 'snap-2');
+      expect(snap2.snapshot?.journalSeq).toBe(capEvent2?.seq);
+
+      // 查询 seq 不晚于 capEvent1.seq 的快照 => 必须返回 snap-1
+      const foundSnap1 = domain.getStore().findSnapshotAtOrBefore(domain.domainId, capEvent1!.seq);
+      expect(foundSnap1?.id).toBe('snap-1');
+
+      // 查询 seq 不晚于 capEvent2.seq 的快照 => 必须返回 snap-2
+      const foundSnap2 = domain.getStore().findSnapshotAtOrBefore(domain.domainId, capEvent2!.seq);
+      expect(foundSnap2?.id).toBe('snap-2');
+    });
+
+    it('契约 54: materialize 生成的工作区独立；源工作区、用户 index、HEAD 与分支不变；dematerialize 后无残留 worktree', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      const repoDir = path.join(tempDir, 'repo-c54');
+      fs.mkdirSync(repoDir, { recursive: true });
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.email', 'tester@test.local'], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'entry.ts'), 'export const val = 42;\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repoDir });
+      await execFileAsync('git', ['commit', '-m', 'entry commit'], { cwd: repoDir });
+
+      ensureTaskAndRun(domain, 'task-c54', 'run-c54');
+      const snapRes = await supervisor.captureSnapshot({
+        runId: 'run-c54',
+        opId: 'snap-c54',
+        roots: [repoDir],
+      });
+
+      const forkDir = path.join(tempDir, 'fork-c54');
+      const { worktreePath } = await supervisor.materialize('snap-c54', forkDir);
+
+      expect(worktreePath).toBe(forkDir);
+      expect(fs.existsSync(path.join(forkDir, 'entry.ts'))).toBe(true);
+      expect(domain.isResourceLocked(`workspace:write:${path.resolve(forkDir)}`)).toBe(true);
+
+      // dematerialize
+      await supervisor.dematerialize(forkDir);
+      expect(fs.existsSync(forkDir)).toBe(false);
+      expect(domain.isResourceLocked(`workspace:write:${path.resolve(forkDir)}`)).toBe(false);
+
+      const { stdout: wtList } = await execFileAsync('git', ['worktree', 'list'], { cwd: repoDir });
+      expect(wtList).not.toContain(forkDir);
+    });
+
+    it('契约 55: 准入校验：过期 / 撤销 / 旧 epoch / 越界资源 / 越界路径抛 CapabilityViolationError 并记 CAPABILITY_REJECTED；缺省推导生效并记 CAPABILITY_USED', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c55', 'run-c55');
+
+      const allowedDir = path.join(tempDir, 'allowed');
+      const outsideDir = path.join(tempDir, 'outside');
+      fs.mkdirSync(allowedDir, { recursive: true });
+      fs.mkdirSync(outsideDir, { recursive: true });
+
+      // 1. 签发有效 capability
+      const cap = domain.issueCapability(
+        {
+          write: [allowedDir],
+          exclusive: ['res:allowed-1'],
+        },
+        'tester',
+        60000
+      );
+
+      // 2. 越界资源
+      await expect(
+        supervisor.executeProcess({
+          runId: 'run-c55',
+          opId: 'op-c55-res-violation',
+          name: 'violating-proc',
+          command: { execPath: process.execPath, args: ['-e', 'process.exit(0)'], cwd: allowedDir },
+          requiredResources: ['res:unauthorized-res'],
+          capabilityId: cap.id,
+        })
+      ).rejects.toThrowError(CapabilityViolationError);
+
+      // 3. 越界路径 (cwd 在 allowedDir 之外)
+      await expect(
+        supervisor.executeProcess({
+          runId: 'run-c55',
+          opId: 'op-c55-path-violation',
+          name: 'violating-path',
+          command: { execPath: process.execPath, args: ['-e', 'process.exit(0)'], cwd: outsideDir },
+          capabilityId: cap.id,
+        })
+      ).rejects.toThrowError(CapabilityViolationError);
+
+      // 4. 撤销 capability
+      domain.revokeCapability(cap.id, 'test_revocation');
+      await expect(
+        supervisor.executeProcess({
+          runId: 'run-c55',
+          opId: 'op-c55-revoked',
+          name: 'revoked-proc',
+          command: { execPath: process.execPath, args: ['-e', 'process.exit(0)'], cwd: allowedDir },
+          capabilityId: cap.id,
+        })
+      ).rejects.toThrowError(CapabilityViolationError);
+
+      // 验证 CAPABILITY_REJECTED 事件已入 journal
+      const events = domain.getStore().getJournalEvents(domain.domainId);
+      const rejectedEvents = events.filter((e) => e.type === 'CAPABILITY_REJECTED');
+      expect(rejectedEvents.length).toBeGreaterThanOrEqual(3);
+
+      // 5. 缺省 capability 推导生效与 CAPABILITY_USED 记录
+      const validCap = domain.issueCapability(
+        {
+          write: [tempDir],
+          exclusive: ['res:default-1'],
+        },
+        'tester',
+        60000
+      );
+
+      const res = await supervisor.executeProcess({
+        runId: 'run-c55',
+        opId: 'op-c55-success',
+        name: 'valid-proc',
+        command: { execPath: process.execPath, args: ['-e', 'process.exit(0)'], cwd: tempDir },
+        requiredResources: ['res:default-1'],
+        capabilityId: validCap.id,
+      });
+      expect(res.status).toBe('succeeded');
+      expect(res.capabilityId).toBe(validCap.id);
+
+      const usedEvents = domain.getStore().getJournalEvents(domain.domainId).filter((e) => e.type === 'CAPABILITY_USED');
+      expect(usedEvents.some((e) => (e.payload as any)?.capabilityId === validCap.id)).toBe(true);
+    });
+
+    it('契约 56: 写入限制驱动：受限写外部路径失败；快照后全受限回滚声明 complete，混入不受限声明 declared_roots', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      const repoDir = path.join(tempDir, 'repo-c56');
+      fs.mkdirSync(repoDir, { recursive: true });
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.email', 'tester@test.local'], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'init.txt'), 'init\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repoDir });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: repoDir });
+
+      ensureTaskAndRun(domain, 'task-c56', 'run-c56');
+
+      const mockDriver = {
+        name: 'mock-confinement',
+        wrap: (cmd: any) => cmd,
+      };
+
+      // 1. 签发受限 capability (针对 repoDir)
+      const confinedCap = domain.issueCapability(
+        {
+          write: [repoDir],
+          exclusive: [`workspace:write:${path.resolve(repoDir)}`],
+        },
+        'tester',
+        60000
+      );
+
+      // 捕获快照
+      const snapRes = await supervisor.captureSnapshot({
+        runId: 'run-c56',
+        opId: 'snap-c56',
+        capabilityId: confinedCap.id,
+      });
+      expect(snapRes.status).toBe('succeeded');
+
+      // 在受限下运行进程写文件
+      const p1 = await supervisor.executeProcess({
+        runId: 'run-c56',
+        opId: 'op-c56-confined',
+        name: 'write-in-repo',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(path.join(repoDir, 'a.txt'))}, 'a');`],
+          cwd: repoDir,
+        },
+        capabilityId: confinedCap.id,
+        confinementDriver: mockDriver,
+      });
+      expect(p1.status).toBe('succeeded');
+      expect(p1.confined).toBe(true);
+
+      // 全部 op 受限，回滚 coverage 必须为 complete
+      const rollback1 = await supervisor.rollback({
+        runId: 'run-c56',
+        opId: 'rb-c56-1',
+        snapshotId: 'snap-c56',
+        capabilityId: confinedCap.id,
+      });
+      expect(rollback1.coverage).toBe('complete');
+      expect(rollback1.outOfScopeEffects).toBe('none_possible');
+
+      // 2. 混入不受限操作
+      ensureTaskAndRun(domain, 'task-c56', 'run-c56-unconfined');
+      const snap2 = await supervisor.captureSnapshot({
+        runId: 'run-c56-unconfined',
+        opId: 'snap-c56-2',
+        roots: [repoDir],
+      });
+
+      const p2 = await supervisor.executeProcess({
+        runId: 'run-c56-unconfined',
+        opId: 'op-c56-unconfined',
+        name: 'write-unconfined',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(path.join(repoDir, 'b.txt'))}, 'b');`],
+          cwd: repoDir,
+        },
+        requiredResources: [`workspace:write:${path.resolve(repoDir)}`],
+      });
+      expect(p2.confined).toBeFalsy();
+
+      // 混入不受限操作，回滚 coverage 退化为 declared_roots
+      const rollback2 = await supervisor.rollback({
+        runId: 'run-c56-unconfined',
+        opId: 'rb-c56-2',
+        snapshotId: 'snap-c56-2',
+      });
+      expect(rollback2.coverage).toBe('declared_roots');
+      expect(rollback2.outOfScopeEffects).toBe('possible');
     });
   });
 }

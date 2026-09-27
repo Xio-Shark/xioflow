@@ -17,9 +17,18 @@ import {
   AdjudicationRecord,
   Task,
   Run,
+  SnapshotDriver,
+  Capability,
+  CapabilityScope,
+  CapabilityViolationError,
 } from './types.js';
+import {
+  normalizeScope,
+  validateScopeNarrowing,
+  checkCapabilityAdmission,
+} from './capability/index.js';
 
-export { DomainLockedError, ResourceConflictError, EpochFencedError, AdjudicationRecord };
+export { DomainLockedError, ResourceConflictError, EpochFencedError, AdjudicationRecord, CapabilityViolationError };
 
 export interface DomainStatus {
   domainId: string;
@@ -545,6 +554,16 @@ export class ExecutionDomain {
     return this.driver;
   }
 
+  private snapshotDriver?: SnapshotDriver;
+
+  public setSnapshotDriver(driver: SnapshotDriver): void {
+    this.snapshotDriver = driver;
+  }
+
+  public getSnapshotDriver(): SnapshotDriver | undefined {
+    return this.snapshotDriver;
+  }
+
   /**
    * 内部私有资源释放（走代际栅栏并记录 RESOURCES_RELEASED 事件，§0.2 裁决 1 / N6）
    * @internal 仅供 supervisor、recovery engine 与 adjudicate 等内核内部组件调用
@@ -795,6 +814,178 @@ export class ExecutionDomain {
     }
 
     return { deleted, retained };
+  }
+
+  /**
+   * 签发受管 Capability（ARCHITECTURE §0.2 裁决 9 / 契约 #55）
+   */
+  public issueCapability(scope: CapabilityScope, actor: string, ttlMs: number): Capability {
+    if (this.isFenced) {
+      throw new EpochFencedError(this.domainId, this.ownerRecord.epoch, this.ownerRecord.epoch);
+    }
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
+    const id = `cap-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    const normalizedScope = normalizeScope(scope);
+
+    const cap: Capability = {
+      id,
+      domainId: this.domainId,
+      scope: normalizedScope,
+      issuedBy: actor,
+      expiresAt,
+      epoch: this.getEpoch(),
+      createdAt: now.toISOString(),
+    };
+
+    this.store.recordCapability(cap);
+    this.store.recordJournalEvent({
+      domainId: this.domainId,
+      type: 'CAPABILITY_ISSUED',
+      payload: {
+        capabilityId: id,
+        actor,
+        scope: normalizedScope,
+        expiresAt,
+        epoch: cap.epoch,
+      },
+      timestamp: cap.createdAt,
+    });
+
+    return cap;
+  }
+
+  /**
+   * 收窄 Capability 作用域（只能收窄，禁止放宽）
+   */
+  public attenuate(
+    capId: string,
+    narrowerScope: Partial<CapabilityScope>,
+    actor: string,
+    ttlMs?: number
+  ): Capability {
+    if (this.isFenced) {
+      throw new EpochFencedError(this.domainId, this.ownerRecord.epoch, this.ownerRecord.epoch);
+    }
+    const parent = this.store.getCapability(capId);
+    if (!parent) {
+      throw new CapabilityViolationError('revoked', `Parent capability '${capId}' not found`);
+    }
+    if (parent.epoch !== this.getEpoch()) {
+      throw new CapabilityViolationError(
+        'epoch_mismatch',
+        `Parent capability '${capId}' epoch ${parent.epoch} does not match current epoch ${this.getEpoch()}`
+      );
+    }
+    if (parent.revokedAt) {
+      throw new CapabilityViolationError('revoked', `Parent capability '${capId}' is revoked`);
+    }
+    const now = Date.now();
+    const parentExpiry = new Date(parent.expiresAt).getTime();
+    if (parentExpiry <= now) {
+      throw new CapabilityViolationError('expired', `Parent capability '${capId}' has expired`);
+    }
+
+    // 递归校验祖先链是否有效
+    let curAncestorId = parent.parentId;
+    while (curAncestorId) {
+      const anc = this.store.getCapability(curAncestorId);
+      if (!anc || anc.revokedAt) {
+        throw new CapabilityViolationError('revoked', `Parent capability ancestor '${curAncestorId}' was revoked or not found`);
+      }
+      if (anc.epoch !== this.getEpoch()) {
+        throw new CapabilityViolationError('epoch_mismatch', `Parent capability ancestor '${curAncestorId}' epoch mismatch`);
+      }
+      if (new Date(anc.expiresAt).getTime() <= now) {
+        throw new CapabilityViolationError('expired', `Parent capability ancestor '${curAncestorId}' has expired`);
+      }
+      curAncestorId = anc.parentId;
+    }
+
+    // 校验并生成收窄 scope（放宽时内部抛出 attenuation_widened 错误）
+    const childScope = validateScopeNarrowing(parent.scope, narrowerScope);
+
+    let childExpiresAt = parent.expiresAt;
+    if (ttlMs !== undefined) {
+      const requestedExpiry = now + ttlMs;
+      const effectiveExpiry = Math.min(requestedExpiry, parentExpiry);
+      childExpiresAt = new Date(effectiveExpiry).toISOString();
+    }
+
+    const id = `cap-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    const childCap: Capability = {
+      id,
+      domainId: this.domainId,
+      parentId: parent.id,
+      scope: childScope,
+      issuedBy: actor,
+      expiresAt: childExpiresAt,
+      epoch: this.getEpoch(),
+      createdAt: new Date().toISOString(),
+    };
+
+    this.store.recordCapability(childCap);
+    this.store.recordJournalEvent({
+      domainId: this.domainId,
+      type: 'CAPABILITY_ATTENUATED',
+      payload: {
+        capabilityId: id,
+        parentId: parent.id,
+        actor,
+        scope: childScope,
+        expiresAt: childExpiresAt,
+        epoch: childCap.epoch,
+      },
+      timestamp: childCap.createdAt,
+    });
+
+    return childCap;
+  }
+
+  /**
+   * 撤销 Capability
+   */
+  public revokeCapability(capId: string, actor: string): void {
+    if (this.isFenced) {
+      throw new EpochFencedError(this.domainId, this.ownerRecord.epoch, this.ownerRecord.epoch);
+    }
+    const cap = this.store.getCapability(capId);
+    if (!cap) return;
+    const now = new Date().toISOString();
+    this.store.revokeCapability(capId, this.domainId, now);
+    this.store.recordJournalEvent({
+      domainId: this.domainId,
+      type: 'CAPABILITY_REVOKED',
+      payload: {
+        capabilityId: capId,
+        actor,
+        revokedAt: now,
+      },
+      timestamp: now,
+    });
+  }
+
+  public getCapability(capId: string): Capability | null {
+    return this.store.getCapability(capId);
+  }
+
+  public checkCapabilityAdmission(options: {
+    capabilityId: string;
+    requiredResources?: string[];
+    mutationRoots?: string[];
+    runId?: string;
+    opId?: string;
+  }) {
+    return checkCapabilityAdmission({
+      domainId: this.domainId,
+      currentEpoch: this.getEpoch(),
+      store: this.store,
+      capabilityId: options.capabilityId,
+      requiredResources: options.requiredResources,
+      mutationRoots: options.mutationRoots,
+      runId: options.runId,
+      opId: options.opId,
+    });
   }
 
   public isClosed(): boolean {

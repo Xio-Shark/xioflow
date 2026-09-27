@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS operations (
   input_fingerprint TEXT NOT NULL,
   status TEXT NOT NULL,
   required_resources TEXT NOT NULL,
+  mutation_roots TEXT,
+  capability_id TEXT,
   timeout_ms INTEGER,
   resource_budget TEXT,
   output_ref TEXT,
@@ -69,10 +71,39 @@ CREATE TABLE IF NOT EXISTS journal_events (
   timestamp TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS snapshots (
+  id TEXT PRIMARY KEY,
+  domain_id TEXT NOT NULL,
+  op_id TEXT NOT NULL,
+  driver TEXT NOT NULL,
+  roots TEXT NOT NULL,
+  coverage TEXT NOT NULL,
+  tree_fingerprint TEXT NOT NULL,
+  commit_hash TEXT,
+  journal_seq INTEGER,
+  created_at TEXT NOT NULL,
+  tree_size_bytes INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS capabilities (
+  id TEXT PRIMARY KEY,
+  domain_id TEXT NOT NULL,
+  parent_id TEXT,
+  issued_by TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_runs_task_id ON runs(task_id);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS idx_operations_run_id ON operations(run_id);
 CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status);
 CREATE INDEX IF NOT EXISTS idx_resource_leases_op ON resource_leases(operation_id);
 CREATE INDEX IF NOT EXISTS idx_journal_events_domain ON journal_events(domain_id);
+CREATE INDEX IF NOT EXISTS idx_snapshots_domain ON snapshots(domain_id);
+CREATE INDEX IF NOT EXISTS idx_snapshots_journal_seq ON snapshots(journal_seq);
+CREATE INDEX IF NOT EXISTS idx_capabilities_domain ON capabilities(domain_id);
 `;

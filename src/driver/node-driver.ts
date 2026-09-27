@@ -12,6 +12,7 @@ import {
 import { IdentityVerificationResult } from '../types.js';
 import { readBootId, readStartTime, getGroupMembers } from './process-facts.js';
 import { ProcessSampler } from './sampler.js';
+import { detectAvailableConfinementDrivers } from '../confinement/detector.js';
 
 function resolveExecutable(bin: string, envPath?: string): string | null {
   if (bin.includes(path.sep)) {
@@ -60,6 +61,7 @@ export class NodePlatformDriver implements PlatformDriver {
     descendantEnumeration: process.platform === 'win32' ? 'none' : 'full',
     // 门管道受控启动：POSIX 平台下通过 /bin/sh 与 stdio[3] 实现
     gatedSpawn: process.platform !== 'win32',
+    confinement: detectAvailableConfinementDrivers(),
   };
 
   // 内存中追踪当前驱动启动的所有活跃进程

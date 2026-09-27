@@ -1,6 +1,13 @@
 import { ExecutionDomain } from '../domain.js';
 import { PlatformDriver } from '../driver/types.js';
-import { Operation, ProcessOperationResult, IndeterminateResult } from '../types.js';
+import {
+  Operation,
+  ProcessOperationResult,
+  IndeterminateResult,
+  RollbackOperationResult,
+  SnapshotOperationResult,
+} from '../types.js';
+import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
 
 export interface RecoveredServiceSummary {
   serviceId: string;
@@ -63,6 +70,76 @@ export class RecoveryEngine {
     };
 
     for (const op of unfinishedOps) {
+      if (op.kind === 'rollback') {
+        const snapshotId = op.outputRef || op.name.replace(/^rollback:/, '');
+        const snapshot = store.getSnapshot(snapshotId);
+        const snapshotDriver = this.domain.getSnapshotDriver?.() || new GitShadowSnapshotDriver();
+        const roots = op.mutationRoots || snapshot?.roots || [];
+
+        let isMatch = false;
+        if (snapshot && roots.length > 0) {
+          try {
+            const currentFp = await snapshotDriver.fingerprint(roots);
+            isMatch = currentFp === snapshot.treeFingerprint;
+          } catch {
+            isMatch = false;
+          }
+        }
+
+        if (isMatch) {
+          const restoredResult: RollbackOperationResult = {
+            kind: 'rollback',
+            status: 'restored',
+            snapshotId,
+            coverage: 'declared_roots',
+            outOfScopeEffects: 'possible',
+            durationMs: 0,
+            completedAt: new Date().toISOString(),
+          };
+          store.recordOperationResult(op.id, restoredResult, true);
+          releaseOpAndServiceResources(op);
+          report.recoveredOperations.push({
+            opId: op.id,
+            action: 'cleaned_unspawned',
+            resourcesReleased: true,
+          });
+        } else {
+          const indetResult: IndeterminateResult = {
+            kind: 'indeterminate',
+            status: 'indeterminate',
+            reason: 'Rollback interrupted by crash and tree fingerprint does not match target snapshot',
+            recoveryGuidance: 'Workspace tree may be dirty or partially restored. Inspect files and retry rollback.',
+            durationMs: 0,
+            completedAt: new Date().toISOString(),
+          };
+          store.recordOperationResult(op.id, indetResult, false);
+          report.recoveredOperations.push({
+            opId: op.id,
+            action: 'isolated_indeterminate',
+            resourcesReleased: false,
+          });
+        }
+        continue;
+      }
+
+      if (op.kind === 'snapshot') {
+        const failResult: SnapshotOperationResult = {
+          kind: 'snapshot',
+          status: 'failed',
+          errorMessage: 'Snapshot interrupted by crash before completion',
+          durationMs: 0,
+          completedAt: new Date().toISOString(),
+        };
+        store.recordOperationResult(op.id, failResult, true);
+        releaseOpAndServiceResources(op);
+        report.recoveredOperations.push({
+          opId: op.id,
+          action: 'cleaned_unspawned',
+          resourcesReleased: true,
+        });
+        continue;
+      }
+
       if (op.status === 'intent_registered' && !op.processIdentity) {
         // 场景 1：意图登记后崩溃，驱动未启动（无进程身份）
         // 安全清理资源，推进至失败终态
