@@ -79,7 +79,7 @@ export class RecoveryEngine {
         let isMatch = false;
         if (snapshot && roots.length > 0) {
           try {
-            const currentFp = await snapshotDriver.fingerprint(roots);
+            const currentFp = await snapshotDriver.fingerprint(roots, { against: snapshot });
             isMatch = currentFp === snapshot.treeFingerprint;
           } catch {
             isMatch = false;
@@ -253,7 +253,8 @@ export class RecoveryEngine {
             if (this.driver.getGroupEvidence) {
               const members = await this.driver.getGroupEvidence(pgid);
               if (members.length > 0) {
-                const opSpawnMs = Date.parse(op.processIdentity.spawnTime);
+                // 下界优先用 OS 登记的 leader 创建时间；旧记录没有 osStartTime 时才退回宿主 spawnTime
+                const opSpawnMs = Date.parse(op.processIdentity.osStartTime ?? op.processIdentity.spawnTime);
                 if (!isNaN(opSpawnMs)) {
                   let hasEarlierProcess = false;
                   for (const m of members) {

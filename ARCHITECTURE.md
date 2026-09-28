@@ -626,7 +626,7 @@ export interface ProcessIdentity {
   osStartTime?: string;              // 内核记录的进程创建时间（见下方身份核验规则）
   bootId?: string;                   // 宿主启动标识（Linux /proc/sys/kernel/random/boot_id 等），跨重启判等；0.2.0 起在 spawn 登记时写入
   spawnTime: string;                 // ISO8601（宿主记录，仅供展示，不作为身份证据）
-  commandFingerprint: string;        // execPath + args 的 sha256，辅助核验
+  commandFingerprint: string;        // sha256(JSON.stringify([execPath, ...args]))，审计事实，不参与身份判定
 }
 
 export interface StopProcessResult {
@@ -654,7 +654,8 @@ export interface ProcessTreeMetrics {
   | OS 创建时间与记录不一致 | `not_original_process` |
   | 驱动无法读取 OS 创建时间（`startTimeSource = 'none'`） | `cannot_determine` |
 - **禁止**以「命令行包含 execPath」「宿主进程内的单调时钟」作为跨重启的身份证据：前者会把复用了同一 PID 的无关同名进程（如另一个 `node`）判为原进程，进而被恢复流水线误杀；
-- `commandFingerprint` 只能用于否定（不一致 ⇒ 非原进程），不能单独用于肯定。
+- `osStartTime` 必须在 spawn 时从 OS 读取并登记（门控启动时子进程阻塞在门上，`exec` 不改变创建时间）；未登记或当前读不到 ⇒ `cannot_determine`；同一来源的读数按原值比对，不设宽限；
+- `commandFingerprint` 只作审计事实，既不用于肯定，也不用于否定：shebang 脚本（`npm`、`pnpm`、Python 脚本）经内核改写后 OS 可见的 argv 变为「解释器 + 脚本路径 + 参数」，改写 `argv` 的程序同理，拿它否定会把真正的原进程判成陌生进程，进而误入按组清场路径。
 
 ### 4.2 停止确认流水线 (Stopping Pipeline)
 

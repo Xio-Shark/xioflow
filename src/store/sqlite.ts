@@ -38,8 +38,16 @@ export class SqliteStore {
 
   private initSchema(): void {
     this.db.exec(SCHEMA_SQL);
-    try { this.db.exec('ALTER TABLE operations ADD COLUMN mutation_roots TEXT;'); } catch {}
-    try { this.db.exec('ALTER TABLE operations ADD COLUMN capability_id TEXT;'); } catch {}
+    // 旧库补列：先查列是否已存在，只在缺列时 ALTER；ALTER 自身失败（磁盘、锁、只读）必须暴露
+    const existing = new Set(
+      (this.db.prepare('PRAGMA table_info(operations)').all() as Array<{ name: string }>).map((c) => c.name)
+    );
+    if (!existing.has('mutation_roots')) {
+      this.db.exec('ALTER TABLE operations ADD COLUMN mutation_roots TEXT;');
+    }
+    if (!existing.has('capability_id')) {
+      this.db.exec('ALTER TABLE operations ADD COLUMN capability_id TEXT;');
+    }
   }
 
   private inTransaction = false;

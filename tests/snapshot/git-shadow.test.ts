@@ -158,6 +158,61 @@ describe('GitShadowSnapshotDriver (Step 1 & Step 3 & Step 5)', () => {
     expect(fp).toBe(snapshot.treeFingerprint);
   });
 
+  it('1.4b [回归保护] 只对子目录快照时，restore 不得改动 roots 之外的未提交改动与新文件', async () => {
+    const repoDir = await makeRepo();
+    fs.mkdirSync(path.join(repoDir, 'a'));
+    fs.mkdirSync(path.join(repoDir, 'b'));
+    fs.writeFileSync(path.join(repoDir, 'a', 'f.txt'), 'a0\n');
+    fs.writeFileSync(path.join(repoDir, 'a', '中文.txt'), 'zh0\n');
+    fs.writeFileSync(path.join(repoDir, 'b', 'g.txt'), 'b0\n');
+    await git(repoDir, ['add', '.']);
+    await git(repoDir, ['commit', '-m', 'add a/ b/']);
+
+    const snapshot = await driver.capture([path.join(repoDir, 'a')]);
+
+    // agent 在 roots 内的改动
+    fs.writeFileSync(path.join(repoDir, 'a', 'f.txt'), 'a1-agent\n');
+    fs.writeFileSync(path.join(repoDir, 'a', '中文.txt'), 'zh1-agent\n');
+    fs.writeFileSync(path.join(repoDir, 'a', 'new.txt'), 'agent created\n');
+    // 用户在 roots 之外未提交的改动
+    fs.writeFileSync(path.join(repoDir, 'b', 'g.txt'), 'b1-user-uncommitted\n');
+    fs.writeFileSync(path.join(repoDir, 'b', 'user-new.txt'), 'user created\n');
+    fs.writeFileSync(path.join(repoDir, 'README.md'), '# user edit\n');
+
+    const res = await driver.restore(snapshot);
+    expect(res.unrestoredPaths).toHaveLength(0);
+
+    // roots 内回到快照
+    expect(fs.readFileSync(path.join(repoDir, 'a', 'f.txt'), 'utf8')).toBe('a0\n');
+    expect(fs.readFileSync(path.join(repoDir, 'a', '中文.txt'), 'utf8')).toBe('zh0\n');
+    expect(fs.existsSync(path.join(repoDir, 'a', 'new.txt'))).toBe(false);
+    // roots 外逐字不变
+    expect(fs.readFileSync(path.join(repoDir, 'b', 'g.txt'), 'utf8')).toBe('b1-user-uncommitted\n');
+    expect(fs.readFileSync(path.join(repoDir, 'b', 'user-new.txt'), 'utf8')).toBe('user created\n');
+    expect(fs.readFileSync(path.join(repoDir, 'README.md'), 'utf8')).toBe('# user edit\n');
+
+    // 用户随后提交了 roots 之外的改动（HEAD 前进）：以快照为基线的核验指纹仍应与快照一致
+    await git(repoDir, ['add', 'b', 'README.md']);
+    await git(repoDir, ['commit', '-m', 'user commit outside roots']);
+    const fp = await driver.fingerprint([path.join(repoDir, 'a')], { against: snapshot });
+    expect(fp).toBe(snapshot.treeFingerprint);
+  });
+
+  it('1.4c [回归保护] includeIgnored 快照回滚后，同口径指纹核验一致', async () => {
+    const repoDir = await makeRepo();
+    fs.writeFileSync(path.join(repoDir, 'cache.ignored'), 'v1\n');
+    const snapshot = await driver.capture([repoDir], { includeIgnored: true });
+    expect(snapshot.coverage).toBe('full_tree');
+
+    fs.writeFileSync(path.join(repoDir, 'cache.ignored'), 'v2\n');
+    const res = await driver.restore(snapshot);
+    expect(res.unrestoredPaths).toHaveLength(0);
+    expect(fs.readFileSync(path.join(repoDir, 'cache.ignored'), 'utf8')).toBe('v1\n');
+
+    const fp = await driver.fingerprint([repoDir], { against: snapshot });
+    expect(fp).toBe(snapshot.treeFingerprint);
+  });
+
   it('1.5 契约 54: materialize 分叉为独立 worktree，源工作区不受影响，dematerialize 清理无残留', async () => {
     const repoDir = await makeRepo();
     fs.writeFileSync(path.join(repoDir, 'feature.ts'), 'export const a = 1;\n');
@@ -180,5 +235,29 @@ describe('GitShadowSnapshotDriver (Step 1 & Step 3 & Step 5)', () => {
 
     const { stdout: wtListAfter } = await git(repoDir, ['worktree', 'list']);
     expect(wtListAfter).not.toContain(forkDir);
+  });
+
+  it('1.6 [回归保护] 宿主重启（新驱动实例、内存映射为空）后 dematerialize 与 prune 仍可用，未知仓库时 prune 显式报错', async () => {
+    const repoDir = await makeRepo();
+    fs.writeFileSync(path.join(repoDir, 'feature.ts'), 'export const b = 2;\n');
+
+    const snap = await driver.capture([repoDir], { id: 'snap-restart' });
+    const forkDir = path.join(tempDir, 'fork-restart');
+    await driver.materialize(snap.id, forkDir);
+
+    // 模拟宿主重启：换一个全新的驱动实例
+    const restarted = new GitShadowSnapshotDriver();
+
+    await restarted.dematerialize(forkDir);
+    expect(fs.existsSync(forkDir)).toBe(false);
+    const { stdout: wtList } = await git(repoDir, ['worktree', 'list']);
+    expect(wtList).not.toContain(forkDir);
+
+    // 不给 repoRoot 不能静默跳过
+    await expect(restarted.prune([snap.id])).rejects.toThrow(/repository root unknown/);
+    await expect(git(repoDir, ['rev-parse', `refs/xioflow/snapshots/${snap.id}`])).resolves.toBeTruthy();
+
+    await restarted.prune([snap.id], { repoRoot: snap.roots[0] });
+    await expect(git(repoDir, ['rev-parse', `refs/xioflow/snapshots/${snap.id}`])).rejects.toThrow();
   });
 });

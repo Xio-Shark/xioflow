@@ -273,9 +273,11 @@ try {
     requiredResources: ['embed:unknown'],
     status: 'pending',
   });
+  // 进程存活，但身份里没有 spawn 时登记的 OS 创建时间（osStartTime）：无法证明就是原进程 → cannot_determine。
+  // 宿主 spawnTime 只供展示，不参与判定（ARCHITECTURE §4.1.1）。
   store.updateOperationStatus('op-unknown', 'active', {
     pid: process.pid,
-    spawnTime: new Date().toISOString(),
+    spawnTime: new Date(Date.now() - process.uptime() * 1000).toISOString(),
   });
   const secondRecovery = await new RecoveryEngine(domain, driver).recover();
   const isolated = secondRecovery.recoveredOperations.find((entry) => entry.opId === 'op-unknown');

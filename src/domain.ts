@@ -637,11 +637,19 @@ export class ExecutionDomain {
     const pid = op.processIdentity?.pid;
     const pgid = op.processIdentity?.pgid;
 
-    if (pid) {
+    // kill(0) 探活：ESRCH 才是"不存在"；EPERM 表示进程存在但无权发信号，必须当作存活
+    const probeAlive = (target: number): boolean => {
       try {
-        process.kill(pid, 0);
-        residualPids.push(pid);
-      } catch {}
+        process.kill(target, 0);
+        return true;
+      } catch (err: any) {
+        return err?.code === 'EPERM';
+      }
+    };
+    let evidenceError: string | undefined;
+
+    if (pid && probeAlive(pid)) {
+      residualPids.push(pid);
     }
 
     if (pgid !== undefined) {
@@ -653,15 +661,19 @@ export class ExecutionDomain {
               residualPids.push(m.pid);
             }
           }
-        } catch {}
-      } else {
-        try {
-          process.kill(-pgid, 0);
-          if (pid && !residualPids.includes(pid)) {
-            residualPids.push(pid);
-          }
-        } catch {}
+        } catch (err: any) {
+          evidenceError = err?.message ?? String(err);
+        }
+      } else if (probeAlive(-pgid) && pid && !residualPids.includes(pid)) {
+        residualPids.push(pid);
       }
+    }
+
+    // 残留扫描本身失败时无法证明"已停止"，不能放行 confirmed_stopped
+    if (verdict === 'confirmed_stopped' && evidenceError !== undefined) {
+      throw new Error(
+        `Cannot adjudicate operation "${opId}" as 'confirmed_stopped': residual scan of process group ${pgid} failed: ${evidenceError}`
+      );
     }
 
     if (verdict === 'confirmed_stopped' && residualPids.length > 0) {

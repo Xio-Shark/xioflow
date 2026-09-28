@@ -5,6 +5,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     testTimeout: 20000,
+    fileParallelism: false,
   },
   resolve: {
     alias: {

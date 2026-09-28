@@ -24,8 +24,33 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 - **Model Context Protocol (MCP) Stdio Transport Example (`examples/mcp-stdio-transport`)**:
   - Demonstrates `KernelStdioTransport` implementing official `@modelcontextprotocol/sdk` `Transport` interface on top of `@xioflow/kernel`.
   - End-to-end verified with official MCP Client and Server: runs `initialize`, `tools/list`, and `tools/call`, closing with verified 0 orphan processes leaked in OS.
-- **Shared Contract Suite Expansion (32 -> 35 items)**:
-  - Promoted contracts #50, #51, and #52 into `@xioflow/kernel/testing`.
+- **Workspace Snapshot, Rollback and Fork (`GitShadowSnapshotDriver`, ARCHITECTURE §3.5, Contracts #28–#32, #53, #54)**:
+  - `supervisor.captureSnapshot({ runId, opId, roots })` records a snapshot as a managed operation. The driver writes the tree through a private `GIT_INDEX_FILE` and pins it under `refs/xioflow/snapshots/<id>`, so the user's index, HEAD and branch are untouched and `git gc` cannot collect it. `SnapshotRef.journalSeq` ties each snapshot to its journal position.
+  - `supervisor.rollback({ runId, opId, snapshotId })` restores the declared roots, verifies the result by fingerprint and reports `restored | partial | failed` together with `coverage` and `outOfScopeEffects`. Ignored files (`.env`, `node_modules`) are never touched unless the snapshot was taken with `includeIgnored: true`. A crash mid-rollback is adjudicated by fingerprint on recovery.
+  - `supervisor.materialize(snapshotId, newRoot)` / `dematerialize(newRoot)` fork a snapshot into an independent `git worktree` for parallel candidates.
+- **Capabilities (`domain.issueCapability` / `attenuate` / `revokeCapability`, Contract #55)**:
+  - A capability binds writable roots and exclusive resources to an issuer, an expiry and the domain epoch. Attenuation can only narrow the scope; revocation, expiry or an epoch change cascade to children. Admission rejects out-of-scope resources and paths with `CapabilityViolationError` and journals `CAPABILITY_REJECTED` / `CAPABILITY_USED`.
+- **Write Confinement Drivers (`confinement` option, Contract #56)**:
+  - `sandbox-exec` (macOS), `bubblewrap` (Linux) and `srt` wrap a command so it can only write inside its capability's roots. Results carry `confined` / `confinementDriver`; rollback reports `coverage: 'complete'` only when every operation since the snapshot ran confined. Confinement exists for rollback correctness and is not a security boundary.
+- **Shared Contract Suite Expansion (32 -> 44 items)**:
+  - Promoted contracts #50–#52 (services) and #28–#32, #53–#56 (snapshot, rollback, fork, capability, confinement) into `@xioflow/kernel/testing`.
+### Changed
+- `SnapshotDriver.fingerprint(roots, { against })`: rollback verification now fingerprints the roots on top of the snapshot's own tree and with the snapshot's coverage, so HEAD moving or files changing outside the roots no longer make a correct rollback report `failed`, and `full_tree` snapshots can verify at all.
+- `SnapshotDriver.prune(ids, { repoRoot })` is part of the interface; the git-shadow driver throws when it cannot locate the repository instead of silently keeping the ref.
+- `quickRun` no longer swallows errors from converging the Run it created (for example when the owner was fenced); the error reaches the caller instead of leaving the Run stuck at `running`.
+### Fixed
+- **Rollback overwrote uncommitted work outside the snapshot roots** (data loss). `GitShadowSnapshotDriver.restore` ran `checkout-index -a`, which rewrote every file in the repository to its HEAD version while reporting `unrestoredPaths: []`. Restore, deletion and fingerprinting are now limited to the declared roots, and paths are read with `-z` so non-ASCII file names are handled.
+- **False `succeeded` when an unobserved escaped process kept the output pipes open**. If the driver confirmed the process group stopped but stdout/stderr never closed, the result was `succeeded` with `residualProcessesReaped: true`. It is now `indeterminate` and the leases are kept. This was the macOS / Node 22.13 CI failure.
+- **Service readiness timeout leaked the process**: the service was marked `failed` before calling the stop pipeline, which then returned early, so the process kept running and `stop()` never resolved. The timeout now stops the instance and journals `SERVICE_FAILED { reason: 'readiness_timeout' }`.
+- **Service stop released leases without a confirmed stop**: a driver `terminate` error was swallowed and leases were released once the root exited. Stops that cannot be confirmed now record the instance as `indeterminate`, journal `SERVICE_FAILED { reason: 'stop_unconfirmed' }` and keep the service leases. Instance results no longer hard-code `durationMs: 0` and `identityVerification: 'is_original_process'`, and an instance stopped through `stop()` is recorded as `cancelled` (`terminationReason: 'user_cancelled'`) instead of `failed`.
+- **Adjudication could confirm a stop while the process was alive**: `kill(pid, 0)` failing with `EPERM` was treated as "dead", and a failed group-evidence scan was ignored. `EPERM` now counts as alive and a failed scan rejects `confirmed_stopped`.
+- `GitShadowSnapshotDriver` works after a host restart: `dematerialize` locates the repository from the worktree itself instead of assuming the parent directory is the repository.
+- `maxTreeSizeBytes` is no longer skipped silently when the tree size cannot be measured.
+- Schema migrations only add missing columns and no longer swallow unrelated `ALTER TABLE` failures.
+- A failed snapshot whose failure record could not be persisted now reports both errors.
+- **Cross-restart identity accepted an unrelated process with the same executable** (ARCHITECTURE §4.1.1). `verifyIdentity` treated "command line contains `execPath`" plus a host-clock `spawnTime` within ±3 s as proof, so a reused PID running another `node` could be reported `is_original_process` and stopped by recovery. The driver now reads the OS creation time at spawn and records it as `ProcessIdentity.osStartTime`; cross-restart verification compares only that value (exact match ⇒ original, mismatch ⇒ not original, missing or unreadable ⇒ `cannot_determine`). `spawnTime` is display-only, and recovery's PGID-reuse check uses `osStartTime` as its lower bound when present.
+- `commandFingerprint` is now `sha256(JSON.stringify([execPath, ...args]))` instead of a readable `execPath:args` string, and is an audit fact only (shebang scripts change the OS-visible argv, so it cannot prove or disprove identity).
+- The driver no longer fabricates `exitCode: 1` when the child emits `'error'` after spawn. That event does not mean the process exited; exit facts now come only from the real `exit` / `close`.
 
 ## [0.3.0] - 2026-09-26
 

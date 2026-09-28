@@ -303,6 +303,26 @@ describe('内核长驻 service op: Step 2-4 startService, readiness 与 restart'
     });
 
     await expect(timeoutHandle.ready).rejects.toThrow(/timed out|timeout/i);
+
+    // 回归保护：readiness 超时必须真的停止进程并把终态记为 failed，而不是留下一个孤儿进程
+    const slowPid = domain.getStore().getOperation('slow-srv#1')?.processIdentity?.pid;
+    expect(slowPid).toBeGreaterThan(0);
+    await timeoutHandle.stop(500);
+    let alive = true;
+    try {
+      process.kill(slowPid!, 0);
+    } catch {
+      alive = false;
+    }
+    expect(alive, 'readiness 超时后 service 进程不得存活').toBe(false);
+    const failedEvent = domain
+      .getStore()
+      .getJournalEvents(domain.domainId)
+      .find((e: any) => e.type === 'SERVICE_FAILED' && e.payload?.serviceId === 'slow-srv');
+    expect((failedEvent?.payload as any)?.reason).toBe('readiness_timeout');
+    const slowOp = domain.getStore().getOperation('slow-srv#1');
+    expect(slowOp?.status).toBe('done');
+    expect((slowOp?.result as any)?.durationMs).toBeGreaterThan(0);
   });
 
   it('4.1 restart on-failure 自动重启至 maxRestarts 上限并写 SERVICE_RESTARTED / SERVICE_FAILED', async () => {

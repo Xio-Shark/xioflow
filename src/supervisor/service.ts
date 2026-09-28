@@ -3,13 +3,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { ExecutionDomain } from '../domain.js';
-import { PlatformDriver, ManagedProcessHandle } from '../driver/types.js';
+import { PlatformDriver, ManagedProcessHandle, StopProcessResult } from '../driver/types.js';
 import {
   ServiceSpec,
   ServiceHandle,
   ReadyFact,
   Operation,
   ProcessOperationResult,
+  IndeterminateResult,
 } from '../types.js';
 import { ProcessSupervisor } from './supervisor.js';
 import { setupStreamDrainer, StreamDrainer } from './drainer.js';
@@ -36,6 +37,9 @@ interface ServiceRuntimeState {
   instanceExitResolve?: (val: { exitCode: number | null; signal: NodeJS.Signals | null }) => void;
   onInstanceExit: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>;
   handle: ServiceHandle;
+  instanceStartedAt: number;                        // 当前实例启动时刻（用于真实 durationMs）
+  pendingInstanceResult?: ProcessOperationResult;   // 显式停止时由 stopService 在确认停止后落盘
+  failureReason?: string;                           // 例如 readiness_timeout：停止后终态记为 failed
 }
 
 export class ServiceSupervisor {
@@ -120,6 +124,7 @@ export class ServiceSupervisor {
       instanceExitResolve,
       onInstanceExit,
       handle: null as any,
+      instanceStartedAt: Date.now(),
     };
 
     state.handle = {
@@ -156,6 +161,8 @@ export class ServiceSupervisor {
   private async spawnInstance(state: ServiceRuntimeState, instanceIndex: number): Promise<void> {
     state.currentInstanceIndex = instanceIndex;
     state.currentOpId = `${state.serviceId}#${instanceIndex}`;
+    state.instanceStartedAt = Date.now();
+    state.pendingInstanceResult = undefined;
 
     // 更新 onInstanceExit 为当前实例的 promise
     state.onInstanceExit = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve) => {
@@ -329,7 +336,9 @@ export class ServiceSupervisor {
         if (!matched) {
           matched = true;
           processHandle.stdout.off('data', onData);
-          state.status = 'failed';
+          // 不能先把 status 置为 failed：stopService 会把 failed 当作已终结直接返回，进程就泄漏了。
+          // 记下失败原因，由停止流水线在确认停止后把终态记为 failed。
+          state.failureReason = 'readiness_timeout';
           const err = new Error(`Service "${state.serviceId}" readiness check timed out after ${timeoutMs}ms`);
           state.readyReject(err);
           this.stopService(state.serviceId, 500).catch(() => {});
@@ -343,7 +352,7 @@ export class ServiceSupervisor {
     instanceIndex: number,
     exitResult: { exitCode: number | null; signal: NodeJS.Signals | null }
   ): Promise<void> {
-    state.instanceExitResolve?.(exitResult);
+    const exitedIdentity = state.currentProcessHandle?.identity;
 
     // 释放管道连接
     if (state.currentProcessHandle?.stdin) {
@@ -362,6 +371,16 @@ export class ServiceSupervisor {
 
     const store = this.domain.getStore();
     const serviceLeaseHolder = `service:${state.serviceId}`;
+
+    // 身份核验走驱动真实结论，不再写死 is_original_process；驱动核验失败时如实记为 cannot_determine
+    let identityVerification: ProcessOperationResult['identityVerification'] = 'cannot_determine';
+    if (exitedIdentity) {
+      try {
+        identityVerification = await this.driver.verifyIdentity(exitedIdentity);
+      } catch {
+        identityVerification = 'cannot_determine';
+      }
+    }
 
     // 更新当前 operation 结果
     const op = store.getOperation(state.currentOpId);
@@ -382,30 +401,23 @@ export class ServiceSupervisor {
         stderrBytes: stderrData?.bytesSeen ?? 0,
         stderrHash: !stderrData?.spillError ? stderrData?.outputHash : undefined,
         outputHash: !stderrData?.spillError ? stderrData?.outputHash : undefined,
-        durationMs: 0,
+        durationMs: Date.now() - state.instanceStartedAt,
         completedAt: new Date().toISOString(),
-        identityVerification: 'is_original_process',
+        identityVerification,
         ...(stderrData?.spillError ? { spillError: stderrData.spillError, stderrSpillError: stderrData.spillError } : {}),
       };
-      store.recordOperationResult(state.currentOpId, result);
+      if (state.stopRequested) {
+        // 显式停止：根进程退出不等于整组已停，结果交给 stopService 在拿到驱动停止结论后落盘
+        state.pendingInstanceResult = result;
+      } else {
+        store.recordOperationResult(state.currentOpId, result);
+      }
     }
 
-    // 1. 如果是显式请求停止
+    state.instanceExitResolve?.(exitResult);
+
+    // 1. 如果是显式请求停止：终态、事件与租约统一由 stopService → finalizeStop 处理
     if (state.stopRequested) {
-      state.status = 'stopped';
-      store.recordEventAndTransitionState({
-        domainId: this.domain.domainId,
-        runId: state.runId,
-        operationId: state.currentOpId,
-        type: 'SERVICE_STOPPED',
-        payload: { serviceId: state.serviceId, runId: state.runId, reason: 'stopped' },
-        timestamp: new Date().toISOString(),
-      });
-      if (state.spec.requiredResources && state.spec.requiredResources.length > 0) {
-        this.domain.internalReleaseResources(serviceLeaseHolder, state.spec.requiredResources);
-      }
-      state.stdoutStream.end();
-      state.stopResolve();
       return;
     }
 
@@ -500,6 +512,8 @@ export class ServiceSupervisor {
     const state = this.activeServices.get(serviceId);
     if (!state) return;
     if (state.status === 'stopped' || state.status === 'failed') return state.stopPromise;
+    // 停止流水线已在进行（例如 readiness 超时触发的停止）：加入同一个结果，避免重复终态写入
+    if (state.status === 'stopping') return state.stopPromise;
 
     state.stopRequested = true;
     state.status = 'stopping';
@@ -527,16 +541,97 @@ export class ServiceSupervisor {
     }
 
     if (state.currentProcessHandle) {
+      let stopRes: StopProcessResult;
       try {
-        await this.driver.terminate(state.currentProcessHandle.identity, graceMs);
-      } catch {}
-      await state.onInstanceExit;
+        stopRes = await this.driver.terminate(state.currentProcessHandle.identity, graceMs);
+      } catch (err: any) {
+        stopRes = { stopped: 'cannot_determine', scope: 'unknown', errorDetails: err?.message ?? String(err) };
+      }
+      // 有界等待根进程退出事实：停止未确认时根进程可能仍活着，不能无限挂起调用方
+      const rootExitBoundMs = 1000;
+      const rootExited = await Promise.race([
+        state.onInstanceExit.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), rootExitBoundMs)),
+      ]);
+      this.finalizeStop(state, stopRes, rootExited);
     } else {
       state.status = 'stopped';
       state.stopResolve();
     }
 
     return state.stopPromise;
+  }
+
+  /**
+   * 显式停止的唯一终态写入点：只有驱动确认整组已停且观测到根进程退出，才记录实例结果并释放 service 租约；
+   * 否则实例记为 indeterminate、租约保留，等待人工裁决（与 ProcessSupervisor 的 No premature release 一致）。
+   */
+  private finalizeStop(state: ServiceRuntimeState, stopRes: StopProcessResult, rootExited: boolean): void {
+    const store = this.domain.getStore();
+    const serviceLeaseHolder = `service:${state.serviceId}`;
+    const pending = state.pendingInstanceResult;
+    state.pendingInstanceResult = undefined;
+    const confirmed = stopRes.stopped === 'confirmed_stopped' && rootExited && pending !== undefined;
+    const now = new Date().toISOString();
+
+    if (confirmed) {
+      const failed = state.failureReason !== undefined;
+      // 与 ProcessSupervisor 的取消语义一致：显式停止的实例记为 cancelled（被信号终止不是"失败"），
+      // readiness 超时等内核判定的失败记为 failed
+      const finalResult: ProcessOperationResult = failed
+        ? { ...pending!, status: 'failed' }
+        : { ...pending!, status: 'cancelled', terminationReason: 'user_cancelled' };
+      store.recordOperationResult(state.currentOpId, finalResult);
+      state.status = failed ? 'failed' : 'stopped';
+      store.recordEventAndTransitionState({
+        domainId: this.domain.domainId,
+        runId: state.runId,
+        operationId: state.currentOpId,
+        type: failed ? 'SERVICE_FAILED' : 'SERVICE_STOPPED',
+        payload: {
+          serviceId: state.serviceId,
+          runId: state.runId,
+          reason: failed ? state.failureReason : 'stopped',
+        },
+        timestamp: now,
+      });
+      if (state.spec.requiredResources && state.spec.requiredResources.length > 0) {
+        this.domain.internalReleaseResources(serviceLeaseHolder, state.spec.requiredResources);
+      }
+    } else {
+      const op = store.getOperation(state.currentOpId);
+      if (op && op.status !== 'done') {
+        const indetResult: IndeterminateResult = {
+          kind: 'indeterminate',
+          status: 'indeterminate',
+          reason: `Service "${state.serviceId}" instance ${state.currentOpId} stop could not be confirmed (driver: ${stopRes.stopped}, rootExited: ${rootExited})${stopRes.errorDetails ? `: ${stopRes.errorDetails}` : ''}`,
+          recoveryGuidance: 'Inspect residual processes manually, then adjudicate the instance operation before releasing the service leases.',
+          durationMs: Date.now() - state.instanceStartedAt,
+          completedAt: now,
+        };
+        store.recordOperationResult(state.currentOpId, indetResult, false);
+      }
+      state.status = 'failed';
+      store.recordEventAndTransitionState({
+        domainId: this.domain.domainId,
+        runId: state.runId,
+        operationId: state.currentOpId,
+        type: 'SERVICE_FAILED',
+        payload: {
+          serviceId: state.serviceId,
+          runId: state.runId,
+          reason: 'stop_unconfirmed',
+          stopped: stopRes.stopped,
+          rootExited,
+          ...(stopRes.residualPids ? { residualPids: stopRes.residualPids } : {}),
+        },
+        timestamp: now,
+      });
+      // 租约保留在 service 名下，不释放
+    }
+
+    state.stdoutStream.end();
+    state.stopResolve();
   }
 
   public close(): void {

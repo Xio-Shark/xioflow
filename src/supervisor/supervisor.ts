@@ -343,11 +343,21 @@ export class ProcessSupervisor {
         durationMs: Date.now() - startTime,
         completedAt: new Date().toISOString(),
       };
+      let recordError: unknown;
       try {
         this.domain.getStore().recordOperationResult(options.opId, failResult);
         this.domain.getStore().updateOperationStatus(options.opId, 'done');
-      } catch {}
+      } catch (recErr) {
+        recordError = recErr;
+      }
       this.domain.internalReleaseResources(options.opId);
+      if (recordError !== undefined) {
+        // 失败事实没能落盘时不能只抛原始错误：调用方需要知道 journal 里没有这条结果
+        const recMsg = recordError instanceof Error ? recordError.message : String(recordError);
+        throw new Error(`${err.message} (additionally, recording the failed snapshot result failed: ${recMsg})`, {
+          cause: err,
+        });
+      }
       throw err;
     }
   }
@@ -497,7 +507,7 @@ export class ProcessSupervisor {
     try {
       const { unrestoredPaths } = await this.snapshotDriver.restore(snapshot, { force: options.force });
 
-      const currentFp = await this.snapshotDriver.fingerprint(targetRoots);
+      const currentFp = await this.snapshotDriver.fingerprint(targetRoots, { against: snapshot });
       const isMatch = currentFp === snapshot.treeFingerprint;
       let status: 'restored' | 'partial' | 'failed';
       if (!isMatch) {
@@ -1245,6 +1255,19 @@ export class ProcessSupervisor {
         // 排空超时路径强制调用 fsyncSync + closeSync 结清刷盘
         stdoutDrainer.forceFinalize();
         stderrDrainer.forceFinalize();
+        // 走到这里时进程组已被确认停止，管道写端却仍被持有：
+        // 必然存在一个驱动未观测到的逃逸进程（例如 setsid 后被 init 收养、采样器没来得及记录）。
+        // 无法确认隔离，不能报告 succeeded / residualProcessesReaped，必须如实判 indeterminate 并保留租约。
+        const indetResult: IndeterminateResult = {
+          kind: 'indeterminate',
+          status: 'indeterminate',
+          reason: `Process ${handle.identity.pid} exited (exitCode=${exitResult.exitCode}, signal=${exitResult.signal}) and its process group was confirmed stopped, but stdout/stderr pipes are still held by an unobserved escaped process`,
+          recoveryGuidance: 'An escaped process outside the observed process tree still holds the output pipes. Inspect system processes manually before adjudicating and releasing resources.',
+          capabilityId: options.capabilityId,
+          durationMs: Date.now() - startTime,
+          completedAt: new Date().toISOString(),
+        };
+        return this.finalizeOperation(options.opId, indetResult, options.requiredResources, false);
       }
 
       const stdoutData = stdoutDrainer.getResult();

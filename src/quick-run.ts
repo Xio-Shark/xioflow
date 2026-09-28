@@ -86,18 +86,14 @@ export async function quickRun(
     });
 
     if (autoCreatedRun) {
+      // Run 是本函数自建的，收敛失败（例如 owner 已被 epoch 栅栏淘汰）不能吞掉，
+      // 否则 Run 会静默停在 running；操作事实已写入 journal，错误原样抛给调用方
       if (result.status === 'succeeded') {
-        try {
-          domain.reportRunSucceeded(runId);
-        } catch {}
+        domain.reportRunSucceeded(runId);
       } else if (result.status === 'failed') {
-        try {
-          domain.reportRunFailed(runId);
-        } catch {}
+        domain.reportRunFailed(runId);
       } else if (result.status === 'cancelled') {
-        try {
-          domain.reportRunCancelled(runId);
-        } catch {}
+        domain.reportRunCancelled(runId);
       }
     }
 

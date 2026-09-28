@@ -440,7 +440,9 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
     `;
 
     const startedAt = Date.now();
-    const timeoutMs = 600;
+    // 全量并行跑时 node 冷启动可能超过 600ms，孙进程还没派生根进程就被超时杀掉，
+    // 这时"没有逃逸进程 → failed"反而是正确结论。放宽到 1500ms 并在下方显式断言前置条件。
+    const timeoutMs = 1500;
     const drainTimeoutMs = 300;
 
     const result = await supervisor.executeProcess({
@@ -462,11 +464,15 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
     // 契约 #11 上界说明：
     // 对于响应 SIGINT 的常规进程：timeoutMs(600) + 停止宽限(1500) + drainTimeoutMs(300) = 2400ms。
     // 注：若根进程忽略 SIGINT，驱动的升级梯子为 grace(1500ms) -> SIGTERM(1000ms) -> SIGKILL(1000ms)，额外增加 2000ms。
-    // 本用例中根进程正常响应 SIGINT，耗时上界控制在 3000ms 内。若存在 P0-2 缺陷，将会挂死等待逃逸后代退出（耗时 > 7500ms）。
+    // 本用例中根进程正常响应 SIGINT：timeoutMs(1500) + 停止宽限(1500) + drainTimeoutMs(300) = 3300ms，上界取 4000ms。
+    // 若存在 P0-2 缺陷，将会挂死等待逃逸后代退出（耗时 > 7500ms）。
     expect(
       duration,
-      `executeProcess took ${duration}ms, which exceeded bounded limit (expected < 3000ms)`
-    ).toBeLessThan(3000);
+      `executeProcess took ${duration}ms, which exceeded bounded limit (expected < 4000ms)`
+    ).toBeLessThan(4000);
+
+    // 前置条件：逃逸孙进程确实在超时前被派生出来
+    expect(fs.existsSync(subPidFile), '前置条件不成立：孙进程未在超时前启动').toBe(true);
 
     // 契约 #11: 超时 + 逃逸后代：操作在有界时间内返回 indeterminate，不挂到逃逸进程退出
     expect(result.status).toBe('indeterminate');
@@ -531,8 +537,16 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
       // op 在有界时间内返回（无论是否因逃逸后代被裁决为 indeterminate 还是 succeeded，均已进入终态并 finalize）
       expect(['indeterminate', 'succeeded']).toContain(result.status);
       if (result.status === 'succeeded') {
-        expect((result as any).residualPids).toBeDefined();
-        expect((result as any).residualPids.length).toBeGreaterThan(0);
+        // 只有逃逸孙进程确实被回收、管道已释放，才允许报告 succeeded
+        expect((result as any).residualProcessesReaped).toBe(true);
+        const subPid = parseInt(fs.readFileSync(subPidFile, 'utf8').trim(), 10);
+        let alive = true;
+        try {
+          process.kill(subPid, 0);
+        } catch {
+          alive = false;
+        }
+        expect(alive, 'succeeded 结果不得伴随仍存活的逃逸孙进程').toBe(false);
       }
 
       // 等待 300ms，让逃逸孙进程在 op 返回后继续向管道输出
@@ -543,6 +557,63 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
       expect(uncaughtErrors).toHaveLength(0);
     } finally {
       process.off('uncaughtException', uncaughtHandler);
+      if (fs.existsSync(subPidFile)) {
+        try {
+          const pid = parseInt(fs.readFileSync(subPidFile, 'utf8').trim(), 10);
+          if (!isNaN(pid)) process.kill(pid, 'SIGKILL');
+        } catch {}
+      }
+    }
+  }, 10_000);
+
+  it('1.4c [回归保护] 驱动确认进程组已停止、但未被观测的逃逸进程仍持有管道：必须判 indeterminate，禁止报告 succeeded', async () => {
+    const subPidFile = path.join(tempDir, 'sub-unobserved.pid');
+    try {
+      // 根进程拉起一个 detached 且继承 stdout/stderr 的孙进程后立即退出，
+      // 采样器几乎不可能在根进程存活期间记录到这个孙进程
+      const runnerScript = `
+        const { spawn } = require('node:child_process');
+        const fs = require('node:fs');
+        const sub = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 4000)'], {
+          detached: true,
+          stdio: ['ignore', 'inherit', 'inherit']
+        });
+        fs.writeFileSync(${JSON.stringify(subPidFile)}, String(sub.pid));
+        process.exit(0);
+      `;
+
+      // 复现 CI (macOS, Node 22.13) 上的时序：采样器没记录到孙进程，驱动回收进程组后报告 confirmed_stopped。
+      // 这里让 terminate 走真实流水线，但把结论固定为驱动"看到的"结果：组内已空，看不到逃逸进程。
+      const blindDriver = new NodePlatformDriver();
+      const realTerminate = blindDriver.terminate.bind(blindDriver);
+      blindDriver.terminate = async (identity, graceMs) => {
+        const res = await realTerminate(identity, graceMs);
+        return { ...res, stopped: 'confirmed_stopped', residualPids: undefined, errorDetails: undefined };
+      };
+      const blindSupervisor = new ProcessSupervisor(domain, blindDriver);
+
+      const result = await blindSupervisor.executeProcess({
+        runId: 'run-b1',
+        opId: 'op-unobserved-escape',
+        name: 'unobserved-escape-op',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', runnerScript],
+          cwd: tempDir,
+        },
+        requiredResources: ['res:unobserved-escape'],
+        timeoutMs: 5000,
+        drainTimeoutMs: 200,
+      });
+
+      expect(result.status).toBe('indeterminate');
+      // 无法确认隔离时，排他租约必须保留
+      const lease = domain
+        .getStore()
+        .getPersistedResourceLeases(domain.domainId)
+        .find((l) => l.resourceId === 'res:unobserved-escape');
+      expect(lease?.operationId).toBe('op-unobserved-escape');
+    } finally {
       if (fs.existsSync(subPidFile)) {
         try {
           const pid = parseInt(fs.readFileSync(subPidFile, 'utf8').trim(), 10);

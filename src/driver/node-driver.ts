@@ -1,4 +1,5 @@
 import { spawn, ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -13,6 +14,11 @@ import { IdentityVerificationResult } from '../types.js';
 import { readBootId, readStartTime, getGroupMembers } from './process-facts.js';
 import { ProcessSampler } from './sampler.js';
 import { detectAvailableConfinementDrivers } from '../confinement/detector.js';
+
+/** execPath + args 的 sha256；JSON 编码保证参数边界（空格、冒号）不会造成碰撞。 */
+function computeCommandFingerprint(execPath: string, args: string[]): string {
+  return createHash('sha256').update(JSON.stringify([execPath, ...args])).digest('hex');
+}
 
 function resolveExecutable(bin: string, envPath?: string): string | null {
   if (bin.includes(path.sep)) {
@@ -141,13 +147,18 @@ export class NodePlatformDriver implements PlatformDriver {
         hasSpawned = true;
         const pid = child.pid!;
         const startTimeMonotonic = Number(process.hrtime.bigint() / 1000n);
+        const spawnTime = new Date().toISOString();
         const bootId = await this.cachedBootId;
+        // 门管道模式下子进程此刻阻塞在门上，exec 不改变创建时间，这里读到的就是目标程序的 OS 创建时间。
+        // 非门控模式下短命进程可能已被回收而读不到，此时如实缺省，跨重启核验会返回 cannot_determine。
+        const osStartTimeMs = await readStartTime(pid);
         const identity: ProcessIdentity = {
           pid,
           pgid: pid,
           startTimeMonotonic,
-          spawnTime: new Date().toISOString(),
-          commandFingerprint: `${command.execPath}:${command.args.join(' ')}`,
+          spawnTime,
+          osStartTime: osStartTimeMs !== null ? new Date(osStartTimeMs).toISOString() : undefined,
+          commandFingerprint: computeCommandFingerprint(command.execPath, command.args),
           bootId: bootId ?? undefined,
         };
 
@@ -163,13 +174,11 @@ export class NodePlatformDriver implements PlatformDriver {
                 this.stopSharedPoller();
               }
             };
+            // 退出事实只来自真实的 close。spawn 之后的 'error'（kill / IPC 失败等）不代表进程已退出，
+            // 进程结束时 Node 仍会发出 exit/close，因此这里不结清、也不编造 exitCode。
             child.on('close', (exitCode, signal) => {
               cleanup();
               exitResolve({ exitCode, signal });
-            });
-            child.on('error', () => {
-              cleanup();
-              exitResolve({ exitCode: 1, signal: null });
             });
           }
         );
@@ -184,7 +193,6 @@ export class NodePlatformDriver implements PlatformDriver {
               rootResolve({ exitCode, signal });
             };
             child.on('exit', (exitCode, signal) => settle(exitCode, signal));
-            child.on('error', () => settle(1, null));
             child.on('close', (exitCode, signal) => settle(exitCode, signal));
           }
         );
@@ -291,39 +299,20 @@ export class NodePlatformDriver implements PlatformDriver {
       return 'cannot_determine';
     }
 
-    // 4. 跨崩溃/重启进程恢复：查 OS 进程创建时间与命令行指纹 (P0-1)
-    const snapshot = await this.sampler.getSnapshot(100);
-    const proc = snapshot.get(identity.pid);
-
-    // 进程在进程表中已不存在，或处于僵尸态（<defunct> / Z），直接判定为死亡
-    if (!proc || proc.state === 'Z' || proc.command.includes('<defunct>')) {
-      return 'not_original_process';
+    // 4. 跨崩溃/重启核验（§4.1.1）：唯一可信证据是 spawn 时登记的 OS 创建时间。
+    //    宿主记录的 spawnTime 与「命令行包含 execPath」都不是身份证据；commandFingerprint
+    //    也不参与判定——shebang 脚本（npm、pnpm、python 脚本）与改写 argv 的程序会让 OS 可见命令行
+    //    与登记的 argv 不一致，拿它做否定会把真正的原进程判成陌生进程。
+    const recordedStartMs = identity.osStartTime ? Date.parse(identity.osStartTime) : NaN;
+    if (isNaN(recordedStartMs)) {
+      return 'cannot_determine';
     }
-
-    // 若命令行指纹不匹配，直接否定为 not_original_process
-    if (identity.commandFingerprint) {
-      const baseExec = identity.commandFingerprint.split(':')[0];
-      if (!proc.command.includes(baseExec)) {
-        return 'not_original_process';
-      }
+    const actualStartMs = await readStartTime(identity.pid);
+    if (actualStartMs === null) {
+      return 'cannot_determine';
     }
-
-    // 若登记了 spawnTime，核对 OS 实际启动时间
-    const actualStartTimeMs = await readStartTime(identity.pid);
-    if (identity.spawnTime && actualStartTimeMs !== null) {
-      const expectedTimeMs = new Date(identity.spawnTime).getTime();
-      if (!isNaN(expectedTimeMs)) {
-        // macOS ps lstart 为 1 秒精度，允许 3 秒宽限
-        if (Math.abs(actualStartTimeMs - expectedTimeMs) > 3000) {
-          return 'not_original_process';
-        }
-        if (proc && identity.commandFingerprint && proc.command.includes(identity.commandFingerprint.split(':')[0])) {
-          return 'is_original_process';
-        }
-      }
-    }
-
-    return 'cannot_determine';
+    // 同一来源（procfs 或 ps lstart）对同一进程的读数是确定的，按原值比对，不设宽限。
+    return actualStartMs === recordedStartMs ? 'is_original_process' : 'not_original_process';
   }
 
   public async terminate(

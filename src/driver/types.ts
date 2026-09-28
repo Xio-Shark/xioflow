@@ -31,8 +31,13 @@ export interface ProcessIdentity {
   pid: number;
   pgid?: number;
   startTimeMonotonic?: number; // 纳秒/微秒级时钟
-  spawnTime: string;
-  commandFingerprint?: string;
+  spawnTime: string;           // 宿主记录的 ISO8601 时刻，仅供展示，不作为身份证据（§4.1.1）
+  /**
+   * spawn 时从 OS 读取的进程创建时间（ISO8601，毫秒精度按平台来源而定）。
+   * 跨重启身份核验的唯一肯定证据；读不到时缺省，核验如实返回 cannot_determine。
+   */
+  osStartTime?: string;
+  commandFingerprint?: string; // sha256(JSON.stringify([execPath, ...args]))，仅作审计事实，不参与身份判定
   bootId?: string;             // 宿主启动标识（Linux /proc/sys/kernel/random/boot_id 等），跨重启判等；0.2.0 起在 spawn 登记时写入
 }
 

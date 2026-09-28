@@ -92,6 +92,8 @@ export interface Operation {
     pgid?: number;
     startTimeMonotonic?: number;
     spawnTime: string;
+    /** spawn 时读取的 OS 进程创建时间，跨重启身份核验的唯一肯定证据（§4.1.1）。 */
+    osStartTime?: string;
     commandFingerprint?: string;
     bootId?: string;
   };
@@ -511,8 +513,13 @@ export interface SnapshotDriver {
     }
   ): Promise<SnapshotRef>;
   restore(snapshot: SnapshotRef, options?: { force?: boolean }): Promise<{ unrestoredPaths: string[] }>;
-  fingerprint(roots: string[]): Promise<string>;
-  prune(snapshotIds: string[]): Promise<void>;
+  /**
+   * 计算 roots 当前内容的树指纹。
+   * 回滚核验时应传入 `against: snapshot`：以快照树为基线、按快照的 coverage 口径只重算 roots，
+   * 这样 roots 之外的变化（例如 HEAD 前进）和被忽略文件不会让核验失真。
+   */
+  fingerprint(roots: string[], options?: { against?: SnapshotRef }): Promise<string>;
+  prune(snapshotIds: string[], options?: { repoRoot?: string }): Promise<void>;
   materialize?(snapshotId: string, newRoot: string, options?: { repoRoot?: string }): Promise<{ worktreePath: string }>;
   dematerialize?(newRoot: string, options?: { force?: boolean; repoRoot?: string }): Promise<void>;
 }

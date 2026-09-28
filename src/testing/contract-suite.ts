@@ -522,6 +522,9 @@ export function defineContractTestSuite(
         } catch {}
         expect(escapedAliveBefore).toBe(true);
 
+        // 等待采样轮询器（每 35ms 周期）至少完成一次后代树捕获
+        await new Promise((r) => setTimeout(r, 200));
+
         // 调用停止流水线：NodePlatformDriver 真实后代树扫描探测到逃逸残留
         const cancelRes = await supervisor.cancelOperation('op-c10-escape', 1000);
 

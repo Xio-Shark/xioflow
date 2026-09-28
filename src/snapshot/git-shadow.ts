@@ -135,7 +135,15 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
           }
         }
         treeSizeBytes = total;
-      } catch {}
+      } catch (sizeErr: any) {
+        // 调用方设了大小上限却无法统计大小时，不能静默跳过上限检查
+        if (options?.maxTreeSizeBytes) {
+          throw new Error(
+            `Cannot enforce maxTreeSizeBytes=${options.maxTreeSizeBytes}: failed to measure snapshot tree size: ${sizeErr?.message ?? String(sizeErr)}`
+          );
+        }
+        treeSizeBytes = undefined;
+      }
 
       if (options?.maxTreeSizeBytes && treeSizeBytes !== undefined && treeSizeBytes > options.maxTreeSizeBytes) {
         throw new Error(
@@ -183,10 +191,11 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
     }
   }
 
-  public async fingerprint(roots: string[]): Promise<string> {
+  public async fingerprint(roots: string[], options?: { against?: SnapshotRef }): Promise<string> {
     if (!roots || roots.length === 0) {
       throw new Error('fingerprint requires at least one root directory');
     }
+    const against = options?.against;
     const realRoots = await Promise.all(roots.map((r) => resolveRealPath(r)));
     const { repoRoot } = await this.assertGitRepo(realRoots[0]);
 
@@ -195,11 +204,27 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
     const env: Record<string, string> = { GIT_INDEX_FILE: indexFile };
 
     try {
-      try {
-        await this.git(repoRoot, ['read-tree', 'HEAD'], env);
-      } catch {}
+      // 与 capture 保持一致：只有"没有 HEAD（空仓库）"才跳过基线；read-tree 本身失败必须暴露，
+      // 否则会得到一个与 capture 口径不同的指纹，回滚核验会给出错误结论
+      if (against) {
+        // 以快照树为基线：roots 之外的条目与快照逐字相同，只有 roots 内的差异会改变指纹
+        await this.git(repoRoot, ['read-tree', against.treeFingerprint], env);
+      } else {
+        const hasHead = await this.git(repoRoot, ['rev-parse', '--verify', 'HEAD'], env).then(
+          () => true,
+          () => false
+        );
+        if (hasHead) {
+          await this.git(repoRoot, ['read-tree', 'HEAD'], env);
+        }
+      }
 
-      const addArgs = ['add', '-A', '--'];
+      const addArgs = ['add', '-A'];
+      if (against?.coverage === 'full_tree') {
+        // 与 capture(includeIgnored: true) 同口径
+        addArgs.push('-f');
+      }
+      addArgs.push('--');
       for (const r of realRoots) {
         const rel = path.relative(repoRoot, r) || '.';
         addArgs.push(rel);
@@ -234,22 +259,32 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
       const treeOrCommit = snapshot.commitHash || snapshot.treeFingerprint;
       await this.git(repoRoot, ['read-tree', treeOrCommit], env);
 
-      // 2. 查出快照中的所有文件路径（相对 repoRoot）
-      const { stdout: snapshotFilesOut } = await this.git(repoRoot, ['ls-tree', '-r', '--name-only', snapshot.treeFingerprint]);
-      const snapshotFiles = new Set(
-        snapshotFilesOut
-          .split('\n')
-          .map((s) => s.trim())
-          .filter(Boolean)
+      // 快照树 = HEAD 基线 + roots 内的工作区改动，roots 之外的条目只是 HEAD 的副本，
+      // 因此所有读取与写回都必须限定在 roots 内，否则会把用户在 roots 之外未提交的改动覆盖回 HEAD。
+      const rootPathspecs = realRoots.map((r) => path.relative(repoRoot, r) || '.');
+      const splitZ = (out: string) => out.split('\0').filter(Boolean);
+
+      // 2. 查出快照中位于 roots 内的文件路径（相对 repoRoot；-z 避免非 ASCII 路径被引号转义）
+      const { stdout: snapshotFilesOut } = await this.git(
+        repoRoot,
+        ['ls-files', '-z', '--', ...rootPathspecs],
+        env
       );
+      const snapshotFileList = splitZ(snapshotFilesOut);
+      const snapshotFiles = new Set(snapshotFileList);
 
       // 3. 查出当前工作区中存在、未被忽略的全部文件（tracked + untracked）
       // 严格尊重 .gitignore，绝不能动被忽略文件（如 .env, node_modules）
-      const { stdout: liveFilesOut } = await this.git(repoRoot, ['ls-files', '--exclude-standard', '-c', '-o']);
-      const liveFiles = liveFilesOut
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean);
+      const { stdout: liveFilesOut } = await this.git(repoRoot, [
+        'ls-files',
+        '-z',
+        '--exclude-standard',
+        '-c',
+        '-o',
+        '--',
+        ...rootPathspecs,
+      ]);
+      const liveFiles = splitZ(liveFilesOut);
 
       // 4. 清理「在工作区中未被忽略、但不在快照中」的文件
       for (const liveRel of liveFiles) {
@@ -267,19 +302,24 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
         }
       }
 
-      // 5. 通过临时 index 检出覆盖工作区文件 (checkout-index -a -f)
-      try {
-        await this.git(repoRoot, ['checkout-index', '-a', '-f'], env);
-      } catch (checkoutErr: any) {
-        const lines = (checkoutErr.message || '').split('\n');
-        for (const line of lines) {
-          const match = line.match(/unable to (?:create|unlink) file '([^']+)'/i);
-          if (match) {
-            unrestoredPaths.push(path.resolve(repoRoot, match[1]));
+      // 5. 通过临时 index 只检出 roots 内的快照文件（分批传参，避免超长 argv）
+      const CHECKOUT_BATCH = 500;
+      for (let i = 0; i < snapshotFileList.length; i += CHECKOUT_BATCH) {
+        const batch = snapshotFileList.slice(i, i + CHECKOUT_BATCH);
+        try {
+          await this.git(repoRoot, ['checkout-index', '-f', '--', ...batch], env);
+        } catch (checkoutErr: any) {
+          const before = unrestoredPaths.length;
+          const lines = (checkoutErr.message || '').split('\n');
+          for (const line of lines) {
+            const match = line.match(/unable to (?:create|unlink|write) file '?([^':]+)'?/i);
+            if (match) {
+              unrestoredPaths.push(path.resolve(repoRoot, match[1].trim()));
+            }
           }
-        }
-        if (unrestoredPaths.length === 0) {
-          throw checkoutErr;
+          if (unrestoredPaths.length === before) {
+            throw checkoutErr;
+          }
         }
       }
 
@@ -291,14 +331,34 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
 
   public async prune(snapshotIds: string[], options?: { repoRoot?: string }): Promise<void> {
     for (const id of snapshotIds) {
+      // 内存映射在宿主重启后为空；此时必须由调用方给出 repoRoot，不能静默跳过让快照 ref 永久残留
       const repoRoot = options?.repoRoot || this.snapshotRepos.get(id);
-      if (repoRoot) {
-        try {
-          await this.git(repoRoot, ['update-ref', '-d', `refs/xioflow/snapshots/${id}`]);
-        } catch {}
+      if (!repoRoot) {
+        throw new Error(
+          `Cannot prune snapshot ${id}: source repository root unknown (pass options.repoRoot, e.g. SnapshotRef.roots[0])`
+        );
+      }
+      const refName = `refs/xioflow/snapshots/${id}`;
+      const { repoRoot: resolvedRoot } = await this.assertGitRepo(repoRoot);
+      // 仓库已确认存在后，只把"ref 本来就不存在"视为已清理；删除失败原样抛出
+      const exists = await this.git(resolvedRoot, ['show-ref', '--verify', '--quiet', refName]).then(
+        () => true,
+        () => false
+      );
+      if (exists) {
+        await this.git(resolvedRoot, ['update-ref', '-d', refName]);
       }
       this.snapshotRepos.delete(id);
     }
+  }
+
+  /**
+   * 从 linked worktree 自身反查所属仓库的 git common dir（不依赖进程内存映射，宿主重启后仍可用）
+   */
+  private async resolveWorktreeCommonDir(worktreePath: string): Promise<string> {
+    const { stdout } = await this.git(worktreePath, ['rev-parse', '--git-common-dir']);
+    const raw = stdout.trim();
+    return path.isAbsolute(raw) ? raw : path.resolve(worktreePath, raw);
   }
 
   public async materialize(
@@ -343,7 +403,9 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
     if (repoRoot) {
       await this.git(repoRoot, args);
     } else {
-      await this.git(path.dirname(realPath), args);
+      // 宿主重启后映射为空：从 worktree 自身反查仓库，而不是猜测父目录是仓库
+      const commonDir = await this.resolveWorktreeCommonDir(realPath);
+      await this.git(path.dirname(realPath), [`--git-dir=${commonDir}`, ...args]);
     }
     this.worktreeRepos.delete(realPath);
     this.worktreeRepos.delete(rawPath);
