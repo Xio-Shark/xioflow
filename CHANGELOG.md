@@ -6,6 +6,8 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-29
+
 ### Added
 - **`ReaperPlatformDriver` and the native `xioflow-reaper` helper** (Linux, macOS; ARCHITECTURE §4.2.1). The helper holds the supervised process tree instead of observing it through `ps(1)` polls:
   - Linux: the helper is a child subreaper (`PR_SET_CHILD_SUBREAPER`), so `setsid` and double-fork escapees are reparented to it. Signals go through `pidfd` after re-checking the start time, and `waitpid` returning `ECHILD` proves the tree is empty (`scope: 'subreaper_tree'`).
