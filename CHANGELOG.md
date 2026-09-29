@@ -6,6 +6,11 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-29
+
+### Fixed
+- **Rollback no longer claims `coverage: 'complete'` while an unconfined operation is still running.** Coverage only looked at operations whose result was recorded after the snapshot, so a process or service instance that was still running (no result yet), or an `indeterminate` one that may still be alive, did not count, even though it could be writing outside the roots at that moment. Such an operation now yields `declared_roots` with `outOfScopeEffects: 'possible'`.
+
 ## [0.5.0] - 2026-09-29
 
 ### Added

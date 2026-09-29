@@ -326,4 +326,56 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
     expect(rollback2.coverage).toBe('declared_roots');
     expect(rollback2.outOfScopeEffects).toBe('possible');
   });
+
+  it('5.3 回滚时仍在运行的不受限 op（尚无结果记录）也会让 coverage 退化为 declared_roots', async () => {
+    const repoDir = path.join(tempDir, 'repo-running');
+    await makeGitRepo(repoDir);
+    ensureTaskAndRun('run-running');
+    const mockDriver: ConfinementDriver = { name: 'mock-confinement', wrap: (command) => command };
+    const cap = domain.issueCapability(
+      { write: [repoDir], exclusive: [`workspace:write:${path.resolve(repoDir)}`] },
+      'tester',
+      60000
+    );
+    const snap = await supervisor.captureSnapshot({ runId: 'run-running', opId: 'snap-running', capabilityId: cap.id });
+    expect(snap.status).toBe('succeeded');
+
+    // Unconfined, no lease, still running at rollback time: it could write anywhere.
+    const started = path.join(tempDir, 'bg-started');
+    const background = supervisor.executeProcess({
+      runId: 'run-running',
+      opId: 'op-background',
+      name: 'unconfined-background',
+      command: {
+        execPath: process.execPath,
+        args: ['-e', `require('fs').writeFileSync(${JSON.stringify(started)}, '1'); setTimeout(() => {}, 60000)`],
+        cwd: tempDir,
+      },
+    });
+    while (!fs.existsSync(started)) await new Promise((r) => setTimeout(r, 10));
+
+    fs.writeFileSync(path.join(repoDir, 'file1.txt'), 'confined change\n');
+    const confined = await supervisor.executeProcess({
+      runId: 'run-running',
+      opId: 'op-confined-running',
+      name: 'confined',
+      capabilityId: cap.id,
+      confinementDriver: mockDriver,
+      command: { execPath: process.execPath, args: ['-e', '0'], cwd: repoDir },
+    });
+    expect(confined.confined).toBe(true);
+
+    const rollback = await supervisor.rollback({
+      runId: 'run-running',
+      opId: 'rollback-running',
+      snapshotId: 'snap-running',
+      capabilityId: cap.id,
+    });
+    expect(rollback.status).toBe('restored');
+    expect(rollback.coverage).toBe('declared_roots');
+    expect(rollback.outOfScopeEffects).toBe('possible');
+
+    await supervisor.cancelOperation('op-background', 200);
+    await background;
+  });
 });

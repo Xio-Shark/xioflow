@@ -146,6 +146,17 @@ function allEffectsConfinedToRoots(
   rollbackOpId: string
 ): boolean {
   const store = domain.getStore();
+  // An operation still running has no result yet, so nothing proves it ran
+  // confined; it may be writing outside the roots right now (long-running
+  // services included).
+  // An indeterminate one may still be alive, whenever it was recorded.
+  const stillRunning = store.getAllOperations(domain.domainId).some((op) =>
+    op.id !== rollbackOpId && op.kind !== 'snapshot' && op.kind !== 'rollback' && (
+      op.status !== 'done'
+      || (op.result?.status === 'indeterminate' && (op.result as { confined?: boolean }).confined !== true)
+    )
+  );
+  if (stillRunning) return false;
   const eventsSince = snapshot.journalSeq !== undefined ? store.getJournalEvents(domain.domainId, snapshot.journalSeq) : [];
   const opResults = eventsSince.filter((e) => e.type === 'OPERATION_RESULT_RECORDED' && e.operationId !== rollbackOpId);
 
