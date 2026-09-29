@@ -33,6 +33,20 @@ export interface ConsumerContext {
   cleanup: () => Promise<void>;
 }
 
+/** 进程是否已真正消失（容许 init / 持有者回收僵尸的短暂延迟）。 */
+async function waitUntilGone(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch (err: any) {
+      if (err.code === 'ESRCH') return true;
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
 function ensureTaskAndRun(domain: ExecutionDomain, taskId: string, runId: string) {
   const store = domain.getStore();
   if (!store.getTask(taskId)) {
@@ -466,7 +480,7 @@ export function defineContractTestSuite(
       await executePromise;
     });
 
-    it('契约 10: 逃逸后代诚实上报，驱动无法确认停止时如实标记 cannot_determine', async () => {
+    it('契约 10: 逃逸后代诚实上报：停止结论与事实一致，无法确认时如实标记 cannot_determine', async () => {
       const { supervisor, domain, tempDir } = ctx;
       ensureTaskAndRun(domain, 'task-c10', 'run-c10');
       const escapedPidFile = path.join(tempDir, 'escaped.pid');
@@ -525,10 +539,19 @@ export function defineContractTestSuite(
         // 等待采样轮询器（每 35ms 周期）至少完成一次后代树捕获
         await new Promise((r) => setTimeout(r, 200));
 
-        // 调用停止流水线：NodePlatformDriver 真实后代树扫描探测到逃逸残留
+        // 调用停止流水线。结论必须与事实一致：
+        // - 能持有整棵树的驱动（如 Linux 子收割者）可以真的停掉逃逸者，此时逃逸者必须确已消失；
+        // - 做不到的驱动必须如实上报 cannot_determine + residualPids，绝不能声称 confirmed_stopped。
         const cancelRes = await supervisor.cancelOperation('op-c10-escape', 1000);
 
-        // 真实上报 stopped: cannot_determine，且 residualPids 包含逃逸孤儿 PID
+        if (cancelRes.stopped === 'confirmed_stopped') {
+          expect(await waitUntilGone(escapedPid, 2000)).toBe(true);
+          const result = await executePromise;
+          expect(result.status).toBe('cancelled');
+          expect(domain.isResourceLocked('res:c10-lock')).toBe(false);
+          return;
+        }
+
         expect(cancelRes.stopped).toBe('cannot_determine');
         expect(cancelRes.residualPids).toBeDefined();
         expect(cancelRes.residualPids).toContain(escapedPid);
@@ -851,7 +874,7 @@ export function defineContractTestSuite(
       expect(throwing.streamCallbackError).toBe('consumer projection failed');
     });
 
-    it('契约 19: 超时 + 逃逸后代持有管道，操作在有界时间内返回 indeterminate，不挂到逃逸进程退出', async () => {
+    it('契约 19: 超时 + 逃逸后代持有管道，操作在有界时间内结清，不挂到逃逸进程退出', async () => {
       const { supervisor, domain, tempDir } = ctx;
       ensureTaskAndRun(domain, 'task-c19', 'run-c19');
       const subPidFile = path.join(tempDir, 'sub-c19.pid');
@@ -883,14 +906,25 @@ export function defineContractTestSuite(
 
       const duration = Date.now() - startedAt;
       expect(duration).toBeLessThan(3500);
-      expect(result.status).toBe('indeterminate');
-      expect(domain.isResourceLocked('res:c19-bounded')).toBe(true);
+      const subPid = fs.existsSync(subPidFile) ? parseInt(fs.readFileSync(subPidFile, 'utf8'), 10) : 0;
+      expect(subPid).toBeGreaterThan(0);
 
-      // 清理逃逸孙进程
-      if (fs.existsSync(subPidFile)) {
+      try {
+        // executeProcess 的声明类型不含 indeterminate，运行时结果可能是它
+        if ((result.status as string) === 'indeterminate') {
+          // 逃逸者未被确认停止：保留租约等待裁决
+          expect(domain.isResourceLocked('res:c19-bounded')).toBe(true);
+        } else {
+          // 驱动确认停掉了整棵树：只有逃逸者确已消失才允许按超时失败结清并释放租约
+          expect(result.status).toBe('failed');
+          expect((result as ProcessOperationResult).terminationReason).toBe('timed_out');
+          expect(await waitUntilGone(subPid, 2000)).toBe(true);
+          expect(domain.isResourceLocked('res:c19-bounded')).toBe(false);
+        }
+      } finally {
+        // 清理逃逸孙进程
         try {
-          const pid = parseInt(fs.readFileSync(subPidFile, 'utf8'), 10);
-          process.kill(pid, 'SIGKILL');
+          process.kill(subPid, 'SIGKILL');
         } catch {}
       }
     }, 15_000);

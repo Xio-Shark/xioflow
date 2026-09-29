@@ -32,7 +32,7 @@ Besides one-shot commands, the kernel supervises long-running services (MCP stdi
 ## Requirements
 
 - Node.js >= 22.13 (`node:sqlite` without a flag). CI covers Node 22.13 and 24 on Ubuntu and macOS. `node:sqlite` is still marked experimental upstream, so Node prints an `ExperimentalWarning`; that is expected.
-- Linux and macOS. Descendant enumeration and group termination use `ps(1)` and POSIX process groups.
+- Linux and macOS. The default driver enumerates descendants with `ps(1)` and terminates POSIX process groups; the optional native reaper holds the whole tree instead (see [Holding the process tree](#holding-the-process-tree)).
 - Snapshots need `git` on `PATH` and a git working tree. Confinement is optional and uses `sandbox-exec` (macOS), `bubblewrap` (Linux) or `srt` when available.
 - Windows is not supported. There the driver reports `processGroupKill: false` and `descendantEnumeration: 'none'` rather than pretending it can contain processes.
 
@@ -127,6 +127,25 @@ To cancel, call `await supervisor.cancelOperation('op-1', graceMs)`. It returns 
 
 > **Note on In-Flight Join and Cancellation**:
 > When an in-flight operation with the same `opId` and fingerprint is joined concurrently, passing an `abortSignal` to the secondary caller only cancels the secondary caller's own wait promise—it never aborts the underlying process or the primary caller's execution. To deliberately terminate the underlying process, explicitly call `supervisor.cancelOperation(opId)`.
+
+## Holding the process tree
+
+`NodePlatformDriver` observes a process tree from the outside, so a descendant that calls `setsid()` and loses its parent can outlive a stop; the kernel then reports `indeterminate` instead of lying. `ReaperPlatformDriver` runs each operation under a small native helper (`xioflow-reaper`, shipped prebuilt in the package) that holds the tree:
+
+```js
+import { ExecutionDomain, ProcessSupervisor, ReaperPlatformDriver } from '@xioflow/kernel';
+
+const supervisor = new ProcessSupervisor(domain, new ReaperPlatformDriver());
+```
+
+| | Linux | macOS |
+| --- | --- | --- |
+| How the tree is held | child subreaper: orphans are reparented to the helper | kqueue `NOTE_FORK`, session membership, µs start times |
+| Stop signals | `pidfd_send_signal` after re-checking the start time | `kill` after re-checking the start time |
+| `confirmed_stopped` means | `waitpid` returned `ECHILD` (`scope: 'subreaper_tree'`) | every tracked process is gone (`scope: 'tracked_tree'`) |
+| Supervisor process dies | helper stops the whole tree | helper stops the whole tree |
+
+`ReaperPlatformDriver.isAvailable()` tells whether this platform's helper is present; the constructor throws rather than falling back to another driver. Build one from source with `node scripts/build-native.mjs`, or point `XIOFLOW_REAPER_PATH` at a binary.
 
 ## Crash recovery
 

@@ -4,6 +4,7 @@ export * from './store/schema.js';
 export * from './store/sqlite.js';
 export * from './driver/types.js';
 export * from './driver/node-driver.js';
+export * from './driver/reaper-driver.js';
 export * from './supervisor/supervisor.js';
 export * from './recovery/engine.js';
 export * from './quick-run.js';

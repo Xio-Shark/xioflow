@@ -318,9 +318,9 @@ Status column: `S<n>` indicates implementation as test #n in the shared conforma
 | 6 | L1 | Unconfirmed stop retains lease: exclusive resources remain locked until termination is verified. | S3 |
 | 7 | L1 | Resource conflicts provide diagnostic holder details; admissions queue in strict FIFO order. | S4 (FIFO ordering: R) |
 | 8 | L1 | Group termination converges reliably: all child and grandchild processes terminate with the group. | S9 |
-| 9 | L1 | Escaped descendants reported honestly: surviving `setsid` processes recorded in `residualPids`; `confirmed_stopped` is rejected. | S10 |
+| 9 | L1 | Escaped descendants reported honestly: a `setsid` process that survives the stop yields `cannot_determine` with `residualPids`, never `confirmed_stopped`; a driver that claims `confirmed_stopped` must have actually removed it. | S10 |
 | 10 | L1 | Descendants holding stdio pipes after group leader exit are reaped; genuine exit codes preserved. | S17 |
-| 11 | L1 | Timeout combined with escaped descendants: operation returns `indeterminate` within bounded time without hanging. | S19 |
+| 11 | L1 | Timeout combined with escaped descendants: the operation settles within bounded time without hanging; `indeterminate` with the lease kept unless the driver confirmed the escapee is gone. | S19 |
 | 12 | L1 | Stop requests for non-existent or already-terminal operations return explicit errors. | S20 |
 | 13 | L1 | Domain concurrency limit: excess operations queue up and release in order; non-resource ops count towards `maxConcurrentOps`. | S14 (non-resource counting: R) |
 | 14 | L1 | Single-shot stdin: fully forwarded and closed; EPIPE handled gracefully without marking spawn as failed. | S16 |

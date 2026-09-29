@@ -1,0 +1,53 @@
+name: Native helper
+
+# Builds xioflow-reaper for every published target. CI calls it on each push so
+# the release matrix is exercised before a tag ever depends on it; the release
+# workflow calls it with `upload: true` and packs the uploaded binaries.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to build (defaults to the triggering ref)'
+        type: string
+        default: ''
+      upload:
+        description: 'Upload each binary as an artifact named xioflow-reaper-<target>'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: reaper (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: linux-x64, os: ubuntu-latest, arch: '' }
+          - { target: linux-arm64, os: ubuntu-24.04-arm, arch: '' }
+          - { target: darwin-arm64, os: macos-latest, arch: '' }
+          - { target: darwin-x64, os: macos-latest, arch: x86_64 }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Build
+        run: node scripts/build-native.mjs ${{ matrix.arch != '' && format('--arch {0}', matrix.arch) || '' }}
+      - name: Check target
+        run: |
+          bin="dist/native/${{ matrix.target }}/xioflow-reaper"
+          file "$bin"
+          test -x "$bin"
+      - if: inputs.upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: xioflow-reaper-${{ matrix.target }}
+          path: dist/native/
+          if-no-files-found: error

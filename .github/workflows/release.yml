@@ -68,8 +68,14 @@ jobs:
             echo "npm publish: disabled — set repository variable NPM_TRUSTED_PUBLISHING_ENABLED=true after configuring the npm Trusted Publisher"
           fi
 
+  native:
+    uses: ./.github/workflows/native.yml
+    with:
+      ref: ${{ inputs.tag || github.ref_name }}
+      upload: true
+
   publish-npm:
-    needs: verify
+    needs: [verify, native]
     if: github.event_name == 'push' && vars.NPM_TRUSTED_PUBLISHING_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -99,6 +105,22 @@ jobs:
           ' "$npm_version"
 
       - run: pnpm install --frozen-lockfile
+      - name: Collect native helpers for every target
+        uses: actions/download-artifact@v4
+        with:
+          pattern: xioflow-reaper-*
+          path: dist/native
+          merge-multiple: true
+      - name: Check native helpers
+        run: |
+          for target in linux-x64 linux-arm64 darwin-arm64 darwin-x64; do
+            bin="dist/native/$target/xioflow-reaper"
+            if [ ! -f "$bin" ]; then
+              echo "::error::missing $bin; a release must ship the reaper for every target"
+              exit 1
+            fi
+            chmod +x "$bin"
+          done
       - name: Publish with provenance
         run: npm publish --provenance --access public
 
@@ -127,7 +149,7 @@ jobs:
           exit 1
 
   github-release:
-    needs: verify
+    needs: [verify, native]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -180,6 +202,22 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Collect native helpers for every target
+        uses: actions/download-artifact@v4
+        with:
+          pattern: xioflow-reaper-*
+          path: dist/native
+          merge-multiple: true
+      - name: Check native helpers
+        run: |
+          for target in linux-x64 linux-arm64 darwin-arm64 darwin-x64; do
+            bin="dist/native/$target/xioflow-reaper"
+            if [ ! -f "$bin" ]; then
+              echo "::error::missing $bin; a release must ship the reaper for every target"
+              exit 1
+            fi
+            chmod +x "$bin"
+          done
 
       - name: Pack tarball and checksums
         run: |

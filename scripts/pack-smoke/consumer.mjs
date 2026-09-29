@@ -15,6 +15,7 @@ import {
   ExecutionDomain,
   NodePlatformDriver,
   ProcessSupervisor,
+  ReaperPlatformDriver,
   RecoveryEngine,
 } from '@xioflow/kernel';
 
@@ -312,6 +313,22 @@ try {
   } else {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
+}
+
+// The native reaper ships inside the package for this platform and holds a whole tree.
+assert.equal(
+  ReaperPlatformDriver.isAvailable(),
+  true,
+  `packaged xioflow-reaper is missing for ${process.platform}-${process.arch}`
+);
+{
+  const reaper = new ReaperPlatformDriver();
+  const handle = await reaper.spawn({ execPath: '/bin/sh', args: ['-c', 'sleep 30 & sleep 30'], cwd: os.tmpdir() });
+  handle.releaseGate();
+  const stop = await reaper.terminate(handle.identity, 200);
+  assert.equal(stop.stopped, 'confirmed_stopped');
+  await handle.onRootExit;
+  ok('packaged reaper holds the tree', `scope=${stop.scope}`);
 }
 
 console.log(`  ${checks} embedder contract checks passed`);

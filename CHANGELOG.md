@@ -6,6 +6,17 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Added
+- **`ReaperPlatformDriver` and the native `xioflow-reaper` helper** (Linux, macOS; ARCHITECTURE §4.2.1). The helper holds the supervised process tree instead of observing it through `ps(1)` polls:
+  - Linux: the helper is a child subreaper (`PR_SET_CHILD_SUBREAPER`), so `setsid` and double-fork escapees are reparented to it. Signals go through `pidfd` after re-checking the start time, and `waitpid` returning `ECHILD` proves the tree is empty (`scope: 'subreaper_tree'`).
+  - macOS: descendants are tracked through kqueue `NOTE_FORK`, the helper's session and microsecond start times (`scope: 'tracked_tree'`); a process that leaves the session and loses its parent chain before it is seen can still escape, which the pipe-holder check keeps catching.
+  - When the supervising process dies (control socket EOF) or the helper is signalled, the helper stops the whole tree before exiting.
+  - The gate replaces the `/bin/sh` springboard. Recovery-time facts (identity, group evidence, metrics) are the same OS facts `NodePlatformDriver` records, so the two drivers can adjudicate each other's identities.
+  - Opt-in for now: `new ProcessSupervisor(domain, new ReaperPlatformDriver())`. `ReaperPlatformDriver.isAvailable()` reports whether this platform's binary ships in the package; the constructor throws instead of silently using another driver. The package carries prebuilt helpers for linux-x64, linux-arm64 (static) and darwin-arm64, darwin-x64; `node scripts/build-native.mjs` builds one locally and `XIOFLOW_REAPER_PATH` overrides the location.
+### Changed
+- `StopProcessResult.scope` adds `'subreaper_tree' | 'tracked_tree'`, and `PlatformCapabilities.descendantEnumeration` adds `'subreaper'`. Exhaustive `switch` statements over these unions need the new members.
+- Contract suite items 10 and 19 (ARCHITECTURE §7.2 #9, #11) check that a stop verdict matches the facts instead of assuming an escaped `setsid` process can never be stopped: `confirmed_stopped` now also requires the escapee to be gone, and `cannot_determine` still requires it in `residualPids` with the lease kept. Drivers that already passed keep passing.
+
 ## [0.4.0] - 2026-09-29
 
 ### Added

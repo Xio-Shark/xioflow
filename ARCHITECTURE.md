@@ -686,6 +686,20 @@ export interface ProcessTreeMetrics {
                                      └── 组空且无逃逸残留 -> stopped: 'confirmed_stopped' -> 推进终态并释放资源租约
 ```
 
+### 4.2.1 原生持有者：reaper helper（`ReaperPlatformDriver`）
+
+上面的流水线在「从外部观察进程树」的驱动上只能做到**诚实**（逃逸即 `cannot_determine`），做不到**完整**。`ReaperPlatformDriver` 把观察改为持有：每个操作由原生 helper（`native/reaper/xioflow-reaper.c`，零依赖 C，随包分发各平台预编译件）启动并全程持有。
+
+- **进程布局**：宿主 → helper（新会话；Linux 上 `PR_SET_CHILD_SUBREAPER`）→ root（独立进程组，阻塞在门上直到宿主登记身份）。门由 helper 的管道实现，取代 `/bin/sh` 跳板；`spawned <pid>` 之后宿主读取 OS 创建时间并登记，再发 `go`。
+- **树的定义与停止**：
+  - Linux：孤儿必然回到 helper 名下，`/proc` 父链扫描即可枚举整棵树；信号经 `pidfd_open` + 启动时间复核后以 `pidfd_send_signal` 投递，杜绝 PID 复用误杀；**`waitpid` 返回 `ECHILD` 即证明树空**（`scope: 'subreaper_tree'`，`descendantEnumeration: 'subreaper'`）。
+  - macOS：无子收割者。helper 以 kqueue `NOTE_FORK` 触发扫描，树 = 父链后代 ∪ 已跟踪进程 ∪ helper 会话成员（双 fork 仍留在会话里），身份为 (pid, 微秒启动时间)。「所有被跟踪进程均已消失」弱于证明，因此 scope 记为 `tracked_tree`；先 `setsid` 再失去父链、且在被看到之前完成的逃逸仍可能漏掉，由 §4.3 的管道持有检测兜底为 `indeterminate`。
+  - 停止阶梯与 §4.2 相同（SIGINT → grace → SIGTERM → SIGKILL），但对象是整棵树而非进程组；树未清空即 `residual <pids>` → `cannot_determine`。
+- **监督进程死亡**：控制通道 EOF（宿主崩溃）或 helper 收到 SIGTERM/SIGINT/SIGHUP 时，helper 先停掉整棵树再退出——无人监督的进程不会比监督者活得久。root 退出后宿主对 helper 取消 ref，剩余后代不阻止宿主退出，宿主退出即触发清场。
+- **与恢复的关系**：跨崩溃核验、按组清场与指标采样沿用与 `NodePlatformDriver` 同源的 OS 事实（procfs / `ps lstart`），两种驱动登记的身份可互相裁决。helper 丢失（例如被 SIGKILL）后驱动退回 OS 事实，不编造退出码：root 的退出事实记为 `{ exitCode: null, signal: null }`。
+- **选择与分发**：当前为显式选用（构造时找不到 helper 直接抛错，不静默换驱动）；`ReaperPlatformDriver.isAvailable()` 供宿主判断。发布件包含 linux-x64 / linux-arm64（静态链接）与 darwin-arm64 / darwin-x64，CI 每次推送都构建全部目标。
+- **未做**：cgroup v2 委派子树（`cgroup.kill`、`memory.max`、`pids.max`）仍是 §4.4 的目标态；subreaper 解决「树完整」，cgroup 解决「硬限额」，二者正交。
+
 ### 4.3 有界输出排空与溢出转储机制 (Spill to Artifacts)
 
 大输出处理遵循“内存封顶、流式落盘、防止管道死锁”原则：
@@ -853,9 +867,9 @@ xiocode 发行版
 | 6 | L1 | 未确认停止保留租约：停止未确认前排他资源不释放 | S3 |
 | 7 | L1 | 资源冲突可诊断，FIFO 排队放行 | S4（FIFO：R） |
 | 8 | L1 | 整组终止可靠收敛：5 个孙进程随整组停止 | S9 |
-| 9 | L1 | 逃逸后代诚实上报：`setsid` 残留进程 ⇒ `residualPids`，禁止 `confirmed_stopped` | S10 |
+| 9 | L1 | 逃逸后代诚实上报：停止后仍存活的 `setsid` 进程 ⇒ `cannot_determine` + `residualPids`，禁止 `confirmed_stopped`；声称 `confirmed_stopped` 时逃逸者必须确已消失 | S10 |
 | 10 | L1 | 根进程退出后仍持有管道的后代被回收，保留真实退出事实 | S17 |
-| 11 | L1 | 超时 + 逃逸后代：操作在有界时间内返回 `indeterminate`，不挂到逃逸进程退出 | S19 |
+| 11 | L1 | 超时 + 逃逸后代：操作在有界时间内结清，不挂到逃逸进程退出；逃逸者未被确认停止时为 `indeterminate` 并保留租约，确认停止时逃逸者必须确已消失 | S19 |
 | 12 | L1 | 停止不存在 / 已终结的操作返回显式错误 | S20 |
 | 13 | L1 | 域级并发上限：超标排队、释放后放行；不申请资源的操作同样计入 `maxConcurrentOps` | S14（无资源计数：R） |
 | 14 | L1 | stdin 一次性管道：完整透传后关闭，EPIPE 不是启动失败 | S16 |

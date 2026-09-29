@@ -45,7 +45,11 @@ export type StopProcessStatus = 'confirmed_stopped' | 'not_stopped' | 'cannot_de
 
 export interface StopProcessResult {
   stopped: StopProcessStatus;       // 是否确认完全停止 (0.2.0 三态化)
-  scope: 'direct_child' | 'process_group' | 'containment_cgroup' | 'unknown';
+  /**
+   * 确认停止的范围。`subreaper_tree`：Linux 子收割者下整棵子树（含 setsid / 双 fork 逃逸者）已空，
+   * 由 waitpid ECHILD 证明；`tracked_tree`：macOS 上所有被跟踪到的后代（后代链、会话成员）均已消失。
+   */
+  scope: 'direct_child' | 'process_group' | 'containment_cgroup' | 'subreaper_tree' | 'tracked_tree' | 'unknown';
   residualPids?: number[];         // 存疑的残留进程 PID
   errorDetails?: string;
 }
@@ -76,7 +80,7 @@ export interface PlatformCapabilities {
   memoryHardLimit: boolean;        // 是否支持 OS 级硬内存限制 (Linux cgroup v2)
   pidsLimit: boolean;              // 是否支持后代进程总数限制
   cpuLimit: boolean;               // 是否支持 CPU 时间硬限制
-  descendantEnumeration: 'full' | 'cgroup' | 'none'; // 后代枚举与逃逸检测能力
+  descendantEnumeration: 'full' | 'cgroup' | 'subreaper' | 'none'; // 后代枚举与逃逸检测能力（subreaper：孤儿必然回到持有者，可证明树空）
   gatedSpawn?: boolean;            // 是否支持门管道受控启动 (0.2.0 P0-3)
   confinement?: string[];          // 支持的写入限制驱动名称列表 (契约 #56)
 }

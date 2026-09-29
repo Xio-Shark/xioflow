@@ -45,6 +45,7 @@ for (const required of [
   'dist/index.d.ts',
   'dist/testing/contract-suite.js',
   'dist/testing/contract-suite.d.ts',
+  `dist/native/${process.platform}-${process.arch}/xioflow-reaper`,
 ]) {
   if (!packed.includes(required)) {
     throw new Error(`tarball is missing ${required}`);

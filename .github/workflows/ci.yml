@@ -31,3 +31,6 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm verify:package
+
+  native:
+    uses: ./.github/workflows/native.yml
