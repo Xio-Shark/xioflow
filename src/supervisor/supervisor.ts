@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { ExecutionDomain } from '../domain.js';
 import { PlatformDriver, StopProcessResult } from '../driver/types.js';
 import {
@@ -29,6 +31,12 @@ import { runProcess, ProcessRunContext } from './process-run.js';
 import * as snapshotOps from './snapshot-ops.js';
 import { rollback } from './rollback.js';
 import {
+  CommitResult,
+  TransactionEffects,
+  WorkspaceTransaction,
+  WorkspaceTransactions,
+} from '../workspace/transactions.js';
+import {
   ActiveOperationState,
   CaptureSnapshotOptions,
   ExecuteProcessOptions,
@@ -44,6 +52,7 @@ export class ProcessSupervisor {
   private serviceSupervisor: ServiceSupervisor;
   private snapshotDriver: SnapshotDriver;
   private confinementDriver?: ConfinementDriver;
+  private transactions?: WorkspaceTransactions;
 
   constructor(
     private readonly domain: ExecutionDomain,
@@ -121,6 +130,61 @@ export class ProcessSupervisor {
    */
   public async pruneSnapshots(snapshotIds: string[], options?: { runId?: string }): Promise<string[]> {
     return snapshotOps.pruneSnapshots(this.snapshotContext, snapshotIds, options);
+  }
+
+  /**
+   * 工作区事务（ARCHITECTURE §3.9）：在主工作区的基线快照上 materialize 出独立 fork，
+   * agent 以 `forkRoot` 为 cwd 工作；commit 时按读写集做乐观并发校验，无冲突才把写集应用回主工作区。
+   */
+  public async beginWorkspaceTransaction(options: {
+    txId: string;
+    runId: string;
+    root: string;
+    forkPath: string;
+  }): Promise<WorkspaceTransaction> {
+    return this.workspaceTransactions().begin(options);
+  }
+
+  public async inspectWorkspaceTransaction(txId: string): Promise<TransactionEffects> {
+    return this.workspaceTransactions().inspect(txId);
+  }
+
+  public async commitWorkspaceTransaction(txId: string): Promise<CommitResult> {
+    return this.workspaceTransactions().commit(txId);
+  }
+
+  public async abortWorkspaceTransaction(txId: string, reason?: string): Promise<void> {
+    return this.workspaceTransactions().abort(txId, reason);
+  }
+
+  private workspaceTransactions(): WorkspaceTransactions {
+    if (this.transactions) return this.transactions;
+    const snapshotDriver = this.snapshotDriver;
+    if (!(snapshotDriver instanceof GitShadowSnapshotDriver)) {
+      throw new Error(`Workspace transactions need the git-shadow snapshot driver (got ${snapshotDriver.name})`);
+    }
+    this.transactions = new WorkspaceTransactions({
+      domain: this.domain,
+      snapshotDriver,
+      captureSnapshot: async (runId, opId, root) => {
+        const res = await this.captureSnapshot({ runId, opId, roots: [root] });
+        if (res.status !== 'succeeded' || !res.snapshot) {
+          throw new Error(`Base snapshot for ${opId} failed: ${res.errorMessage ?? res.status}`);
+        }
+        return res.snapshot;
+      },
+      materialize: async (snapshotId, forkPath) => {
+        await this.materialize(snapshotId, forkPath);
+        // 租约移交：materialize 以独占租约保留 fork（§3.5）；事务接管 fork 后释放它，
+        // fork 内 agent 操作之间的互斥由各自声明的 workspace:write:<fork> 保证。
+        for (const res of new Set([`workspace:write:${path.resolve(forkPath)}`, `workspace:write:${fs.realpathSync(forkPath)}`])) {
+          const owner = this.domain.getResourceOwner(res);
+          if (owner?.startsWith('mat-')) this.domain.internalReleaseResources(owner, [res]);
+        }
+      },
+      dematerialize: (forkPath) => this.dematerialize(forkPath, { force: true }),
+    });
+    return this.transactions;
   }
 
   /**

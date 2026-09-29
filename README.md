@@ -231,6 +231,32 @@ await supervisor.executeProcess({
 
 A capability can be narrowed with `domain.attenuate`, and revoked with `domain.revokeCapability`. Confinement exists so the rollback coverage claim is true. It is not a security boundary.
 
+## Parallel agents: workspace transactions
+
+Locks make parallel agents wait for each other. Workspace transactions let them work at the same time and check for conflicts when they commit, the way optimistic concurrency control works in a database:
+
+```js
+const tx = await supervisor.beginWorkspaceTransaction({
+  txId: 'agent-a-1',
+  runId: 'run-a',
+  root: '/path/to/repo',
+  forkPath: '/tmp/forks/agent-a-1',
+});
+// the agent works in its own fork
+await supervisor.executeProcess({ runId: 'run-a', opId: 'a-edit', name: 'edit', command: { execPath: 'node', args: ['edit.mjs'], cwd: tx.forkRoot } });
+
+const res = await supervisor.commitWorkspaceTransaction('agent-a-1');
+if (res.status === 'conflict') {
+  // e.g. [{ path: 'config.json', kind: 'read_write', otherTxId: 'agent-b-7' }]
+  await supervisor.abortWorkspaceTransaction('agent-a-1');
+}
+```
+
+- **Write set**: the exact per-file diff between the base snapshot and the fork.
+- **Read set**: observed without privileges through access times. Each fork's atimes are reset to its mtimes, so anything read afterwards (file contents or directory listings) shows up. On a `noatime` filesystem the result says `readTracking: 'unobserved'` and `readSet: null`.
+- **Validation**: a commit fails with `write_write` if a transaction committed since this one began wrote the same file, and with `read_write` if it changed something this one read. A listed directory only conflicts when entries were added to it or removed from it. A write that bypassed transactions and went straight to the workspace fails with `external_write`.
+- **Apply**: only a validated transaction is applied to the workspace. `TX_COMMITTING` is journaled first, so a commit interrupted by a crash finishes when it is called again after restart.
+
 ## Design notes
 
 ### Verify your own runtime

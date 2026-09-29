@@ -53,6 +53,31 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
     }
   }
 
+  /**
+   * 两棵树之间逐文件的差异（不做重命名合并）。路径相对仓库根，`-z` 保证非 ASCII 路径原样返回。
+   * status：A 新增、D 删除、M 内容变化、T 类型变化（文件 / 符号链接 / 子模块）。
+   */
+  public async diffTrees(
+    cwd: string,
+    fromTree: string,
+    toTree: string,
+    pathspecs: string[] = []
+  ): Promise<Array<{ status: 'A' | 'D' | 'M' | 'T'; path: string }>> {
+    const args = ['diff-tree', '-r', '-z', '--no-renames', '--name-status', fromTree, toTree];
+    if (pathspecs.length > 0) args.push('--', ...pathspecs);
+    const { stdout } = await this.git(cwd, args);
+    const fields = stdout.split('\0').filter(Boolean);
+    const changes: Array<{ status: 'A' | 'D' | 'M' | 'T'; path: string }> = [];
+    for (let i = 0; i + 1 < fields.length; i += 2) {
+      const status = fields[i];
+      if (status !== 'A' && status !== 'D' && status !== 'M' && status !== 'T') {
+        throw new Error(`git diff-tree reported unexpected status "${status}" for ${fields[i + 1]}`);
+      }
+      changes.push({ status, path: fields[i + 1] });
+    }
+    return changes;
+  }
+
   public async assertGitRepo(cwd: string): Promise<{ repoRoot: string; commonDir: string }> {
     try {
       const realCwd = await resolveRealPath(cwd);
@@ -267,27 +292,12 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
       // 2. 以快照口径算出 roots 当前的树，只处理与快照有差异的路径：
       // 全量 checkout-index 会在 roots=仓库根时重写整个仓库（mtime 全变，触发 watcher / 增量构建）。
       const currentTree = await this.fingerprint(snapshot.roots, { against: snapshot });
-      const { stdout: diffOut } = await this.git(repoRoot, [
-        'diff-tree',
-        '-r',
-        '-z',
-        '--no-renames',
-        '--name-status',
-        currentTree,
-        snapshot.treeFingerprint,
-        '--',
-        ...rootPathspecs,
-      ]);
-      // -z 输出为 status\0path\0 交替；-z 避免非 ASCII 路径被引号转义
-      const diffFields = splitZ(diffOut);
       const toCheckout: string[] = [];
       const toDelete: string[] = [];
-      for (let i = 0; i + 1 < diffFields.length; i += 2) {
-        const status = diffFields[i];
-        const rel = diffFields[i + 1];
+      for (const change of await this.diffTrees(repoRoot, currentTree, snapshot.treeFingerprint, rootPathspecs)) {
         // current → snapshot 方向：D 表示快照里没有、当前有
-        if (status === 'D') toDelete.push(rel);
-        else toCheckout.push(rel);
+        if (change.status === 'D') toDelete.push(change.path);
+        else toCheckout.push(change.path);
       }
 
       // 3. 删除候选只能是未被忽略的文件（tracked + untracked）：

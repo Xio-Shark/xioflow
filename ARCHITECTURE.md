@@ -377,7 +377,7 @@ export type IdentityVerificationResult =
 
 ---
 
-## 3. 八大核心运行协议 (Formal Protocols)
+## 3. 九大核心运行协议 (Formal Protocols)
 
 ### 3.1 启动协议：先登记意图，再执行 (Intent-First Spawn Protocol)
 杜绝“启动了进程却无记录”的崩溃盲区。规范实现采用**两段式受控启动（Gated Spawn）**：子进程在 `exec` 之前阻塞在一道门上，身份落库后才放行，从构造上消除“已执行但无身份记录”的窗口：
@@ -525,6 +525,20 @@ executeProcess(op) 准入与重放判定表：
   - 内核提供最小声明式规格：`restart: 'never' | { policy: 'on-failure', maxRestarts: number, backoffMs: number }`；
   - 发生非预期退出时，若满足策略，内核登记新实例 op，写入 `SERVICE_RESTARTED` 并按退避延迟拉起；超过 `maxRestarts` 上限则停止拉起，service 终态标记为 `failed`；
 - **宿主崩溃与清场**：宿主重启后，恢复引擎将所有 service 实例与普通 op 同等核验身份并清场终止，**恢复引擎绝不自动拉起 service**；是否重新启动由新宿主进程显式决策。
+
+### 3.9 工作区事务协议：并行 agent 的乐观并发控制
+多个 agent 同时改同一个工作区时，锁（§3.1 的 `workspace:write` 租约）只能让它们排队；工作区事务让它们**并行工作、提交时校验**，把数据库的 OCC（乐观并发控制，后向校验）搬到文件系统上：
+- **begin**：对事务根目录拍基线快照（§3.5），materialize 出独立 fork；fork 的独占租约移交给事务，agent 在 fork 内执行任意操作，互斥靠各自声明的 `workspace:write:<fork>`。写 `TX_BEGUN`，其 journal seq 即事务的开始点。
+- **读集**（无特权观测）：fork 建好后把每个条目的 atime 归一到 mtime，此后的读取（读文件内容、列目录）会让 atime 越过 mtime；只 stat 不改变 atime，所以采集本身不污染证据，且必须先于任何 git 读取完成。以 noatime 挂载的文件系统用探针实测后如实声明 `readTracking: 'unobserved'`、`readSet: null`，不假装知道。
+- **写集**：基线快照树 → fork 当前树的逐文件差异（`A / M / D / T`），与快照同一口径，精确且与观测方式无关。
+- **后向校验**（commit 时）：
+  - 本事务开始后提交的每个事务的写集，与本事务的写集相交 ⇒ `write_write`；与读集相交 ⇒ `read_write`（本事务依据的内容已过时）；
+  - 读集中的目录（`dir/`）只和「在该目录下直接新增或删除条目」冲突——列目录看到的是条目集合，内容修改不改变它；
+  - 主工作区自基线以来、未被已提交事务解释的改动（绕过事务的直接写入）同样参与校验 ⇒ `external_write`；
+  - 同一域只有一个 owner，校验与应用在进程内串行化，保证相对其他提交是原子的。
+- **应用**：持主工作区的 `workspace:write` 租约，先写 `TX_COMMITTING`（带写集，意图先行），再把写集原样落到主工作区（保留可执行位与符号链接，拒绝经符号链接父目录写出事务根），最后写 `TX_COMMITTED` 并回收 fork。应用途中崩溃：fork 就是重做日志，重启后再次 commit 从 journal 重建事务并幂等重放应用，不重新校验。
+- **冲突即终止**：校验失败写 `TX_CONFLICTED`，主工作区不变，fork 保留供查看；宿主只能 abort 并从当前工作区重新开始（重放 / rebase 属于宿主策略，不在内核内）。
+- **边界**：只观测 fork 内的读取；fork 由快照树检出，不含被忽略的文件（如 `node_modules`）。
 
 ---
 
