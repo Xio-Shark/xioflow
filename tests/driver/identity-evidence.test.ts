@@ -97,6 +97,35 @@ describe.skipIf(process.platform === 'win32')('身份核验证据链 §4.1.1', (
     expect(verification).toBe('not_original_process');
   });
 
+  it('[问题 3c] 进程在核验途中退出（存活检查通过、读创建时间时已被回收）：判非原进程，而不是无法判定', async () => {
+    const child = spawn(process.execPath, ['-e', '0'], { stdio: 'ignore' });
+    const pid = child.pid!;
+    const recordedStart = await readStartTime(pid);
+    await new Promise((resolve) => child.once('exit', resolve));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const driver = new NodePlatformDriver();
+    // 竞争窗口：第一次存活检查时进程还在，之后才退出
+    const realIsPidAlive = (driver as any).isPidAlive.bind(driver);
+    let firstCall = true;
+    (driver as any).isPidAlive = (target: number) => {
+      if (firstCall && target === pid) {
+        firstCall = false;
+        return true;
+      }
+      return realIsPidAlive(target);
+    };
+
+    const verification = await driver.verifyIdentity({
+      pid,
+      pgid: pid,
+      spawnTime: new Date().toISOString(),
+      osStartTime: new Date(recordedStart ?? Date.now()).toISOString(),
+      bootId: (await driver.readBootId()) ?? undefined,
+    });
+    expect(verification).toBe('not_original_process');
+  });
+
   it('[问题 3b] spawn 时登记 osStartTime；跨驱动核验只看 OS 创建时间，宿主 spawnTime 不参与判定', async () => {
     const driverA = new NodePlatformDriver();
     const handle = await spawnManaged(driverA, ['-e', LONG_RUNNING]);

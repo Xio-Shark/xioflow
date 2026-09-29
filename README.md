@@ -243,7 +243,7 @@ defineContractTestSuite('My Agent Runtime', async () => ({
 
 ## Status
 
-0.3.0 on npm, pre-1.0: the API may change. Services, snapshots/rollback/forks, capabilities and confinement are on `main` and not yet released (see [`CHANGELOG.md`](./CHANGELOG.md) → Unreleased). Not implemented yet: Linux cgroup v2 backend (hard memory/CPU/PID enforcement), enforced domain-wide memory budgets, artifact retrieval helpers, daemon mode and non-TypeScript bindings. Remaining gaps are tracked in [`ROADMAP.md`](./ROADMAP.md).
+0.4.0 on npm (services, snapshots/rollback/forks, capabilities and confinement; see [`CHANGELOG.md`](./CHANGELOG.md)), pre-1.0: the API may change. Not implemented yet: Linux cgroup v2 backend (hard memory/CPU/PID enforcement), enforced domain-wide memory budgets, artifact retrieval helpers, daemon mode and non-TypeScript bindings. Remaining gaps are tracked in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Releasing
 

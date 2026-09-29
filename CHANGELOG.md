@@ -6,7 +6,10 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-29
+
 ### Added
+- **`supervisor.pruneSnapshots(ids)`**: removes a snapshot's private ref and store record and journals `SNAPSHOT_PRUNED`, so hosts can apply a retention policy (for example keep only the session baseline and the current turn) instead of accumulating `refs/xioflow/snapshots/*` forever. Unknown ids are skipped; a driver failure throws and keeps the record for a retry.
 - **Long-Running Service Supervision (`supervisor.startService`, ARCHITECTURE §3.8, Contracts #50–#52)**:
   - Added `ServiceSupervisor` managing long-running service processes (e.g. MCP stdio servers, dev servers).
   - Each service instance is a managed kernel operation (`opId = <serviceId>#<instanceIndex>`) registered in SQLite store with `kind: 'service'`.
@@ -35,10 +38,15 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 - **Shared Contract Suite Expansion (32 -> 44 items)**:
   - Promoted contracts #50–#52 (services) and #28–#32, #53–#56 (snapshot, rollback, fork, capability, confinement) into `@xioflow/kernel/testing`.
 ### Changed
+- `GitShadowSnapshotDriver.restore` only rewrites paths that differ from the snapshot. It used to `checkout-index -f` every file under the roots, so rolling back a repository root rewrote the whole tree and bumped every mtime (file watchers and incremental builds treated it as a full change).
+- `DuplicateOperationError` stays exported as the base class of `OperationIdConflictError` for one more minor; its removal moves to 0.5.0.
 - `SnapshotDriver.fingerprint(roots, { against })`: rollback verification now fingerprints the roots on top of the snapshot's own tree and with the snapshot's coverage, so HEAD moving or files changing outside the roots no longer make a correct rollback report `failed`, and `full_tree` snapshots can verify at all.
 - `SnapshotDriver.prune(ids, { repoRoot })` is part of the interface; the git-shadow driver throws when it cannot locate the repository instead of silently keeping the ref.
 - `quickRun` no longer swallows errors from converging the Run it created (for example when the owner was fenced); the error reaches the caller instead of leaving the Run stuck at `running`.
 ### Fixed
+- **An unrelated waiter blocked every non-waiting request.** `allocateResourcesWithWait` refused any request with `maxWaitMs <= 0` while the wait queue was non-empty, even one that asked for no resources or for resources nobody was waiting on, and reported it as `domain:resource` held by `unknown`. FIFO fairness now applies only to requests that overlap a queued waiter's resources (the rule `processWaitQueue` already used), and a conflict with a queued waiter names that waiter.
+- **Recovery isolated a crashed owner's operation as indeterminate when its leader exited during verification.** `verifyIdentity` saw the pid alive, then could not read its creation time because the process had been reaped in between, and answered `cannot_determine`; the operation kept its lease until a human adjudicated it. An unreadable creation time now re-checks liveness first: a process that is gone is `not_original_process`, and recovery continues with the process-group evidence checks.
+- **`SERVICE_STARTED` wrote the service's env values, argument values and stdin into the journal** (credential exposure on disk). MCP servers commonly receive tokens that way. The journal now records only `execPath`, `cwd`, the argument count, the env key names and whether stdin was set; `inputFingerprint` still identifies the exact command.
 - **Rollback overwrote uncommitted work outside the snapshot roots** (data loss). `GitShadowSnapshotDriver.restore` ran `checkout-index -a`, which rewrote every file in the repository to its HEAD version while reporting `unrestoredPaths: []`. Restore, deletion and fingerprinting are now limited to the declared roots, and paths are read with `-z` so non-ASCII file names are handled.
 - **False `succeeded` when an unobserved escaped process kept the output pipes open**. If the driver confirmed the process group stopped but stdout/stderr never closed, the result was `succeeded` with `residualProcessesReaped: true`. It is now `indeterminate` and the leases are kept. This was the macOS / Node 22.13 CI failure.
 - **Service readiness timeout leaked the process**: the service was marked `failed` before calling the stop pipeline, which then returned early, so the process kept running and `stop()` never resolved. The timeout now stops the instance and journals `SERVICE_FAILED { reason: 'readiness_timeout' }`.

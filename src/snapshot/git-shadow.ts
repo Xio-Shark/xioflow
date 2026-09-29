@@ -264,48 +264,67 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
       const rootPathspecs = realRoots.map((r) => path.relative(repoRoot, r) || '.');
       const splitZ = (out: string) => out.split('\0').filter(Boolean);
 
-      // 2. 查出快照中位于 roots 内的文件路径（相对 repoRoot；-z 避免非 ASCII 路径被引号转义）
-      const { stdout: snapshotFilesOut } = await this.git(
-        repoRoot,
-        ['ls-files', '-z', '--', ...rootPathspecs],
-        env
-      );
-      const snapshotFileList = splitZ(snapshotFilesOut);
-      const snapshotFiles = new Set(snapshotFileList);
-
-      // 3. 查出当前工作区中存在、未被忽略的全部文件（tracked + untracked）
-      // 严格尊重 .gitignore，绝不能动被忽略文件（如 .env, node_modules）
-      const { stdout: liveFilesOut } = await this.git(repoRoot, [
-        'ls-files',
+      // 2. 以快照口径算出 roots 当前的树，只处理与快照有差异的路径：
+      // 全量 checkout-index 会在 roots=仓库根时重写整个仓库（mtime 全变，触发 watcher / 增量构建）。
+      const currentTree = await this.fingerprint(snapshot.roots, { against: snapshot });
+      const { stdout: diffOut } = await this.git(repoRoot, [
+        'diff-tree',
+        '-r',
         '-z',
-        '--exclude-standard',
-        '-c',
-        '-o',
+        '--no-renames',
+        '--name-status',
+        currentTree,
+        snapshot.treeFingerprint,
         '--',
         ...rootPathspecs,
       ]);
-      const liveFiles = splitZ(liveFilesOut);
+      // -z 输出为 status\0path\0 交替；-z 避免非 ASCII 路径被引号转义
+      const diffFields = splitZ(diffOut);
+      const toCheckout: string[] = [];
+      const toDelete: string[] = [];
+      for (let i = 0; i + 1 < diffFields.length; i += 2) {
+        const status = diffFields[i];
+        const rel = diffFields[i + 1];
+        // current → snapshot 方向：D 表示快照里没有、当前有
+        if (status === 'D') toDelete.push(rel);
+        else toCheckout.push(rel);
+      }
+
+      // 3. 删除候选只能是未被忽略的文件（tracked + untracked）：
+      // 严格尊重 .gitignore，绝不能动被忽略文件（如 .env, node_modules），full_tree 快照也一样
+      let deletable = toDelete;
+      if (toDelete.length > 0 && snapshot.coverage === 'full_tree') {
+        const { stdout: liveFilesOut } = await this.git(repoRoot, [
+          'ls-files',
+          '-z',
+          '--exclude-standard',
+          '-c',
+          '-o',
+          '--',
+          ...rootPathspecs,
+        ]);
+        const liveFiles = new Set(splitZ(liveFilesOut));
+        deletable = toDelete.filter((rel) => liveFiles.has(rel));
+      }
 
       // 4. 清理「在工作区中未被忽略、但不在快照中」的文件
-      for (const liveRel of liveFiles) {
-        if (!snapshotFiles.has(liveRel)) {
-          const absPath = path.resolve(repoRoot, liveRel);
-          const inScope = realRoots.some((root) => absPath === root || absPath.startsWith(root + path.sep));
-          if (inScope) {
-            try {
-              await fs.promises.access(absPath, fs.constants.W_OK);
-              await fs.promises.unlink(absPath);
-            } catch {
-              unrestoredPaths.push(absPath);
-            }
+      for (const liveRel of deletable) {
+        const absPath = path.resolve(repoRoot, liveRel);
+        const inScope = realRoots.some((root) => absPath === root || absPath.startsWith(root + path.sep));
+        if (inScope) {
+          try {
+            await fs.promises.access(absPath, fs.constants.W_OK);
+            await fs.promises.unlink(absPath);
+          } catch {
+            unrestoredPaths.push(absPath);
           }
         }
       }
 
-      // 5. 通过临时 index 只检出 roots 内的快照文件（分批传参，避免超长 argv）
+      // 5. 通过临时 index 只检出与快照有差异的文件（分批传参，避免超长 argv）
       const CHECKOUT_BATCH = 500;
-      for (let i = 0; i < snapshotFileList.length; i += CHECKOUT_BATCH) {
-        const batch = snapshotFileList.slice(i, i + CHECKOUT_BATCH);
+      for (let i = 0; i < toCheckout.length; i += CHECKOUT_BATCH) {
+        const batch = toCheckout.slice(i, i + CHECKOUT_BATCH);
         try {
           await this.git(repoRoot, ['checkout-index', '-f', '--', ...batch], env);
         } catch (checkoutErr: any) {

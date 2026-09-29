@@ -198,6 +198,29 @@ describe('GitShadowSnapshotDriver (Step 1 & Step 3 & Step 5)', () => {
     expect(fp).toBe(snapshot.treeFingerprint);
   });
 
+  it('1.4d [回归保护] restore 只重写与快照有差异的文件，未改动文件的 mtime 保持不变', async () => {
+    const repoDir = await makeRepo();
+    fs.writeFileSync(path.join(repoDir, 'stable.txt'), 'stable\n');
+    fs.writeFileSync(path.join(repoDir, 'changed.txt'), 'v1\n');
+    fs.writeFileSync(path.join(repoDir, 'removed.txt'), 'will be deleted by agent\n');
+    await git(repoDir, ['add', '.']);
+    await git(repoDir, ['commit', '-m', 'files']);
+
+    const snapshot = await driver.capture([repoDir]);
+    const past = new Date(Date.now() - 60_000);
+    fs.utimesSync(path.join(repoDir, 'stable.txt'), past, past);
+    const stableMtime = fs.statSync(path.join(repoDir, 'stable.txt')).mtimeMs;
+
+    fs.writeFileSync(path.join(repoDir, 'changed.txt'), 'v2\n');
+    fs.rmSync(path.join(repoDir, 'removed.txt'));
+
+    const res = await driver.restore(snapshot);
+    expect(res.unrestoredPaths).toHaveLength(0);
+    expect(fs.readFileSync(path.join(repoDir, 'changed.txt'), 'utf8')).toBe('v1\n');
+    expect(fs.readFileSync(path.join(repoDir, 'removed.txt'), 'utf8')).toBe('will be deleted by agent\n');
+    expect(fs.statSync(path.join(repoDir, 'stable.txt')).mtimeMs).toBe(stableMtime);
+  });
+
   it('1.4c [回归保护] includeIgnored 快照回滚后，同口径指纹核验一致', async () => {
     const repoDir = await makeRepo();
     fs.writeFileSync(path.join(repoDir, 'cache.ignored'), 'v1\n');

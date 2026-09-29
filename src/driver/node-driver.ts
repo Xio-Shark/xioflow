@@ -309,6 +309,11 @@ export class NodePlatformDriver implements PlatformDriver {
     }
     const actualStartMs = await readStartTime(identity.pid);
     if (actualStartMs === null) {
+      // 读不到创建时间最常见的原因是进程恰好在核验途中退出并被回收（步骤 1 与此处之间的竞争）。
+      // 先复核存活：进程已不存在就是"不是原进程在运行"，交给恢复的进程组证据核验；仍存活才是真的无法判定。
+      if (!this.isPidAlive(identity.pid) || (await this.sampler.isZombie(identity.pid))) {
+        return 'not_original_process';
+      }
       return 'cannot_determine';
     }
     // 同一来源（procfs 或 ps lstart）对同一进程的读数是确定的，按原值比对，不设宽限。

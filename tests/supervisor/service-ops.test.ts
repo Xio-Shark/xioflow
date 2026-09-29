@@ -177,6 +177,33 @@ describe('内核长驻 service op: Step 2-4 startService, readiness 与 restart'
     expect(stoppedEvt).toBeDefined();
   });
 
+  it('2.1b [回归保护] SERVICE_STARTED 不把 env 值 / 参数值 / stdin 写进 journal', async () => {
+    const secret = 'sk-live-should-never-hit-disk';
+    const handle = await supervisor.startService({
+      serviceId: 'mcp-secret',
+      runId,
+      command: {
+        execPath: process.execPath,
+        args: ['-e', 'setInterval(() => {}, 1000)', '--api-key', secret],
+        cwd: tempDir,
+        envWhiteList: { API_TOKEN: secret, PATH: process.env.PATH ?? '' },
+        inheritEnv: false,
+      },
+      readiness: 'spawned',
+    });
+    await handle.ready;
+    await handle.stop(500);
+
+    const events = domain.getStore().getJournalEvents(domain.domainId);
+    expect(JSON.stringify(events)).not.toContain(secret);
+    const started = events.find((e: any) => e.type === 'SERVICE_STARTED' && e.payload?.serviceId === 'mcp-secret');
+    expect((started!.payload as any).spec.command).toMatchObject({
+      execPath: process.execPath,
+      argCount: 4,
+      envKeys: ['API_TOKEN', 'PATH'],
+    });
+  });
+
   it('2.2 stdout 直通消费：调用方实时接收多行输出且内核不在内存保留无界输出', async () => {
     const script = `
       for (let i = 0; i < 50; i++) {

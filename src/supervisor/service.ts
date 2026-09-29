@@ -198,7 +198,7 @@ export class ServiceSupervisor {
           opId: state.currentOpId,
           spec: {
             serviceId: state.spec.serviceId,
-            command: state.spec.command,
+            command: journalSafeCommand(state.spec.command),
             restart: state.spec.restart,
             readiness: state.spec.readiness,
           },
@@ -658,4 +658,20 @@ export class ServiceSupervisor {
     };
     return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
   }
+}
+
+/**
+ * The journal is an audit record on disk: env values, argument values and
+ * stdin can carry credentials (`--api-key …`, `GITHUB_TOKEN=…`), so only their
+ * shape is kept. `inputFingerprint` still identifies the exact command.
+ */
+function journalSafeCommand(command: ServiceSpec['command']): Record<string, unknown> {
+  return {
+    execPath: command.execPath,
+    cwd: command.cwd,
+    argCount: command.args.length,
+    envKeys: command.envWhiteList ? Object.keys(command.envWhiteList).sort() : undefined,
+    inheritEnv: command.inheritEnv,
+    hasStdin: command.stdin !== undefined,
+  };
 }

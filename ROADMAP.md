@@ -81,7 +81,7 @@ xiocode 默认走内核路径，下列缺陷此刻就在用户机器上发生。
 | N8 | 在飞 opId 重复提交：原操作的排他租约被释放，第三方随即并发进入同一资源，原操作变得不可取消 | 实测 | README Guarantees、§0.2 裁决 2 | 入口显式拒绝（`DuplicateOperationError`），原操作不受影响；0.3.0 放宽为幂等重放 | #40 | B2 |
 
 非代码漂移（本次文档修订已处理）：CHANGELOG 把共享套件写成 19 项（实际 18 项，僵尸用例在仓内测试）；ARCHITECTURE 旧 §6 标题“十五项”与正文“18 项”矛盾且列出了未实现的 cgroup 条目。
-xiocode 侧待办：`kernel-adapter.ts` 头注释仍写“内核不转发 onOutput”，与已使用的 `onStreamChunk` 不符。
+xiocode 侧待办（已关闭，2026-09-29）：`kernel-adapter.ts` 已由 `kernel-session.ts` / `kernel-result.ts` 取代，`onOutput` 经 `onStreamChunk` 转发的描述已随之更正。
 
 ### 2.3 版本策略
 - `0.1.5`：只包含 `main` 上已有的修复，完成 §2.1 配置后立即经 Trusted Publishing 发布。
@@ -132,7 +132,7 @@ xiocode 侧待办：`kernel-adapter.ts` 头注释仍写“内核不转发 onOutp
 
 ### 4.2 迁移与兼容
 - Rust 核心打开 0.1.x 的 `domain.db` 时按 §1.2 迁移，并能裁决其中遗留的崩溃现场。
-- 内置 supervisor 回退路径与逃生开关已在 xiocode 2.0.0（基于 0.2.0 实战观察期通过后）彻底删除；P2 专职负责 TS 内核向 Rust 内核绑定的平滑切换，不再承担删 supervisor。
+- 内置 supervisor 回退路径与逃生开关计划在 xiocode 2.0.0 删除（0.4.0 接入后的实战观察期通过为前提）；截至 xiocode 1.x 仍保留 `XIOCODE_PROCESS_KERNEL=0`，且其作用范围已收窄为「只切换进程执行器」——内核会话（Run / 快照 / journal）始终开启。P2 专职负责 TS 内核向 Rust 内核绑定的平滑切换，不再承担删 supervisor。
 - **engines 策略**：最低 Node 22.13（由内核存储依赖 `node:sqlite` 无 flag 运行要求及工具链 `@rolldown/binding` 原生绑定下限 `>=22.12` 共同决定）；此后 engines 跟随支持期内的 Node LTS（Node 20 于 2026-04 已 EOL），不随实现细节（P2 换 napi-rs）回退。
 - `@xioflow/kernel` 1.0 在语义相同处保持 API 形状，不同处在迁移指南中逐条列出。
 
@@ -160,7 +160,7 @@ xiocode 侧待办：`kernel-adapter.ts` 头注释仍写“内核不转发 onOutp
 ### 5.3 出口条件
 - `git-shadow` 在三平台通过 L3（#28–#32、#53–#54）；写入限制与 capability 在 Linux / macOS 可用（#55–#56）。
 - 发布“快照驱动 × 写入限制 × 平台”的覆盖矩阵，每一格都有 conformance 结果支撑。
-- xiocode 基于该原语提供检查点 / 回退功能（发行版侧交互）。
+- xiocode 基于该原语提供检查点 / 回退功能（发行版侧交互）。**已接入（2026-09-29，xiocode 未发版）**：direct 模式的会话基线与每轮检查点即内核快照，回滚结果呈现 coverage / outOfScopeEffects。
 
 ---
 

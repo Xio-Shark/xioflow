@@ -590,6 +590,26 @@ describe('内核 0.2.0 批次 2 (B2): 停止安全与资源收口 [N8, N2, N5, N
       }
     });
 
+    it('5.2b [回归保护] 队列里有等待者时，与之无资源交集的请求直接分配，争同一资源的仍排队并报出前面的等待者', async () => {
+      domain.allocateResources('op-holder-a', ['res:a']);
+      // 等待者需要 [a, b]：a 被占，b 空闲但已被它预订
+      const waiter = domain.allocateResourcesWithWait('op-waiter-ab', ['res:a', 'res:b'], 5_000);
+
+      // 不申请任何资源的只读操作、以及资源不相交的操作，不受无关队头影响
+      await expect(domain.allocateResourcesWithWait('op-reader', [], 0)).resolves.toBeUndefined();
+      await expect(domain.allocateResourcesWithWait('op-other', ['res:c'], 0)).resolves.toBeUndefined();
+
+      // 争用被预订的 b：不愿等待就拒绝，诊断指向排在前面的等待者而不是 unknown
+      await expect(domain.allocateResourcesWithWait('op-late-b', ['res:b'], 0)).rejects.toMatchObject({
+        resourceId: 'res:b',
+        existingOwnerOpId: 'op-waiter-ab',
+      });
+
+      domain.internalReleaseResources('op-holder-a', ['res:a']);
+      await expect(waiter).resolves.toBeUndefined();
+      expect(domain.getResourceOwner('res:b')).toBe('op-waiter-ab');
+    });
+
     it('5.2a [P0-13] 多等待者按登记顺序获资源 (FIFO 严格排队)', async () => {
       const resource = 'workspace:write:/fifo-test';
       const order: string[] = [];

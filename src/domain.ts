@@ -347,6 +347,14 @@ export class ExecutionDomain {
       }
     }
 
+    // 资源当前空闲但已被更早的排队者预订：报出排在前面的那个操作
+    for (const res of resources) {
+      const earlier = this.waitQueue.find((item) => item.operationId !== operationId && item.resources.includes(res));
+      if (earlier) {
+        return new ResourceConflictError(res, earlier.operationId, operationId, waitedDurationMs);
+      }
+    }
+
     if (this.domainBudget && this.domainBudget.maxConcurrentOps) {
       const activeOps = this.getActiveOperationIds();
       if (activeOps.size >= this.domainBudget.maxConcurrentOps && !activeOps.has(operationId)) {
@@ -417,8 +425,12 @@ export class ExecutionDomain {
 
     const startTime = Date.now();
 
-    // 如果队列为空，尝试直接分配
-    if (this.waitQueue.length === 0) {
+    // FIFO 公平只约束争用同一资源的请求（与 processWaitQueue 同一口径）：
+    // 与排队者没有资源交集的新请求直接尝试分配，不被无关的队头阻塞，
+    // 也不会因为"队列非空"被当成冲突拒绝（例如不申请任何资源的只读操作）。
+    const queuedResources = new Set(this.waitQueue.flatMap((item) => item.resources));
+    const overlapsQueue = resources.some((r) => queuedResources.has(r));
+    if (!overlapsQueue) {
       try {
         this.allocateResources(operationId, resources, 0, budget);
         return;
@@ -431,7 +443,7 @@ export class ExecutionDomain {
         }
       }
     } else {
-      // 队列中已有排队者：若不愿等待则直接抛出诊断
+      // 与更早的排队者争用同一资源：若不愿等待则直接抛出诊断
       if (maxWaitMs <= 0) {
         throw this.diagnoseConflict(operationId, resources, 0, budget);
       }

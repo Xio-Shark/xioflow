@@ -649,6 +649,37 @@ export class ProcessSupervisor {
   }
 
   /**
+   * 回收快照：删除驱动侧的私有 ref 与 store 记录，并写 SNAPSHOT_PRUNED。
+   * 宿主按自己的保留策略调用（例如每轮只保留会话基线与当前轮检查点），否则快照 ref 会无限累积。
+   * 未知 id 视为已回收（幂等）；驱动删除失败直接抛出，store 记录保留，便于重试。
+   */
+  public async pruneSnapshots(snapshotIds: string[], options?: { runId?: string }): Promise<string[]> {
+    const store = this.domain.getStore();
+    const pruned: string[] = [];
+    for (const id of snapshotIds) {
+      const snapshot = store.getSnapshot(id);
+      if (!snapshot) continue;
+      store.verifyEpochFencing(this.domain.domainId);
+      const repoRoot = this.snapshotDriver instanceof GitShadowSnapshotDriver
+        ? (await this.snapshotDriver.assertGitRepo(snapshot.roots[0])).repoRoot
+        : undefined;
+      await this.snapshotDriver.prune([id], { repoRoot });
+      store.transaction(() => {
+        store.deleteSnapshot(id);
+        store.recordEventAndTransitionState({
+          domainId: this.domain.domainId,
+          runId: options?.runId,
+          type: 'SNAPSHOT_PRUNED',
+          payload: { snapshotId: id, roots: snapshot.roots },
+          timestamp: new Date().toISOString(),
+        });
+      });
+      pruned.push(id);
+    }
+    return pruned;
+  }
+
+  /**
    * 启动协议：准入检查 -> 先持久化意图 -> 请求驱动启动 -> 登记身份并转 active -> 监督运行 -> 记录结果
    */
   public async executeProcess(options: ExecuteProcessOptions): Promise<ProcessOperationResult> {
