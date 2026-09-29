@@ -360,7 +360,10 @@ static void on_signal(int sig) {
   int saved = errno;
   if (sig != SIGCHLD) stop_requested = 1;
   char c = (char)sig;
-  (void)write(sig_pipe[1], &c, 1);
+  /* Self-pipe wakeup; a full pipe already guarantees a pending wakeup. glibc's
+     warn_unused_result ignores a (void) cast, hence the named variable. */
+  ssize_t ignored = write(sig_pipe[1], &c, 1);
+  (void)ignored;
   errno = saved;
 }
 
