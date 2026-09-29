@@ -1,11 +1,11 @@
 # xioflow 内核与 xiocode 发行版架构与协议规范
 
-> **本文位置**：这是 xioflow 内核仓的权威协议规范。第 0–5、7–8 节为内核协议；第 6 节保留 xiocode 参考发行版的装配说明，用于界定内核边界。分阶段落地路线与当前实现差异见 [`ROADMAP.md`](./ROADMAP.md)。
+> **本文位置**：这是 xioflow 内核仓的权威协议规范。第 0–5、7–8 节为内核协议；第 6 节只界定发行版与内核的边界，发行版内部结构见各发行版仓库。分阶段落地路线与当前实现差异见 [`ROADMAP.md`](./ROADMAP.md)。
 
 > **状态**：目标态协议规范（v2 规划版：Rust 核心 + 快照回滚 + 双部署形态）。标注「目标态」的章节尚未在当前 TypeScript 参考实现（0.5.x）中落地，以 `ROADMAP.md` 的「实现状态对照」为准。  
 > **核心定位**：  
 > - **xioflow**：面向 Agent 框架作者的受监督执行内核。只提供执行原语：执行域管理、受监督进程、资源仲裁、停止确认、工作区快照与回滚、SQLite 事务持久化与崩溃恢复；无 UI 绑定，不绑定特定 Agent Loop、语言或文件格式。  
-> - **xiocode**：基于 xioflow 装配的编程发行版。提供模型接入、编程工具、默认三件套工作流（PRD / Todo / Verification）、安全策略及 CLI/TUI。  
+> - **xiocode**：基于 xioflow 装配的参考发行版，一个完整的本地 coding agent（模型接入、编程工具、权限策略、CLI/TUI），用来展示内核能力；装配方式见 xiocode 仓的 ARCHITECTURE.md。  
 > **仓库分工**：xioflow 作为独立共享内核仓库开发；xiocode 等发行版作为独立仓库，只通过公开协议 / 语言绑定消费内核。
 
 ---
@@ -826,27 +826,15 @@ domainBudget = {
 
 ---
 
-## 6. 发行版装配与 xiocode 编程工作流
+## 6. 发行版装配
 
-xiocode 作为编程发行版（第一个、但不应是唯一的发行版），经 §5 协议 / 语言绑定装配具体工作流组件与编程工具：
+内核仓不描述任何发行版的内部结构。组件、工作流、编辑策略与交互形态由发行版自己的文档负责；本节只规定发行版与内核之间的边界。
 
-```text
-xiocode 发行版
- ├── 默认工作流组件 (ThreePieceWorkflowComponent)
- │    ├── 管理 .xioflow/tasks/<task-id>/ 三件套 Markdown (PRD / Todo / Verification)
- │    └── 维护业务状态机 (Draft -> Ready -> In Progress -> Verified -> Archived)
- ├── 编程乐高积木
- │    ├── ExactReplaceEditStrategy: 精确子串匹配，保留原文件换行符格式，未命中严格抛错
- │    ├── RuleSpecInjector: 扫描 .xioflow/spec/ 规约注入上下文
- │    ├── KernelTools: 将工具请求转为内核 Operation
- │    └── SafetyInterceptor: 高危操作拦截与人工确认
- └── 终端运行环境
-      ├── 极简 Agent Loop (Pi 范式)
-      └── 命令行 CLI (xio task / xio run)
-```
-
-### 换行符严格保真原则
-`ExactReplaceEditStrategy` 在做子串匹配时，内部逻辑可将 CRLF 与 LF 统一解析比对；但**写回文件时必须遵循原文件的原有换行符格式**，严禁在无意中将整个文件的所有行批量变更为另一种换行符，避免污染 Git Diff。
+- **参考发行版 xiocode**：一个完整的本地 coding agent，用来在真实负载下展示内核能力（会话 ↔ 执行域、turn ↔ Run、MCP server ↔ service、检查点 ↔ 快照、`indeterminate` ↔ 裁决出口）。它怎样装配在内核上，以 xiocode 仓的 [`ARCHITECTURE.md`](https://github.com/Xio-Shark/xiocode/blob/main/ARCHITECTURE.md) 为唯一来源。
+- **对所有发行版一视同仁的约束**（均为本文已有规则，此处只做索引）：
+  1. 只经公开协议 / 语言绑定消费内核（文首「仓库分工」）；
+  2. Run 状态只经 `reportRunSucceeded` / `reportRunFailed` / `reportRunCancelled` 上报，发行版不得直接写 Run 状态（§3.3）；
+  3. 可以比内核更保守，不能放宽内核的隔离（§0.2 裁决 2）。
 
 ---
 

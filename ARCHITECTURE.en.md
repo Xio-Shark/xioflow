@@ -4,7 +4,7 @@
 > **Status**: Target-state protocol specification (v2 planning: Rust core + snapshot rollback + dual deployment topology). Sections marked "Target State" are in the roadmap for upcoming milestones; refer to `ROADMAP.md` for current implementation alignment.  
 > **Core Positioning**:  
 > - **xioflow**: A supervised execution kernel for AI agent framework authors. Provides execution primitives only: execution domain lifecycle, supervised processes, resource arbitration, verified stops, workspace snapshots and rollbacks, SQLite transactional persistence, and crash recovery. Zero UI bindings; agnostic to agent loops, languages, or file formats.  
-> - **xiocode**: The reference programming distribution assembled on top of xioflow. Provides model routing, coding tools, default three-piece workflow (PRD / Todo / Verification), safety policies, and CLI/TUI.  
+> - **xiocode**: The reference distribution assembled on top of xioflow: a complete local coding agent (model routing, coding tools, permission policy, CLI/TUI) that showcases what the kernel does. How it is assembled is documented in xiocode's own ARCHITECTURE.md.  
 > **Repository Division**: xioflow is developed as an independent shared kernel repository; distributions like xiocode consume the kernel strictly through public protocols and thin language bindings.
 
 ---
