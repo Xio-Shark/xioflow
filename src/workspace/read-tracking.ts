@@ -4,8 +4,9 @@ import path from 'node:path';
 /**
  * 读集观测：基于访问时间，不需要任何特权。
  *
- * fork 刚建好时把每个条目的 atime 归一到 mtime；此后任何读取（打开文件读内容、列目录）
- * 都会让 atime 越过 mtime——Linux relatime 在 atime <= mtime 时必定更新，macOS APFS 同样更新。
+ * fork 刚建好时把每个条目的 atime 设为 mtime 之前（ATIME_MARGIN_S）；此后任何读取（读文件内容、列目录）
+ * 都会让 atime 越过 mtime：Linux relatime 在 atime <= mtime 时更新，macOS APFS 只在 atime 严格早于
+ * mtime 时更新（实测：atime == mtime 时读取不更新），留出余量同时覆盖秒级时间粒度的文件系统。
  * 只 stat 不会改变 atime，所以扫描本身不污染结果；列目录前先 stat，再 readdir。
  *
  * 局限（如实声明而不是假装知道）：
@@ -16,6 +17,12 @@ import path from 'node:path';
 export type ReadTracking = 'atime' | 'unobserved';
 
 const SKIP = new Set(['.git']);
+const ATIME_MARGIN_S = 2;
+
+function resetAccessTime(abs: string, st: fs.Stats): void {
+  const mtime = st.mtimeMs / 1000;
+  fs.utimesSync(abs, mtime - ATIME_MARGIN_S, mtime);
+}
 
 function walk(dir: string, visit: (abs: string, rel: string, st: fs.Stats) => void, rel = ''): void {
   const st = fs.lstatSync(dir);
@@ -30,16 +37,16 @@ function walk(dir: string, visit: (abs: string, rel: string, st: fs.Stats) => vo
   }
 }
 
-/** 把 root 下每个条目（跳过顶层 .git）的 atime 设为其 mtime。目录在列举之后再归一。 */
+/** 把 root 下每个条目（跳过顶层 .git）的 atime 设到其 mtime 之前。目录在列举之后再归一。 */
 export function normalizeAccessTimes(root: string): void {
   const dirs: Array<[string, fs.Stats]> = [];
   walk(root, (abs, _rel, st) => {
     if (st.isSymbolicLink()) return; // utimes 会跟随链接，改到链接目标上
     if (st.isDirectory()) dirs.push([abs, st]);
-    else fs.utimesSync(abs, st.mtimeMs / 1000, st.mtimeMs / 1000);
+    else resetAccessTime(abs, st);
   });
   // 深的目录先归一：父目录的 mtime 不受子目录 atime 变化影响
-  for (const [abs, st] of dirs.reverse()) fs.utimesSync(abs, st.mtimeMs / 1000, st.mtimeMs / 1000);
+  for (const [abs, st] of dirs.reverse()) resetAccessTime(abs, st);
 }
 
 /**
@@ -59,10 +66,10 @@ export function probeReadTracking(dir: string): ReadTracking {
   const probe = path.join(dir, `.xioflow-atime-probe-${process.pid}-${Date.now()}`);
   try {
     fs.writeFileSync(probe, 'probe');
-    const past = new Date(Date.now() - 60_000);
-    fs.utimesSync(probe, past, past);
+    resetAccessTime(probe, fs.statSync(probe));
     fs.readFileSync(probe);
-    return fs.statSync(probe).atimeMs > past.getTime() ? 'atime' : 'unobserved';
+    const st = fs.statSync(probe);
+    return st.atimeMs > st.mtimeMs ? 'atime' : 'unobserved';
   } finally {
     fs.rmSync(probe, { force: true });
   }

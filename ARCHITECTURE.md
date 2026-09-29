@@ -529,7 +529,7 @@ executeProcess(op) 准入与重放判定表：
 ### 3.9 工作区事务协议：并行 agent 的乐观并发控制
 多个 agent 同时改同一个工作区时，锁（§3.1 的 `workspace:write` 租约）只能让它们排队；工作区事务让它们**并行工作、提交时校验**，把数据库的 OCC（乐观并发控制，后向校验）搬到文件系统上：
 - **begin**：对事务根目录拍基线快照（§3.5），materialize 出独立 fork；fork 的独占租约移交给事务，agent 在 fork 内执行任意操作，互斥靠各自声明的 `workspace:write:<fork>`。写 `TX_BEGUN`，其 journal seq 即事务的开始点。
-- **读集**（无特权观测）：fork 建好后把每个条目的 atime 归一到 mtime，此后的读取（读文件内容、列目录）会让 atime 越过 mtime；只 stat 不改变 atime，所以采集本身不污染证据，且必须先于任何 git 读取完成。以 noatime 挂载的文件系统用探针实测后如实声明 `readTracking: 'unobserved'`、`readSet: null`，不假装知道。
+- **读集**（无特权观测）：fork 建好后把每个条目的 atime 设到 mtime 之前（留 2 秒余量），此后的读取（读文件内容、列目录）会让 atime 越过 mtime——Linux relatime 在 atime ≤ mtime 时更新，macOS APFS 只在 atime 严格早于 mtime 时更新（atime == mtime 时读取不更新，实测）；只 stat 不改变 atime，所以采集本身不污染证据，且必须先于任何 git 读取完成。以 noatime 挂载的文件系统用探针实测后如实声明 `readTracking: 'unobserved'`、`readSet: null`，不假装知道。
 - **写集**：基线快照树 → fork 当前树的逐文件差异（`A / M / D / T`），与快照同一口径，精确且与观测方式无关。
 - **后向校验**（commit 时）：
   - 本事务开始后提交的每个事务的写集，与本事务的写集相交 ⇒ `write_write`；与读集相交 ⇒ `read_write`（本事务依据的内容已过时）；

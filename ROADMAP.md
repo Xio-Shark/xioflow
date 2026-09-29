@@ -187,6 +187,7 @@ xiocode 侧待办（已关闭，2026-09-29）：`kernel-adapter.ts` 已由 `kern
 - **集成材料**：0.3.0 的 `quickRun`、op 幂等执行与 durable 引擎示例（Temporal activity、LangGraph node）；“用 xioflow 替换你的 subprocess 封装”示例；英文规范；conformance 等级徽章。
 - **反馈闭环**：设计伙伴报告的每个 bug 先落成 §7.2 契约条目。
 - **观测指标**：进行中 / 已合并的外部集成数；通过 conformance 的实现数；来自外部的 issue 数。
+- **低成本接入面（2026-09-29 落地）**：`xioflow mcp` 让任何 MCP 客户端零集成代码使用内核（`run_command` / 事务 / 快照等 8 个工具，官方 SDK 互通测试），`xioflow otel-export` 把 journal 接入既有可观测性栈。二者降低的是「试用」门槛，不替代采用门：对方仓库里的分支或 PR 仍是唯一判据。
 - **止损线（采用门，D11：前移到 P1 之前）**：观察期结束时判定。至少 1 个外部项目进入实际集成（对方仓库里有分支或 PR）⇒ 放行 P1。否则收缩为“xiocode 专用底座”：暂停 P1、Rust、Python 绑定与 daemon；只按 xiocode 的真实需求做功能（TS 版 `git-shadow` 检查点、service 监督）。
 
 ---

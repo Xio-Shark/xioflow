@@ -9,6 +9,9 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "xioflow": "./dist/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -55,6 +58,7 @@
     "prepack": "npm run build && npm run build:native"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.30.1",
     "@types/node": "^26.6.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.1"

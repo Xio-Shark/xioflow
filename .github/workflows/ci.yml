@@ -30,6 +30,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+        env:
+          XIOFLOW_EXPECT_READ_TRACKING: atime
       - run: pnpm verify:package
 
   native:

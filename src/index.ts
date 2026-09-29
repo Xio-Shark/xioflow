@@ -19,3 +19,6 @@ export type {
 export type { ReadTracking } from './workspace/read-tracking.js';
 export * from './capability/index.js';
 export * from './confinement/index.js';
+export * from './otel/otlp.js';
+export { KernelMcpServer, SUPPORTED_PROTOCOL_VERSIONS } from './mcp/server.js';
+export type { KernelMcpServerOptions } from './mcp/server.js';

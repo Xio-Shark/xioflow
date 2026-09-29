@@ -331,4 +331,12 @@ assert.equal(
   ok('packaged reaper holds the tree', `scope=${stop.scope}`);
 }
 
+// The packaged CLI runs from the installed bin link.
+{
+  const { execFileSync } = await import('node:child_process');
+  const usage = execFileSync(path.join(process.cwd(), 'node_modules/.bin/xioflow'), [], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  assert.equal(usage, '');
+  ok('packaged xioflow CLI runs', 'bin link resolves');
+}
+
 console.log(`  ${checks} embedder contract checks passed`);

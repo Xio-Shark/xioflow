@@ -54,8 +54,12 @@ describe('workspace transactions (optimistic parallel agents)', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  const begin = (txId: string, runId: string) =>
-    supervisor.beginWorkspaceTransaction({ txId, runId, root: repoDir, forkPath: path.join(tempDir, `fork-${txId}`) });
+  async function begin(txId: string, runId: string) {
+    const tx = await supervisor.beginWorkspaceTransaction({ txId, runId, root: repoDir, forkPath: path.join(tempDir, `fork-${txId}`) });
+    // CI pins the expectation so a runner that silently lost atime tracking cannot pass through the honest fallback
+    if (process.env.XIOFLOW_EXPECT_READ_TRACKING) expect(tx.readTracking).toBe(process.env.XIOFLOW_EXPECT_READ_TRACKING);
+    return tx;
+  }
 
   /** An agent tool call: a real child process working inside the transaction's fork. */
   async function agent(runId: string, cwd: string, script: string) {

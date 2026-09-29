@@ -147,6 +147,51 @@ const supervisor = new ProcessSupervisor(domain, new ReaperPlatformDriver());
 
 `ReaperPlatformDriver.isAvailable()` tells whether this platform's helper is present; the constructor throws rather than falling back to another driver. Build one from source with `node scripts/build-native.mjs`, or point `XIOFLOW_REAPER_PATH` at a binary.
 
+## Use it from any agent: MCP server
+
+The package ships a `xioflow` command that serves the kernel over MCP (stdio), so an agent that speaks MCP can run commands under supervision without writing an integration:
+
+```json
+{
+  "mcpServers": {
+    "xioflow": { "command": "npx", "args": ["-y", "@xioflow/kernel", "mcp", "--domain", "/path/to/repo/.xioflow-kernel"] }
+  }
+}
+```
+
+The server acquires the domain and runs crash recovery before it answers anything. It then offers these tools:
+
+- `run_command`: supervised execution; reusing an `opId` replays the recorded result instead of running again.
+- `operation_status` and `cancel_operation`.
+- `snapshot_workspace` and `rollback_workspace`.
+- `begin_transaction`, `commit_transaction` and `abort_transaction`.
+
+Client features map onto kernel semantics:
+
+- A request with a `progressToken` streams stdout/stderr as progress notifications.
+- `notifications/cancelled` stops the operation through the stop pipeline.
+- A result that is `indeterminate` is presented as "stop and ask a human".
+
+Adjudication is intentionally not exposed to the model. `--driver auto` (the default) uses the native reaper when its helper is present and says which driver it chose in the server instructions and in every result.
+
+## OpenTelemetry
+
+The journal exports as OTLP/HTTP JSON traces, with no dependencies:
+
+- One trace per Run.
+- One span per settled operation, with status transitions, replays, capability use and adjudication as span events.
+- One span per workspace transaction.
+- `indeterminate` and `failed` are `ERROR`.
+
+Ids are derived deterministically, so exporting the same journal twice produces the same spans.
+
+```bash
+xioflow mcp --otlp-endpoint http://localhost:4318            # export every 5s while serving
+xioflow otel-export --otlp-endpoint http://localhost:4318     # one-shot, read-only, works next to a running server
+```
+
+From code: `exportJournalToOtlp(domain, { endpoint, fromSeq })` returns the cursor for the next incremental export; `journalToOtlpTraces(...)` builds the payload without sending it.
+
 ## Crash recovery
 
 After a restart, reacquire the domain and run the recovery engine:
@@ -253,7 +298,7 @@ if (res.status === 'conflict') {
 ```
 
 - **Write set**: the exact per-file diff between the base snapshot and the fork.
-- **Read set**: observed without privileges through access times. Each fork's atimes are reset to its mtimes, so anything read afterwards (file contents or directory listings) shows up. On a `noatime` filesystem the result says `readTracking: 'unobserved'` and `readSet: null`.
+- **Read set**: observed without privileges through access times. Each entry in the fork gets an atime just before its mtime, so any later read (file contents or directory listings) moves the atime past the mtime on both Linux (`relatime`) and macOS (APFS only updates an atime that is older than the mtime). On a `noatime` filesystem the result says `readTracking: 'unobserved'` and `readSet: null`.
 - **Validation**: a commit fails with `write_write` if a transaction committed since this one began wrote the same file, and with `read_write` if it changed something this one read. A listed directory only conflicts when entries were added to it or removed from it. A write that bypassed transactions and went straight to the workspace fails with `external_write`.
 - **Apply**: only a validated transaction is applied to the workspace. `TX_COMMITTING` is journaled first, so a commit interrupted by a crash finishes when it is called again after restart.
 

@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,22 +6,19 @@ import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ExecutionDomain, NodePlatformDriver, RecoveryEngine } from '@xioflow/kernel';
 import { buildReaperHelper } from '../support/reaper-helper.js';
+import { buildDist, repoRoot } from '../support/build-dist.js';
 
 /**
  * 崩溃点矩阵：对每个场景先跑一遍记录经过的全部崩溃点，再在每个点上 SIGKILL 监督进程，
  * 然后在新进程里恢复并核对内核不变量。崩溃点覆盖存储层每笔事务的提交前 / 提交后，
  * 以及「进程已放行、结果未落盘」。
  */
-const repoRoot = path.resolve(import.meta.dirname, '../..');
 const worker = path.join(import.meta.dirname, 'scenario-worker.mjs');
 const distIndex = pathToFileURL(path.join(repoRoot, 'dist/index.js')).href;
 const helperPath = buildReaperHelper();
 
 // 矩阵针对的是构建产物（子进程里跑，与真实嵌入方式一致）
-execFileSync(process.execPath, [path.join(repoRoot, 'node_modules/typescript/bin/tsc'), '-p', 'tsconfig.build.json'], {
-  cwd: repoRoot,
-  stdio: 'inherit',
-});
+buildDist();
 
 type Scenario = 'complete' | 'cancel';
 type DriverKind = 'node' | 'reaper';
