@@ -937,7 +937,7 @@ xiocode 发行版
 - **崩溃点矩阵**（`tests/fault/crash-matrix.test.ts`）：内核在存储层每笔事务的提交前 / 提交后，以及「进程已放行、结果未落盘」处埋有崩溃点（`src/fault/crashpoint.ts`，仅在测试环境变量存在时生效，命中即 `SIGKILL` 自身）。矩阵先无故障运行场景、记录经过的全部崩溃点，再逐点杀死监督进程，在新进程中恢复并核对：
   1. 没有停在中间态的操作；2. 租约只属于 `indeterminate` 操作；3. 进程要么已消失，要么操作被隔离；4. 副作用至多一次；5. `succeeded` 必有真实执行与零退出码；6. 结果事实至多记录一次；以及同 opId 在新进程重提交只重放、不重跑。矩阵对 `NodePlatformDriver` 与 `ReaperPlatformDriver`、完成与取消两类场景各跑一遍。
 - **TLA+ 规格**（`spec/tla/OperationRecovery.tla`，`pnpm check:tla`）：单个操作的门控启动、停止流水线、任意时刻崩溃（有界次数，含恢复途中再次崩溃）与恢复。TLC 穷举两种驱动的全部交错，检查 `NoFakeRunning`、`NoPrematureRelease`、`AtMostOnce`、`NoFakeSuccess`、`IndeterminateHoldsLease`、`GateBeforeEffect`、`DoneHasResult` 与活性 `EventuallySettled`、`NoOrphanAtRest`。
-- **两者都指出的已知缺口**：结果落盘前崩溃、而进程已退出时，恢复只知道「进程已不在」，按 `marked_dead` 记为 `failed`——即使进程已完成副作用并以 0 退出。规格中的 `NoFalseFailure` 被 TLC 以 Effect → Exit → Crash → Recover 的轨迹证伪，矩阵在真实实现上观察到同一结果。建议的修正（独立的 `exited_unknown` 结论，不释放「可重试」的暗示）见 `ROADMAP.md` §8.2。
+- **两者共同发现并已修正的缺口**：结果落盘前崩溃、而进程已退出时，恢复只知道「进程已不在」，曾按 `marked_dead` 记为普通 `failed`——即使进程已完成副作用并以 0 退出（TLC 以 Effect → Exit → Crash → Recover 证伪 `NoFalseFailure`，矩阵在真实实现上观察到同一结果）。现在该结论带 `terminationReason: 'exit_unobserved'`：状态仍为 `failed` 以表示「不再占用资源、租约可释放」，但结局未知，宿主不得据此换 opId 重试。规格中它是独立结论 `exited_unknown`，`NoFalseFailure` 进入 CI 检查；矩阵与共享契约断言 `marked_dead` 必带该原因。
 
 ---
 

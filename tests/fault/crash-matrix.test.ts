@@ -114,6 +114,12 @@ async function checkInvariantsAfterRecovery(ws: Workspace): Promise<string> {
       expect((op.result as any).exitCode).toBe(0);
     }
 
+    // I7 恢复没观察到退出时不把「未知」写成「失败」：marked_dead 必带 exit_unobserved
+    const recovered = report.recoveredOperations.find((r) => r.opId === 'op');
+    if (recovered?.action === 'marked_dead') {
+      expect((op?.result as any).terminationReason).toBe('exit_unobserved');
+    }
+
     // I6 结果事实至多记录一次
     const recorded = store
       .getJournalEvents(domain.domainId)

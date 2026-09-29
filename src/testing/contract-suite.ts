@@ -1007,6 +1007,8 @@ export function defineContractTestSuite(
         expect(domain.isResourceLocked('res:c21')).toBe(false);
         const result = domain.getStore().getOperation(opId)!.result!;
         expect(result.status).toBe('failed');
+        // 退出事实未被观察到：结局未知，不能被当作「确实失败、可换 opId 重试」
+        expect((result as ProcessOperationResult).terminationReason).toBe('exit_unobserved');
         expect(result.kind === 'process' ? result.stderr : '').toContain('reaped during recovery');
       } finally {
         try {

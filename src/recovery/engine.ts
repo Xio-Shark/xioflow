@@ -315,6 +315,8 @@ export class RecoveryEngine {
             stdout: '',
             stderr: reapedOrphans ? 'orphaned descendants were reaped during recovery' : '',
             evidence: 'unobserved',
+            // 进程已不在，但它是成功还是失败无人看见：不把「未知」写成「失败」
+            terminationReason: 'exit_unobserved',
             residualProcessesReaped: reapedOrphans,
             isTruncated: false,
             identityVerification: 'not_original_process',

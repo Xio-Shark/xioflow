@@ -44,6 +44,11 @@ export type TerminationReason =
   | 'timed_out'
   | 'resource_preempted'
   | 'crash_detected'
+  /**
+   * 进程已确认不在，但退出事实从未被观察到（监督者在结果落盘前崩溃）。结局未知：它可能已成功完成副作用。
+   * 状态记为 failed 只表示「不再占用资源」，宿主不得据此换 opId 重试；同 opId 重放返回此记录。
+   */
+  | 'exit_unobserved'
   | 'memory_exceeded'
   | 'cpu_exceeded'
   | 'pids_exceeded'

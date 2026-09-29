@@ -208,7 +208,7 @@ For every unfinished operation, recovery verifies the recorded process identity 
 | Observed state | Action | Leases |
 | --- | --- | --- |
 | Intent persisted, never spawned | cleaned up as failed | released |
-| Process confirmed dead | marked dead as failed | released |
+| Process confirmed dead, exit never observed | `failed` with `terminationReason: 'exit_unobserved'`: the outcome is unknown, so do not retry under a new `opId` | released |
 | Process alive and identity confirmed | stopped through the stop pipeline | released |
 | Identity cannot be determined | left `indeterminate` | retained, manual decision required |
 

@@ -22,7 +22,7 @@ ASSUME MaxCrashes \in Nat
 
 VARIABLES
     opStatus,   \* "none" | "intent" | "active" | "stopping" | "done"
-    result,     \* "none" | "succeeded" | "failed" | "cancelled" | "indeterminate"
+    result,     \* "none" | "succeeded" | "failed" | "cancelled" | "indeterminate" | "exited_unknown"
     identity,   \* process identity persisted (OS start time recorded)
     lease,      \* exclusive resource lease persisted
     proc,       \* "none" | "gated" | "running" | "exited"
@@ -132,8 +132,9 @@ RecoverWith(canDecide) ==
                 /\ opStatus' = "done" /\ result' = "cancelled" /\ lease' = FALSE
                 /\ proc' = "exited"
          [] opStatus \in {"active", "stopping"} /\ proc = "exited" /\ canDecide ->
-                \* confirmed gone: "marked_dead", exit status unknown
-                /\ opStatus' = "done" /\ result' = "failed" /\ lease' = FALSE
+                \* confirmed gone, exit never observed: "marked_dead" with terminationReason
+                \* "exit_unobserved" (status failed in the API, outcome unknown)
+                /\ opStatus' = "done" /\ result' = "exited_unknown" /\ lease' = FALSE
                 /\ UNCHANGED proc
          [] opStatus \in {"active", "stopping"} /\ ~canDecide ->
                 /\ opStatus' = "done" /\ result' = "indeterminate"
@@ -164,7 +165,7 @@ Spec == Init /\ [][Next]_vars /\ WF_vars(Recover) /\ WF_vars(Exit)
 
 TypeOK ==
     /\ opStatus \in {"none", "intent", "active", "stopping", "done"}
-    /\ result \in {"none", "succeeded", "failed", "cancelled", "indeterminate"}
+    /\ result \in {"none", "succeeded", "failed", "cancelled", "indeterminate", "exited_unknown"}
     /\ proc \in {"none", "gated", "running", "exited"}
     /\ identity \in BOOLEAN /\ lease \in BOOLEAN /\ effected \in BOOLEAN
     /\ sup \in {"up", "down"}
@@ -195,12 +196,9 @@ DoneHasResult == opStatus = "done" <=> result # "none"
 EventuallySettled == (opStatus # "none") ~> (opStatus = "done")
 NoOrphanAtRest == <>[](sup = "up" /\ opStatus = "done" => (proc \notin Live \/ result = "indeterminate"))
 
-(***************************************************************************)
-(* Known, deliberate gap (not checked): "marked_dead" records "failed" when *)
-(* the process is confirmed gone but its exit status was never persisted,  *)
-(* even though it may have completed its side effect. The property         *)
-(*     NoFalseFailure == result = "failed" => ~effected                     *)
-(* is violated by Crash after Effect/Exit followed by RecoverWith(TRUE);    *)
-(* TLC produces that trace. See ROADMAP for the proposed "exited_unknown".  *)
-(***************************************************************************)
+\* "failed" is only recorded when the process demonstrably did not complete its
+\* effect; an exit nobody observed is "exited_unknown", never "failed". Without
+\* that distinction TLC finds Effect -> Exit -> Crash -> Recover ending in "failed".
+NoFalseFailure == result = "failed" => ~effected
+
 =============================================================================
