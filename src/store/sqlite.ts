@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { SCHEMA_SQL } from './schema.js';
+import { callerLabel, crashpoint, crashpointsEnabled } from '../fault/crashpoint.js';
 import {
   Task,
   Run,
@@ -57,10 +58,14 @@ export class SqliteStore {
       return fn();
     }
     this.inTransaction = true;
+    // 崩溃点：事务提交前（整笔丢失）与提交后（已持久、内存后续动作未做）
+    const label = crashpointsEnabled ? `store:${callerLabel(2)}` : '';
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const result = fn();
+      crashpoint(`${label}:before-commit`);
       this.db.exec('COMMIT');
+      crashpoint(`${label}:after-commit`);
       return result;
     } catch (err) {
       this.db.exec('ROLLBACK');

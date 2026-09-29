@@ -210,7 +210,8 @@ xiocode 侧待办（已关闭，2026-09-29）：`kernel-adapter.ts` 已由 `kern
 ### 8.2 其他
 
 - **供应链**：所有 registry 包与 Release 附件都由 CI 构建并附来源证明，本地不保留发包 token；Rust 依赖跑 `cargo-deny` / `cargo-audit`；新依赖优先选择发布超过 7 天的版本。
-- **CI 矩阵**：ubuntu / macos / windows；`kill -9` 演练作业；新增用例要求连续 5 轮无偶发失败。
+- **CI 矩阵**：ubuntu / macos / windows；`kill -9` 演练作业；新增用例要求连续 5 轮无偶发失败。`kill -9` 演练已由崩溃点矩阵（ARCHITECTURE §7.3）落地，TLA+ 规格由 CI 的 `tla` 作业检查。
+- **待裁决：`marked_dead` 的结论**（2026-09-29，崩溃点矩阵与 TLA+ 同时发现）：结果落盘前崩溃、进程已退出时，恢复把操作记为 `failed`，而进程可能已成功完成副作用。宿主若据此换 opId 重试，副作用会执行两次。建议新增结论 `exited_unknown`（或 `indeterminate` + 专用 `reason`），明确「退出事实未知、不可据此重试」，并在 §3.4 恢复协议与契约中写明；属于对外语义变更，需在 0.5.0 前拍板。
 - **文档同步**：协议变更与 ARCHITECTURE、JSON Schema、CHANGELOG、§7.2 状态列在同一个 PR 中更新。
 - **安全**：daemon 的 socket 权限与对端凭据校验；环境变量白名单从不落盘；转储产物权限与域目录一致。
 

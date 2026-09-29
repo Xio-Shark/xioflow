@@ -3,6 +3,7 @@ import { ProcessOperationResult } from '../types.js';
 import { finalizeOperation, indeterminateResult } from './finalize.js';
 import { buildProcessResult, ExitFacts, openOutputCapture, OutputCapture } from './process-output.js';
 import type { ProcessRunContext, ProcessRunPlan } from './process-run.js';
+import { crashpoint } from '../fault/crashpoint.js';
 /** 要么拿到根进程退出事实继续收尾，要么已经得出（并落盘）最终结果。 */
 type Settled = { exit: ExitFacts } | { final: ProcessOperationResult };
 
@@ -19,6 +20,8 @@ export async function superviseActive(
   cleanups: Array<() => void>
 ): Promise<ProcessOperationResult> {
   const { options, opState } = plan;
+  // 崩溃点：进程已放行运行、结果尚未落盘
+  crashpoint('supervisor:process-running');
   const capture = openOutputCapture(ctx, plan, handle);
   cleanups.push(() => capture.stdout.forceFinalize(), () => capture.stderr.forceFinalize());
 

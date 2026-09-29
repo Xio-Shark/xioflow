@@ -139,9 +139,11 @@ describe('ReaperPlatformDriver', () => {
     strays.push(handle.identity.pid);
     expect(await driver.verifyIdentity(handle.identity)).toBe('is_original_process');
 
-    process.kill(handle.rawProcess.helperPid, 'SIGKILL');
-    await new Promise((resolve) => handle.stdout.on('close', resolve));
-    await waitFor(() => false, 200); // 等控制通道关闭被观察到
+    const helperPid: number = handle.rawProcess.helperPid;
+    process.kill(helperPid, 'SIGKILL');
+    // root 仍持有 stdout，所以不能等输出管道关闭；等 helper 消失后留出控制通道 close 事件的时间
+    expect(await waitFor(() => !isAlive(helperPid), 3000)).toBe(true);
+    await waitFor(() => false, 200);
 
     const res = await driver.terminate(handle.identity, 200);
     expect(res.stopped).toBe('confirmed_stopped');

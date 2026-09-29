@@ -252,6 +252,8 @@ defineContractTestSuite('My Agent Runtime', async () => ({
 
 `vitest` is an optional peer dependency, and the subpath is only loaded if you import it.
 
+Beyond the contracts, the repository kills its own supervisor at every durable step (before and after each store commit, and while the process runs), recovers in a fresh process and checks the invariants again (`tests/fault/crash-matrix.test.ts`), and model-checks the same invariants for every interleaving of launch, stop, crash and recovery with TLA+ (`spec/tla/`, `pnpm check:tla`).
+
 - Persistence is SQLite with WAL and `synchronous = FULL`, so committed facts survive power loss.
 - One execution domain is one workspace-scoped store plus one active owner. Isolation is rebuilt from the store before any new operation is admitted.
 - When the root process exits while a descendant still holds its pipes, the supervisor reaps the process group and reports the root's real exit facts with `residualProcessesReaped: true`, instead of blocking the operation until its timeout.
