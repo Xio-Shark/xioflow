@@ -2029,7 +2029,7 @@ export function defineContractTestSuite(
       expect(usedEvents.some((e) => (e.payload as any)?.capabilityId === validCap.id)).toBe(true);
     });
 
-    it('契约 56: 写入限制驱动：受限写外部路径失败；快照后全受限回滚声明 complete，混入不受限声明 declared_roots', async () => {
+    it('契约 56: 写入限制驱动：快照后全受限回滚声明根外无副作用，complete 还要求被忽略文件在快照内或被证明未变；混入不受限声明 declared_roots', async () => {
       const { supervisor, domain, tempDir } = ctx;
       const repoDir = path.join(tempDir, 'repo-c56');
       fs.mkdirSync(repoDir, { recursive: true });
@@ -2081,15 +2081,46 @@ export function defineContractTestSuite(
       expect(p1.status).toBe('succeeded');
       expect(p1.confined).toBe(true);
 
-      // 全部 op 受限，回滚 coverage 必须为 complete
+      // 全部 op 受限：根外不可能有副作用。默认快照不含被忽略文件，也没有清单证明它们未变，所以不是 complete
       const rollback1 = await supervisor.rollback({
         runId: 'run-c56',
         opId: 'rb-c56-1',
         snapshotId: 'snap-c56',
         capabilityId: confinedCap.id,
       });
-      expect(rollback1.coverage).toBe('complete');
+      expect(rollback1.coverage).toBe('non_ignored');
       expect(rollback1.outOfScopeEffects).toBe('none_possible');
+      expect(rollback1.ignoredFiles).toBe('not_captured');
+
+      // 同样全受限，但快照含被忽略文件 ⇒ complete
+      await supervisor.captureSnapshot({
+        runId: 'run-c56',
+        opId: 'snap-c56-full',
+        capabilityId: confinedCap.id,
+        includeIgnored: true,
+      });
+      const pFull = await supervisor.executeProcess({
+        runId: 'run-c56',
+        opId: 'op-c56-confined-full',
+        name: 'write-in-repo',
+        command: {
+          execPath: process.execPath,
+          args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(path.join(repoDir, 'a.txt'))}, 'a');`],
+          cwd: repoDir,
+        },
+        capabilityId: confinedCap.id,
+        confinementDriver: mockDriver,
+      });
+      expect(pFull.confined).toBe(true);
+      const rollbackFull = await supervisor.rollback({
+        runId: 'run-c56',
+        opId: 'rb-c56-full',
+        snapshotId: 'snap-c56-full',
+        capabilityId: confinedCap.id,
+      });
+      expect(rollbackFull.coverage).toBe('complete');
+      expect(rollbackFull.outOfScopeEffects).toBe('none_possible');
+      expect(rollbackFull.ignoredFiles).toBe('restored');
 
       // 2. 混入不受限操作
       ensureTaskAndRun(domain, 'task-c56', 'run-c56-unconfined');
@@ -2120,6 +2151,36 @@ export function defineContractTestSuite(
       });
       expect(rollback2.coverage).toBe('declared_roots');
       expect(rollback2.outOfScopeEffects).toBe('possible');
+    });
+
+    it('契约 57: full_tree 快照之后新出现的被忽略文件：回滚如实列为未恢复（partial），不报 failed，也不擅自删除', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      const repoDir = path.join(tempDir, 'repo-c57');
+      fs.mkdirSync(repoDir, { recursive: true });
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.email', 'tester@test.local'], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, '.gitignore'), '.env\n*.tmp\n');
+      fs.writeFileSync(path.join(repoDir, '.env'), 'SECRET=1\n');
+      fs.writeFileSync(path.join(repoDir, 'init.txt'), 'init\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repoDir });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: repoDir });
+      ensureTaskAndRun(domain, 'task-c57', 'run-c57');
+
+      const snap = await supervisor.captureSnapshot({ runId: 'run-c57', opId: 'snap-c57', roots: [repoDir], includeIgnored: true });
+      expect(snap.snapshot?.coverage).toBe('full_tree');
+
+      fs.writeFileSync(path.join(repoDir, '.env'), 'SECRET=2\n');
+      fs.writeFileSync(path.join(repoDir, 'init.txt'), 'changed\n');
+      fs.writeFileSync(path.join(repoDir, 'cache.tmp'), 'junk\n');
+
+      const rb = await supervisor.rollback({ runId: 'run-c57', opId: 'rb-c57', snapshotId: 'snap-c57' });
+      expect(rb.status).toBe('partial');
+      expect(rb.unrestoredPaths).toEqual([path.join(fs.realpathSync(repoDir), 'cache.tmp')]);
+      expect(rb.coverage).toBe('declared_roots');
+      expect(fs.readFileSync(path.join(repoDir, '.env'), 'utf8')).toBe('SECRET=1\n');
+      expect(fs.readFileSync(path.join(repoDir, 'init.txt'), 'utf8')).toBe('init\n');
+      expect(fs.existsSync(path.join(repoDir, 'cache.tmp'))).toBe(true);
     });
   });
 }

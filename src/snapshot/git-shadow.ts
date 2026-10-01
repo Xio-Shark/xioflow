@@ -23,6 +23,26 @@ async function resolveRealPath(p: string): Promise<string> {
   }
 }
 
+/**
+ * 整个目录都不在快照里时，把其下的新文件折叠成一项（以 `/` 结尾）：新装的 node_modules 不必列几万行。
+ */
+function collapseNewDirectories(relPaths: string[], isNewDir: (rel: string) => boolean): string[] {
+  const collapsed = new Set<string>();
+  for (const rel of relPaths) {
+    const parts = rel.split('/');
+    let entry = rel;
+    for (let i = 1; i < parts.length; i++) {
+      const dir = parts.slice(0, i).join('/');
+      if (isNewDir(dir)) {
+        entry = `${dir}/`;
+        break;
+      }
+    }
+    collapsed.add(entry);
+  }
+  return [...collapsed].sort();
+}
+
 export class GitShadowSnapshotDriver implements SnapshotDriver {
   public readonly name = 'git-shadow';
   public readonly coverage = 'worktree_non_ignored';
@@ -216,7 +236,10 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
     }
   }
 
-  public async fingerprint(roots: string[], options?: { against?: SnapshotRef }): Promise<string> {
+  public async fingerprint(
+    roots: string[],
+    options?: { against?: SnapshotRef; excludeNewIgnored?: boolean }
+  ): Promise<string> {
     if (!roots || roots.length === 0) {
       throw new Error('fingerprint requires at least one root directory');
     }
@@ -245,8 +268,9 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
       }
 
       const addArgs = ['add', '-A'];
-      if (against?.coverage === 'full_tree') {
-        // 与 capture(includeIgnored: true) 同口径
+      if (against?.coverage === 'full_tree' && !options?.excludeNewIgnored) {
+        // 与 capture(includeIgnored: true) 同口径。不带 -f 时，快照里已有的被忽略文件在临时 index 中
+        // 是已跟踪条目，照常更新；只有快照之后新出现的被忽略文件不进指纹。
         addArgs.push('-f');
       }
       addArgs.push('--');
@@ -265,8 +289,8 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
 
   public async restore(
     snapshot: SnapshotRef,
-    _options?: { force?: boolean }
-  ): Promise<{ unrestoredPaths: string[] }> {
+    options?: { force?: boolean; removeNewIgnored?: boolean }
+  ): Promise<{ unrestoredPaths: string[]; newIgnoredPaths: string[] }> {
     const unrestoredPaths: string[] = [];
     if (!snapshot.roots || snapshot.roots.length === 0) {
       throw new Error('Snapshot contains no root paths');
@@ -289,21 +313,27 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
       const rootPathspecs = realRoots.map((r) => path.relative(repoRoot, r) || '.');
       const splitZ = (out: string) => out.split('\0').filter(Boolean);
 
-      // 2. 以快照口径算出 roots 当前的树，只处理与快照有差异的路径：
-      // 全量 checkout-index 会在 roots=仓库根时重写整个仓库（mtime 全变，触发 watcher / 增量构建）。
-      const currentTree = await this.fingerprint(snapshot.roots, { against: snapshot });
-      const toCheckout: string[] = [];
-      const toDelete: string[] = [];
-      for (const change of await this.diffTrees(repoRoot, currentTree, snapshot.treeFingerprint, rootPathspecs)) {
-        // current → snapshot 方向：D 表示快照里没有、当前有
-        if (change.status === 'D') toDelete.push(change.path);
-        else toCheckout.push(change.path);
-      }
+      const inScope = (absPath: string) =>
+        realRoots.some((root) => absPath === root || absPath.startsWith(root + path.sep));
 
-      // 3. 删除候选只能是未被忽略的文件（tracked + untracked）：
+      // 以快照口径算出 roots 当前的树，只处理与快照有差异的路径：
+      // 全量 checkout-index 会在 roots=仓库根时重写整个仓库（mtime 全变，触发 watcher / 增量构建）。
+      const diffAgainstSnapshot = async () => {
+        const currentTree = await this.fingerprint(snapshot.roots, { against: snapshot });
+        const toCheckout: string[] = [];
+        const toDelete: string[] = [];
+        for (const change of await this.diffTrees(repoRoot, currentTree, snapshot.treeFingerprint, rootPathspecs)) {
+          // current → snapshot 方向：D 表示快照里没有、当前有
+          if (change.status === 'D') toDelete.push(change.path);
+          else toCheckout.push(change.path);
+        }
+        return { toCheckout, toDelete };
+      };
+
+      // 删除候选只能是未被忽略的文件（tracked + untracked）：
       // 严格尊重 .gitignore，绝不能动被忽略文件（如 .env, node_modules），full_tree 快照也一样
-      let deletable = toDelete;
-      if (toDelete.length > 0 && snapshot.coverage === 'full_tree') {
+      const deletableOf = async (toDelete: string[]) => {
+        if (toDelete.length === 0 || snapshot.coverage !== 'full_tree') return toDelete;
         const { stdout: liveFilesOut } = await this.git(repoRoot, [
           'ls-files',
           '-z',
@@ -314,14 +344,14 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
           ...rootPathspecs,
         ]);
         const liveFiles = new Set(splitZ(liveFilesOut));
-        deletable = toDelete.filter((rel) => liveFiles.has(rel));
-      }
+        return toDelete.filter((rel) => liveFiles.has(rel));
+      };
 
-      // 4. 清理「在工作区中未被忽略、但不在快照中」的文件
-      for (const liveRel of deletable) {
-        const absPath = path.resolve(repoRoot, liveRel);
-        const inScope = realRoots.some((root) => absPath === root || absPath.startsWith(root + path.sep));
-        if (inScope) {
+      // 清理「在工作区中未被忽略、但不在快照中」的文件
+      const unlinkAll = async (rels: string[]) => {
+        for (const liveRel of rels) {
+          const absPath = path.resolve(repoRoot, liveRel);
+          if (!inScope(absPath)) continue;
           try {
             await fs.promises.access(absPath, fs.constants.W_OK);
             await fs.promises.unlink(absPath);
@@ -329,33 +359,124 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
             unrestoredPaths.push(absPath);
           }
         }
-      }
+      };
 
-      // 5. 通过临时 index 只检出与快照有差异的文件（分批传参，避免超长 argv）
-      const CHECKOUT_BATCH = 500;
-      for (let i = 0; i < toCheckout.length; i += CHECKOUT_BATCH) {
-        const batch = toCheckout.slice(i, i + CHECKOUT_BATCH);
-        try {
-          await this.git(repoRoot, ['checkout-index', '-f', '--', ...batch], env);
-        } catch (checkoutErr: any) {
-          const before = unrestoredPaths.length;
-          const lines = (checkoutErr.message || '').split('\n');
-          for (const line of lines) {
-            const match = line.match(/unable to (?:create|unlink|write) file '?([^':]+)'?/i);
-            if (match) {
-              unrestoredPaths.push(path.resolve(repoRoot, match[1].trim()));
+      // 通过临时 index 只检出与快照有差异的文件（分批传参，避免超长 argv）
+      const checkout = async (rels: string[]) => {
+        const CHECKOUT_BATCH = 500;
+        for (let i = 0; i < rels.length; i += CHECKOUT_BATCH) {
+          const batch = rels.slice(i, i + CHECKOUT_BATCH);
+          try {
+            await this.git(repoRoot, ['checkout-index', '-f', '--', ...batch], env);
+          } catch (checkoutErr: any) {
+            const before = unrestoredPaths.length;
+            const lines = (checkoutErr.message || '').split('\n');
+            for (const line of lines) {
+              const match = line.match(/unable to (?:create|unlink|write) file '?([^':]+)'?/i);
+              if (match) {
+                unrestoredPaths.push(path.resolve(repoRoot, match[1].trim()));
+              }
+            }
+            if (unrestoredPaths.length === before) {
+              throw checkoutErr;
             }
           }
-          if (unrestoredPaths.length === before) {
-            throw checkoutErr;
-          }
+        }
+      };
+
+      // 2. 先把忽略规则本身恢复到快照时的样子，再重新算差异。「哪些文件未被忽略、可以删」必须按快照时的
+      // 规则判断：快照之后 .gitignore 少了一行，当时被忽略、不在快照里的文件（.env）会以「不在快照里的
+      // 新文件」的身份出现在差异里并被删掉；多了一行，该清除的新文件则被藏起来。恢复一个规则文件可能让
+      // 另一个规则文件显形，所以循环到差异里不再有没处理过的规则文件为止。
+      let changes = await diffAgainstSnapshot();
+      const isIgnoreRules = (rel: string) => path.posix.basename(rel) === '.gitignore';
+      const syncedRules = new Set<string>();
+      for (;;) {
+        const ruleCheckout = changes.toCheckout.filter((rel) => isIgnoreRules(rel) && !syncedRules.has(rel));
+        const ruleDelete = changes.toDelete.filter((rel) => isIgnoreRules(rel) && !syncedRules.has(rel));
+        if (ruleCheckout.length + ruleDelete.length === 0) break;
+        await unlinkAll(await deletableOf(ruleDelete));
+        await checkout(ruleCheckout);
+        for (const rel of [...ruleCheckout, ...ruleDelete]) syncedRules.add(rel);
+        changes = await diffAgainstSnapshot();
+      }
+      const { toCheckout, toDelete } = changes;
+
+      // 3. 清理不在快照中的未被忽略文件
+      const deletable = await deletableOf(toDelete);
+      await unlinkAll(deletable);
+
+      // 4. 快照之后才出现的被忽略文件：默认原样保留并如实上报，调用方明确要求时才删除
+      const deletableSet = new Set(deletable);
+      const newIgnored = toDelete.filter((rel) => !deletableSet.has(rel) && inScope(path.resolve(repoRoot, rel)));
+      let newIgnoredPaths: string[] = [];
+      if (newIgnored.length > 0) {
+        const { stdout: dirsOut } = await this.git(repoRoot, [
+          'ls-tree', '-r', '-d', '-z', '--name-only', snapshot.treeFingerprint,
+        ]);
+        const snapshotDirs = new Set(splitZ(dirsOut));
+        // 根目录自身及其上级不算「新目录」
+        const isNewDir = (rel: string) =>
+          !snapshotDirs.has(rel) && realRoots.some((root) => path.resolve(repoRoot, rel).startsWith(root + path.sep));
+        if (options?.removeNewIgnored) {
+          unrestoredPaths.push(...(await this.removeNewIgnored(repoRoot, newIgnored, isNewDir)));
+        } else {
+          newIgnoredPaths = collapseNewDirectories(newIgnored, isNewDir).map((rel) =>
+            rel.endsWith('/') ? path.resolve(repoRoot, rel) + path.sep : path.resolve(repoRoot, rel)
+          );
         }
       }
 
-      return { unrestoredPaths };
+      // 5. 检出与快照有差异的文件
+      await checkout(toCheckout);
+
+      return { unrestoredPaths, newIgnoredPaths };
     } finally {
       await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  /** 删除快照之后新出现的被忽略文件，以及因此变空的新目录；返回没删掉的路径。 */
+  private async removeNewIgnored(
+    repoRoot: string,
+    relPaths: string[],
+    isNewDir: (rel: string) => boolean
+  ): Promise<string[]> {
+    const failed: string[] = [];
+    const emptied = new Set<string>();
+    for (const rel of relPaths) {
+      try {
+        await fs.promises.unlink(path.resolve(repoRoot, rel));
+      } catch {
+        failed.push(path.resolve(repoRoot, rel));
+        continue;
+      }
+      for (let dir = path.posix.dirname(rel); dir !== '.' && isNewDir(dir); dir = path.posix.dirname(dir)) {
+        emptied.add(dir);
+      }
+    }
+    // 深的先删；目录不进 git 树，非空（里面还有没删掉的东西）不算失败，那些路径已在 failed 里
+    for (const dir of [...emptied].sort((a, b) => b.length - a.length)) {
+      try {
+        await fs.promises.rmdir(path.resolve(repoRoot, dir));
+      } catch (err: any) {
+        if (err?.code !== 'ENOTEMPTY' && err?.code !== 'EEXIST' && err?.code !== 'ENOENT') {
+          failed.push(path.resolve(repoRoot, dir) + path.sep);
+        }
+      }
+    }
+    return failed;
+  }
+
+  public async listIgnored(roots: string[]): Promise<string[]> {
+    const realRoots = await Promise.all(roots.map((r) => resolveRealPath(r)));
+    const { repoRoot } = await this.assertGitRepo(realRoots[0]);
+    // 不带 --directory：折叠成目录后就看不到目录内部的变化
+    const { stdout } = await this.git(repoRoot, [
+      'ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--',
+      ...realRoots.map((r) => path.relative(repoRoot, r) || '.'),
+    ]);
+    return stdout.split('\0').filter(Boolean).map((rel) => path.resolve(repoRoot, rel));
   }
 
   public async prune(snapshotIds: string[], options?: { repoRoot?: string }): Promise<void> {

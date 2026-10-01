@@ -1,8 +1,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ExecutionDomain } from '../domain.js';
-import { Operation, ResourceConflictError, RollbackOperationResult, SnapshotRef } from '../types.js';
+import {
+  IgnoredChanges,
+  Operation,
+  ResourceConflictError,
+  RollbackOperationResult,
+  SnapshotDriver,
+  SnapshotRef,
+} from '../types.js';
 import { isPathContained } from '../capability/index.js';
+import {
+  collectIgnoredEntries,
+  diffIgnoredEntries,
+  ignoredManifestPath,
+  readIgnoredManifest,
+} from '../snapshot/ignored-manifest.js';
 import { CapabilityAdmission } from './admission.js';
 import { activateInternalOperation, sha256Json, SnapshotContext } from './snapshot-ops.js';
 import { RollbackOptions } from './types.js';
@@ -53,13 +66,26 @@ export async function rollback(ctx: SnapshotContext, options: RollbackOptions): 
   activateInternalOperation(domain, op, capAdmission);
 
   try {
-    const { unrestoredPaths } = await snapshotDriver.restore(snapshot, { force: options.force });
-    const currentFp = await snapshotDriver.fingerprint(targetRoots, { against: snapshot });
+    const restored = await snapshotDriver.restore(snapshot, {
+      force: options.force,
+      removeNewIgnored: options.removeNewIgnored,
+    });
+    const newIgnoredPaths = restored.newIgnoredPaths ?? [];
+    // 快照之后新出现的被忽略文件是有意保留的：核验时不算它们，但如实列为未恢复
+    const currentFp = await snapshotDriver.fingerprint(targetRoots, {
+      against: snapshot,
+      excludeNewIgnored: newIgnoredPaths.length > 0,
+    });
+    const unrestoredPaths = [...restored.unrestoredPaths, ...newIgnoredPaths];
     const status: RollbackOperationResult['status'] =
       currentFp !== snapshot.treeFingerprint ? 'failed' : unrestoredPaths.length > 0 ? 'partial' : 'restored';
-    const { coverage, outOfScopeEffects } = rollbackCoverage(status, () =>
-      allEffectsConfinedToRoots(domain, snapshot, targetRoots, options.opId)
-    );
+    const ignored = await compareIgnoredManifest(domain, snapshotDriver, snapshot);
+    const derived = deriveRollbackCoverage({
+      status,
+      effects: allEffectsConfinedToRoots(domain, snapshot, targetRoots, options.opId) ? 'confined' : 'unconfined',
+      snapshotCoverage: snapshot.coverage,
+      ignoredManifest: ignored.state,
+    });
 
     let result: RollbackOperationResult;
     domain.getStore().transaction(() => {
@@ -68,8 +94,8 @@ export async function rollback(ctx: SnapshotContext, options: RollbackOptions): 
         status,
         snapshotId: options.snapshotId,
         unrestoredPaths: unrestoredPaths.length > 0 ? unrestoredPaths : undefined,
-        coverage,
-        outOfScopeEffects,
+        ...derived,
+        ignoredChanges: ignored.changes,
         capabilityId: options.capabilityId,
         durationMs: Date.now() - startTime,
         completedAt: new Date().toISOString(),
@@ -175,15 +201,83 @@ function allEffectsConfinedToRoots(
   });
 }
 
-function rollbackCoverage(
-  status: RollbackOperationResult['status'],
-  allConfined: () => boolean
-): Pick<RollbackOperationResult, 'coverage' | 'outOfScopeEffects'> {
-  if (status !== 'restored') {
-    return { coverage: status === 'partial' ? 'declared_roots' : 'none', outOfScopeEffects: 'possible' };
+/** 被忽略文件清单相对现状的比较结果；`absent` 表示快照没带清单，`unreadable` 表示清单丢失或与登记的摘要不符。 */
+export type IgnoredManifestState = 'unchanged' | 'changed' | 'inconclusive' | 'unreadable' | 'absent';
+
+async function compareIgnoredManifest(
+  domain: ExecutionDomain,
+  snapshotDriver: SnapshotDriver,
+  snapshot: SnapshotRef
+): Promise<{ state: IgnoredManifestState; changes?: IgnoredChanges }> {
+  if (!snapshot.ignoredManifestDigest) return { state: 'absent' };
+  const before = readIgnoredManifest(
+    ignoredManifestPath(domain.domainPath, snapshot.id),
+    snapshot.ignoredManifestDigest
+  );
+  if (!before || !snapshotDriver.listIgnored) return { state: 'unreadable' };
+  const after = collectIgnoredEntries(await snapshotDriver.listIgnored(snapshot.roots));
+  const { verdict, changes } = diffIgnoredEntries(before, after);
+  return { state: verdict, changes };
+}
+
+export interface RollbackCoverageFacts {
+  status: RollbackOperationResult['status'];
+  /** 快照以来的操作：全部受限且写根在回滚根内 / 至少一个不是 / 没有核验（崩溃恢复路径）。 */
+  effects: 'confined' | 'unconfined' | 'unverified';
+  snapshotCoverage: SnapshotRef['coverage'];
+  ignoredManifest: IgnoredManifestState;
+}
+
+const EFFECTS_BASIS = {
+  confined: 'all_ops_confined',
+  unconfined: 'unconfined_op_since_snapshot',
+  unverified: 'effects_unverified',
+} as const;
+
+const MANIFEST_BASIS = {
+  unchanged: 'ignored_manifest_unchanged',
+  changed: 'ignored_manifest_changed',
+  inconclusive: 'ignored_manifest_ctime_only',
+  unreadable: 'ignored_manifest_unreadable',
+  absent: 'ignored_not_captured',
+} as const;
+
+/**
+ * 回滚覆盖声明的唯一推导处（ARCHITECTURE §0.2 裁决 4 / §3.5）：输入是核验到的事实，输出是结论加依据。
+ * `complete` 需要三件事同时成立：核验通过、快照以来的操作全部受限、被忽略文件已恢复或被证明未变。
+ */
+export function deriveRollbackCoverage(
+  facts: RollbackCoverageFacts
+): Pick<RollbackOperationResult, 'coverage' | 'outOfScopeEffects' | 'ignoredFiles' | 'coverageBasis'> {
+  const fullTree = facts.snapshotCoverage === 'full_tree';
+  const ignoredFiles: RollbackOperationResult['ignoredFiles'] = fullTree
+    ? facts.status === 'failed'
+      ? 'unverified'
+      : 'restored'
+    : facts.ignoredManifest === 'unchanged'
+      ? 'unchanged_verified'
+      : 'not_captured';
+  const ignoredBasis = fullTree ? 'snapshot_full_tree' : MANIFEST_BASIS[facts.ignoredManifest];
+
+  if (facts.status === 'failed') {
+    return { coverage: 'none', outOfScopeEffects: 'possible', ignoredFiles, coverageBasis: ['fingerprint_mismatch'] };
   }
-  if (allConfined()) {
-    return { coverage: 'complete', outOfScopeEffects: 'none_possible' };
+  if (facts.status === 'partial') {
+    return {
+      coverage: 'declared_roots',
+      outOfScopeEffects: 'possible',
+      ignoredFiles,
+      coverageBasis: ['unrestored_paths', ignoredBasis],
+    };
   }
-  return { coverage: 'declared_roots', outOfScopeEffects: 'possible' };
+  const coverageBasis = [EFFECTS_BASIS[facts.effects], ignoredBasis];
+  if (facts.effects !== 'confined') {
+    return { coverage: 'declared_roots', outOfScopeEffects: 'possible', ignoredFiles, coverageBasis };
+  }
+  return {
+    coverage: ignoredFiles === 'not_captured' ? 'non_ignored' : 'complete',
+    outOfScopeEffects: 'none_possible',
+    ignoredFiles,
+    coverageBasis,
+  };
 }

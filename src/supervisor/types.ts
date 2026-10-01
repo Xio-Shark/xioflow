@@ -32,6 +32,11 @@ export interface CaptureSnapshotOptions {
   roots?: string[];
   capabilityId?: string;
   includeIgnored?: boolean;
+  /**
+   * 'manifest'：不复制被忽略文件的内容，只记录每个文件的 size / mtime / ctime / mode。
+   * 回滚时清单未变，默认快照也能证明 `complete`。与 includeIgnored 同时给出时无效（内容已在快照内）。
+   */
+  trackIgnored?: 'manifest';
   maxTreeSizeBytes?: number;
   timeoutMs?: number;
 }
@@ -43,6 +48,8 @@ export interface RollbackOptions {
   roots?: string[];
   capabilityId?: string;
   force?: boolean;
+  /** full_tree 快照之后新出现的被忽略文件：默认保留并列入 unrestoredPaths（status 为 partial）；true 时删除。 */
+  removeNewIgnored?: boolean;
   timeoutMs?: number;
 }
 

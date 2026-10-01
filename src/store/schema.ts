@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
   commit_hash TEXT,
   journal_seq INTEGER,
   created_at TEXT NOT NULL,
-  tree_size_bytes INTEGER
+  tree_size_bytes INTEGER,
+  ignored_manifest_digest TEXT
 );
 
 CREATE TABLE IF NOT EXISTS capabilities (

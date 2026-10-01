@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { ExecutionDomain } from '../domain.js';
 import { Operation, ResourceConflictError, SnapshotDriver, SnapshotOperationResult } from '../types.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
+import { collectIgnoredEntries, ignoredManifestPath, writeIgnoredManifest } from '../snapshot/ignored-manifest.js';
 import { CapabilityAdmission, recordCapabilityUsed } from './admission.js';
 import { CaptureSnapshotOptions } from './types.js';
 
@@ -84,6 +85,7 @@ export async function captureSnapshot(
       kind: 'snapshot',
       roots: realRoots,
       includeIgnored: !!options.includeIgnored,
+      trackIgnored: options.trackIgnored ?? null,
       maxTreeSizeBytes: options.maxTreeSizeBytes,
       capabilityId: options.capabilityId ?? null,
     }),
@@ -95,7 +97,21 @@ export async function captureSnapshot(
   };
   activateInternalOperation(domain, op, capAdmission);
 
+  // full_tree 快照已含被忽略文件的内容，清单是多余的
+  const manifestFile =
+    options.trackIgnored === 'manifest' && !options.includeIgnored
+      ? ignoredManifestPath(domain.domainPath, options.opId)
+      : undefined;
   try {
+    let ignoredManifest: { digest: string; entries: number } | undefined;
+    if (manifestFile) {
+      if (!snapshotDriver.listIgnored) {
+        throw new Error(`Snapshot driver ${snapshotDriver.name} cannot list ignored files (trackIgnored: 'manifest')`);
+      }
+      const entries = collectIgnoredEntries(await snapshotDriver.listIgnored(realRoots));
+      ignoredManifest = { digest: writeIgnoredManifest(manifestFile, entries), entries: entries.length };
+    }
+
     const snapRef = await snapshotDriver.capture(realRoots, {
       id: options.opId,
       domainId: domain.domainId,
@@ -103,6 +119,7 @@ export async function captureSnapshot(
       includeIgnored: options.includeIgnored,
       maxTreeSizeBytes: options.maxTreeSizeBytes,
     });
+    snapRef.ignoredManifestDigest = ignoredManifest?.digest;
 
     const store = domain.getStore();
     let result: SnapshotOperationResult;
@@ -117,6 +134,8 @@ export async function captureSnapshot(
           roots: snapRef.roots,
           treeFingerprint: snapRef.treeFingerprint,
           commitHash: snapRef.commitHash,
+          // 只记摘要与条目数：清单里的路径名可能敏感，不进 journal
+          ignoredManifest,
         },
         timestamp: new Date().toISOString(),
       });
@@ -147,6 +166,7 @@ export async function captureSnapshot(
     domain.internalReleaseResources(options.opId);
     return result!;
   } catch (err: any) {
+    if (manifestFile) fs.rmSync(manifestFile, { force: true });
     throw recordFailedSnapshot(domain, options.opId, err, startTime);
   }
 }
@@ -268,6 +288,9 @@ export async function pruneSnapshots(
         ? (await snapshotDriver.assertGitRepo(snapshot.roots[0])).repoRoot
         : undefined;
     await snapshotDriver.prune([id], { repoRoot });
+    if (snapshot.ignoredManifestDigest) {
+      fs.rmSync(ignoredManifestPath(domain.domainPath, id), { force: true });
+    }
     store.transaction(() => {
       store.deleteSnapshot(id);
       store.recordEventAndTransitionState({

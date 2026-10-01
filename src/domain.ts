@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { SqliteStore } from './store/sqlite.js';
+import { ignoredManifestPath } from './snapshot/ignored-manifest.js';
 import { PlatformDriver } from './driver/types.js';
 import {
   DomainLockMetadata,
@@ -796,6 +797,13 @@ export class ExecutionDomain {
         if (op.outputRef) protectedFiles.add(path.basename(op.outputRef));
         if ((op.result as any)?.stdoutRef) protectedFiles.add(path.basename((op.result as any).stdoutRef));
         if ((op.result as any)?.stderrRef) protectedFiles.add(path.basename((op.result as any).stderrRef));
+      }
+    }
+
+    // 仍在的快照的被忽略文件清单：随 pruneSnapshots 删除，不在这里回收
+    for (const snapshot of this.store.listSnapshots(this.domainId)) {
+      if (snapshot.ignoredManifestDigest) {
+        protectedFiles.add(path.basename(ignoredManifestPath(this.domainPath, snapshot.id)));
       }
     }
 

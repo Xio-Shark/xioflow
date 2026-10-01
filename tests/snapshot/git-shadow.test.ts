@@ -236,6 +236,40 @@ describe('GitShadowSnapshotDriver (Step 1 & Step 3 & Step 5)', () => {
     expect(fp).toBe(snapshot.treeFingerprint);
   });
 
+  it('1.4e 快照之后 .gitignore 少了一行：当时被忽略、不在快照里的文件不得被当成新文件删掉', async () => {
+    const repoDir = await makeRepo();
+    fs.writeFileSync(path.join(repoDir, '.env'), 'API_KEY=original\n');
+    const snapshot = await driver.capture([repoDir]);
+
+    fs.writeFileSync(path.join(repoDir, '.gitignore'), 'node_modules/\n');
+    fs.writeFileSync(path.join(repoDir, 'extra.txt'), 'new and not ignored\n');
+
+    const res = await driver.restore(snapshot);
+    expect(res.unrestoredPaths).toHaveLength(0);
+    expect(fs.readFileSync(path.join(repoDir, '.env'), 'utf8')).toBe('API_KEY=original\n');
+    expect(fs.readFileSync(path.join(repoDir, '.gitignore'), 'utf8')).toBe('.env\nnode_modules/\n*.ignored\n');
+    expect(fs.existsSync(path.join(repoDir, 'extra.txt'))).toBe(false);
+    expect(await driver.fingerprint([repoDir], { against: snapshot })).toBe(snapshot.treeFingerprint);
+  });
+
+  it('1.4f 快照之后 .gitignore 多了一行：被新规则藏起来的新文件按快照时的规则清除', async () => {
+    const repoDir = await makeRepo();
+    const snapshot = await driver.capture([repoDir]);
+
+    fs.appendFileSync(path.join(repoDir, '.gitignore'), 'junk.txt\n');
+    fs.writeFileSync(path.join(repoDir, 'junk.txt'), 'hidden by the new rule\n');
+    fs.mkdirSync(path.join(repoDir, 'sub'));
+    fs.writeFileSync(path.join(repoDir, 'sub', '.gitignore'), 'secret.txt\n');
+    fs.writeFileSync(path.join(repoDir, 'sub', 'secret.txt'), 'hidden by a new nested rule file\n');
+
+    const res = await driver.restore(snapshot);
+    expect(res.unrestoredPaths).toHaveLength(0);
+    expect(fs.existsSync(path.join(repoDir, 'junk.txt'))).toBe(false);
+    expect(fs.existsSync(path.join(repoDir, 'sub', '.gitignore'))).toBe(false);
+    expect(fs.existsSync(path.join(repoDir, 'sub', 'secret.txt'))).toBe(false);
+    expect(await driver.fingerprint([repoDir], { against: snapshot })).toBe(snapshot.treeFingerprint);
+  });
+
   it('1.5 契约 54: materialize 分叉为独立 worktree，源工作区不受影响，dematerialize 清理无残留', async () => {
     const repoDir = await makeRepo();
     fs.writeFileSync(path.join(repoDir, 'feature.ts'), 'export const a = 1;\n');

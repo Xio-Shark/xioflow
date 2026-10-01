@@ -49,6 +49,12 @@ export class SqliteStore {
     if (!existing.has('capability_id')) {
       this.db.exec('ALTER TABLE operations ADD COLUMN capability_id TEXT;');
     }
+    const snapshotColumns = new Set(
+      (this.db.prepare('PRAGMA table_info(snapshots)').all() as Array<{ name: string }>).map((c) => c.name)
+    );
+    if (!snapshotColumns.has('ignored_manifest_digest')) {
+      this.db.exec('ALTER TABLE snapshots ADD COLUMN ignored_manifest_digest TEXT;');
+    }
   }
 
   private inTransaction = false;
@@ -826,8 +832,9 @@ export class SqliteStore {
     this.verifyEpochFencing(snapshot.domainId);
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO snapshots (
-        id, domain_id, op_id, driver, roots, coverage, tree_fingerprint, commit_hash, journal_seq, created_at, tree_size_bytes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, domain_id, op_id, driver, roots, coverage, tree_fingerprint, commit_hash, journal_seq, created_at, tree_size_bytes,
+        ignored_manifest_digest
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       snapshot.id,
@@ -840,7 +847,8 @@ export class SqliteStore {
       snapshot.commitHash ?? null,
       snapshot.journalSeq ?? null,
       snapshot.createdAt,
-      snapshot.treeSizeBytes ?? null
+      snapshot.treeSizeBytes ?? null,
+      snapshot.ignoredManifestDigest ?? null
     );
   }
 
@@ -891,6 +899,7 @@ export class SqliteStore {
       journalSeq: row.journal_seq !== null ? Number(row.journal_seq) : undefined,
       createdAt: row.created_at,
       treeSizeBytes: row.tree_size_bytes !== null ? Number(row.tree_size_bytes) : undefined,
+      ignoredManifestDigest: row.ignored_manifest_digest || undefined,
     };
   }
 

@@ -218,7 +218,7 @@ export const TOOLS: ToolDefinition[] = [
   {
     name: 'rollback_workspace',
     title: 'Roll a workspace back to a snapshot',
-    description: 'Restore the snapshot roots and verify the result. "coverage" says how much of the change the rollback can vouch for; it is "complete" only when every operation since the snapshot ran confined.',
+    description: 'Restore the snapshot roots and verify the result. "coverage" says how much of the change the rollback can vouch for; it is "complete" only when every operation since the snapshot ran confined and ignored files were in the snapshot. Snapshots taken through this server exclude ignored files, so the best result here is "non_ignored"; "coverageBasis" lists the reasons.',
     inputSchema: {
       type: 'object',
       properties: { snapshotId: str('Snapshot id from snapshot_workspace.') },

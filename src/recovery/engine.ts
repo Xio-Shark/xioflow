@@ -8,6 +8,7 @@ import {
   SnapshotOperationResult,
 } from '../types.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
+import { deriveRollbackCoverage } from '../supervisor/rollback.js';
 
 export interface RecoveredServiceSummary {
   serviceId: string;
@@ -86,13 +87,18 @@ export class RecoveryEngine {
           }
         }
 
-        if (isMatch) {
+        if (isMatch && snapshot) {
           const restoredResult: RollbackOperationResult = {
             kind: 'rollback',
             status: 'restored',
             snapshotId,
-            coverage: 'declared_roots',
-            outOfScopeEffects: 'possible',
+            // 崩溃打断的回滚只核验了指纹：没有重新核验「快照以来的操作是否全部受限」，清单也没有比对
+            ...deriveRollbackCoverage({
+              status: 'restored',
+              effects: 'unverified',
+              snapshotCoverage: snapshot.coverage,
+              ignoredManifest: 'absent',
+            }),
             durationMs: 0,
             completedAt: new Date().toISOString(),
           };

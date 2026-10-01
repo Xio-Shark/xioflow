@@ -485,6 +485,21 @@ export interface SnapshotRef {
   journalSeq?: number;
   createdAt: string;
   treeSizeBytes?: number;
+  /** 被忽略文件清单（captureSnapshot 的 trackIgnored: 'manifest'）的 sha256；清单本身在域的 artifacts 目录。 */
+  ignoredManifestDigest?: string;
+}
+
+/**
+ * 回滚时被忽略文件相对快照清单的变化。路径为绝对路径；每类最多列 50 条，`counts` 是未截断的总数。
+ * `metadataOnly`：大小、mtime、mode 都没变而 ctime 变了，既不能证明内容未变，也不能断言已变。
+ */
+export interface IgnoredChanges {
+  added: string[];
+  removed: string[];
+  modified: string[];
+  metadataOnly: string[];
+  truncated: boolean;
+  counts: { added: number; removed: number; modified: number; metadataOnly: number };
 }
 
 export interface SnapshotOperationResult extends BaseResult {
@@ -499,8 +514,20 @@ export interface RollbackOperationResult extends BaseResult {
   status: 'restored' | 'partial' | 'failed';
   snapshotId: string;
   unrestoredPaths?: string[];
-  coverage: 'complete' | 'declared_roots' | 'none';
+  /**
+   * `complete`：根内全部内容（含被忽略文件）已恢复或被证明未变，且根外不可能有副作用。
+   * `non_ignored`：根内未被忽略的内容已恢复、根外不可能有副作用，但被忽略文件不在快照内，也没有证据说明它们未变。
+   */
+  coverage: 'complete' | 'non_ignored' | 'declared_roots' | 'none';
   outOfScopeEffects: 'none_possible' | 'possible';
+  /**
+   * 回滚对被忽略文件能说什么：`restored` 在快照内且已恢复；`unchanged_verified` 不在快照内、清单证明未变；
+   * `not_captured` 不在快照内、未证明未变；`unverified` 在快照内但核验没通过（status 为 failed）。
+   */
+  ignoredFiles: 'restored' | 'unchanged_verified' | 'not_captured' | 'unverified';
+  ignoredChanges?: IgnoredChanges;
+  /** 得出 coverage 的依据，供上层解释「为什么是 / 不是 complete」。 */
+  coverageBasis: string[];
   errorMessage?: string;
 }
 
@@ -517,13 +544,23 @@ export interface SnapshotDriver {
       maxTreeSizeBytes?: number;
     }
   ): Promise<SnapshotRef>;
-  restore(snapshot: SnapshotRef, options?: { force?: boolean }): Promise<{ unrestoredPaths: string[] }>;
+  /**
+   * `newIgnoredPaths`：full_tree 快照之后才出现、且被忽略的路径（整个目录都是新的则折叠为以分隔符结尾的一项）。
+   * 默认保留它们；`removeNewIgnored` 为 true 时删除，删不掉的进 `unrestoredPaths`。
+   */
+  restore(
+    snapshot: SnapshotRef,
+    options?: { force?: boolean; removeNewIgnored?: boolean }
+  ): Promise<{ unrestoredPaths: string[]; newIgnoredPaths?: string[] }>;
   /**
    * 计算 roots 当前内容的树指纹。
    * 回滚核验时应传入 `against: snapshot`：以快照树为基线、按快照的 coverage 口径只重算 roots，
    * 这样 roots 之外的变化（例如 HEAD 前进）和被忽略文件不会让核验失真。
+   * `excludeNewIgnored`：full_tree 口径下不把快照之后新出现的被忽略文件算进指纹（快照里已有的照常比较）。
    */
-  fingerprint(roots: string[], options?: { against?: SnapshotRef }): Promise<string>;
+  fingerprint(roots: string[], options?: { against?: SnapshotRef; excludeNewIgnored?: boolean }): Promise<string>;
+  /** 列出 roots 内被忽略的文件（绝对路径，逐文件、不折叠目录）。不支持时不实现，调用方据此拒绝清单请求。 */
+  listIgnored?(roots: string[]): Promise<string[]>;
   prune(snapshotIds: string[], options?: { repoRoot?: string }): Promise<void>;
   materialize?(snapshotId: string, newRoot: string, options?: { repoRoot?: string }): Promise<{ worktreePath: string }>;
   dematerialize?(newRoot: string, options?: { force?: boolean; repoRoot?: string }): Promise<void>;
