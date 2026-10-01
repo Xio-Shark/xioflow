@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  AgentRuntime,
   DomainLockedError,
   ExecutionDomain,
   NodePlatformDriver,
@@ -56,6 +57,41 @@ let active = domain;
 let failed = false;
 
 try {
+  ensureRun('agent-smoke');
+  let commandContext;
+  const agents = new AgentRuntime(domain, {
+    maxConcurrentAgents: 1,
+    step: async (agent, execution) => {
+      commandContext = execution;
+      for (const opId of ['packaged-command-1', 'packaged-command-2']) {
+        void execution.executeProcess({
+          opId, name: opId,
+          command: { execPath: process.execPath, args: ['-e', 'process.stdout.write("managed")'], cwd: workspace },
+        });
+      }
+      return { status: 'completed', checkpoint: { prior: agent.checkpoint } };
+    },
+  });
+  agents.create({ id: 'packaged-agent', runId: 'agent-smoke', input: null, checkpoint: { turn: 0 }, maxSteps: 2 });
+  agents.pause('packaged-agent');
+  await agents.recoverCheckpoint('packaged-agent', async (checkpoints) => ({ seq: checkpoints[0].seq }));
+  assert.equal(agents.get('packaged-agent').status, 'paused');
+  agents.resume('packaged-agent');
+  await agents.drain();
+  assert.equal(agents.get('packaged-agent').status, 'completed');
+  assert.equal(agents.get('packaged-agent').stepsUsed, 1);
+  agents.close();
+  ok('packaged agent runtime', 'recovery, checkpoint and step budget persisted');
+  for (const opId of ['packaged-command-1', 'packaged-command-2']) {
+    assert.equal(store.getOperation(opId).result.status, 'succeeded');
+    assert.equal(store.getOperation(opId).runId, 'agent-smoke');
+    assert.equal(store.getJournalEvents(domain.domainId).find((event) => event.type === 'AGENT_OPERATION_REQUESTED' && event.operationId === opId).payload.agentId, 'packaged-agent');
+  }
+  await assert.rejects(commandContext.executeProcess({
+    opId: 'late-command', name: 'late', command: { execPath: process.execPath, args: [], cwd: workspace },
+  }), /context is closed/);
+  ok('packaged agent commands', 'unawaited batch settled, ownership persisted, expired context rejected');
+
   // 0. Boundary failure is actionable: operations cannot attach to an unknown run.
   assert.throws(
     () =>

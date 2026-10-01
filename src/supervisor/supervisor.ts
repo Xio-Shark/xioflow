@@ -145,6 +145,8 @@ export class ProcessSupervisor {
     runId: string;
     root: string;
     forkPath: string;
+    /** Reuse an immutable baseline in this domain; commit still checks intervening changes. */
+    baseSnapshotId?: string;
   }): Promise<WorkspaceTransaction> {
     return this.workspaceTransactions().begin(options);
   }

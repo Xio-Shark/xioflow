@@ -358,6 +358,16 @@ export class SqliteStore {
       }
 
       const ops = this.getOperationsByRun(runId);
+      const agents = new Map<string, string>();
+      for (const event of this.getJournalEvents(run.domainId)) {
+        if (event.type === 'AGENT_STATE' && event.runId === runId) {
+          const agent = event.payload.state as { id: string; status: string };
+          agents.set(agent.id, agent.status);
+        }
+      }
+      if ([...agents.values()].some((status) => status !== 'completed' && status !== 'failed')) {
+        throw new Error(`Cannot complete run '${runId}': agents are not in terminal status`);
+      }
       const unfinished = ops.filter((op) => op.status !== 'done');
       if (unfinished.length > 0) {
         throw new Error(
@@ -799,7 +809,16 @@ export class SqliteStore {
       ORDER BY seq ASC
     `);
     const rows = stmt.all(domainId, fromSeq) as any[];
-    return rows.map((row) => ({
+    return rows.map((row) => this.mapJournalEvent(row));
+  }
+
+  public getJournalEvent(domainId: string, seq: number): JournalEvent | null {
+    const row = this.db.prepare('SELECT * FROM journal_events WHERE domain_id = ? AND seq = ?').get(domainId, seq);
+    return row ? this.mapJournalEvent(row) : null;
+  }
+
+  private mapJournalEvent(row: any): JournalEvent {
+    return {
       seq: row.seq,
       domainId: row.domain_id,
       runId: row.run_id || undefined,
@@ -807,7 +826,7 @@ export class SqliteStore {
       type: row.type,
       payload: JSON.parse(row.payload),
       timestamp: row.timestamp,
-    }));
+    };
   }
 
   public getEventsByRun(runId: string): JournalEvent[] {

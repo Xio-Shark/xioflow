@@ -15,6 +15,8 @@ Agent runtimes usually call `spawn()` (or `exec()`) and hope for the best. When 
 
 Besides one-shot commands, the kernel supervises long-running services (MCP stdio servers, dev servers), makes operations idempotent by `opId` for durable engines (Temporal, LangGraph), and snapshots, rolls back and forks the workspace so an agent's file changes can be undone per step.
 
+The working tree also includes an **experimental `AgentRuntime`**: kernel-owned agent lifecycle, cooperative scheduling, evidence-gated dispatch and persistent checkpoint/step budgets. Adapters can submit commands through a per-step context; the kernel tracks their ownership and waits for the batch before checkpointing. It accepts existing runner adapters rather than replacing their models or tools. See the [runtime contract](spec/agent-runtime.md) and [recovery experiments](audit/observation/RECOVERY.md). These additions are unreleased.
+
 ## Guarantees
 
 | Guarantee | Mechanism |

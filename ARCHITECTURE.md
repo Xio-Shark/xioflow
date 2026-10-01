@@ -572,6 +572,10 @@ executeProcess(op) 准入与重放判定表：
 
 ---
 
+### 3.10 实验性 agent 生命周期与依据感知调度
+
+`AgentRuntime` 将 agent 身份、输入、父子关系、checkpoint、轮次预算和协作式调度放进执行域，复用 SQLite journal。发行版仍提供模型、工具和单轮执行 adapter。派发前的观测校验、有效 checkpoint 选择、暂停和恢复协议见 [实验性运行时规范](spec/agent-runtime.md)；验证见 `tests/agents/` 与 E6。这是未发布的增量，不代表完整多 agent 内核已经完成。
+
 ## 4. 平台驱动契约与停止确认流水线
 
 ### 4.1 平台驱动能力与 Containment 隔离容器抽象

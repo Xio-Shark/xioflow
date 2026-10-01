@@ -61,6 +61,32 @@ describe('workspace transactions (optimistic parallel agents)', () => {
     return tx;
   }
 
+  it('can fork an older baseline while retaining conflict checks for intervening writes', async () => {
+    const first = await begin('base', 'run-a');
+    await supervisor.abortWorkspaceTransaction('base');
+    fs.writeFileSync(path.join(repoDir, 'shared.txt'), 'changed outside\n');
+    const fork = await supervisor.beginWorkspaceTransaction({
+      txId: 'from-base', runId: 'run-b', root: repoDir, forkPath: path.join(tempDir, 'fork-from-base'), baseSnapshotId: first.baseSnapshotId,
+    });
+    expect(fs.readFileSync(path.join(fork.forkRoot, 'shared.txt'), 'utf8')).toBe('base\n');
+    fs.writeFileSync(path.join(fork.forkRoot, 'shared.txt'), 'agent write\n');
+    expect((await supervisor.commitWorkspaceTransaction(fork.txId)).status).toBe('conflict');
+    expect(fs.readFileSync(path.join(repoDir, 'shared.txt'), 'utf8')).toBe('changed outside\n');
+  });
+
+  it('rejects a missing pinned snapshot or a snapshot from another root', async () => {
+    const base = await begin('base', 'run-a');
+    for (const [id, root, baseSnapshotId] of [
+      ['missing', repoDir, 'missing-snapshot'],
+      ['wrong-root', path.join(repoDir, 'src'), base.baseSnapshotId],
+    ]) {
+      await expect(supervisor.beginWorkspaceTransaction({
+        txId: id, runId: 'run-b', root, baseSnapshotId, forkPath: path.join(tempDir, `fork-${id}`),
+      })).rejects.toThrow('same root');
+      expect(fs.existsSync(path.join(tempDir, `fork-${id}`))).toBe(false);
+    }
+  });
+
   /** An agent tool call: a real child process working inside the transaction's fork. */
   async function agent(runId: string, cwd: string, script: string) {
     const res = await supervisor.executeProcess({

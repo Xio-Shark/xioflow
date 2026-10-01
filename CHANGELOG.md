@@ -6,6 +6,17 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed
+- Workspace recovery now reserves a persistent `recovering` agent state. Concurrent resume/restore/recovery cannot dispatch or overwrite it mid-reconstruction; failed binding cleanup stays under that reservation, and host restart marks interrupted recovery instead of assuming a completed fork.
+
+### Added
+- Agent adapters receive a per-quantum `AgentExecution.executeProcess` context backed by the existing supervisor. Commands retain agent/Run ownership, share domain resource limits, and settle before checkpointing, including unawaited calls and sibling commands after a failure. Expired contexts and cross-agent operation reuse fail explicitly; command errors and indeterminate outcomes interrupt the step without replacing its checkpoint.
+- Agent journal v2 stores input/checkpoint bodies only at data-bearing boundaries and uses references for restoration. Lifecycle transitions no longer repeat full contexts; v1 and mixed journals remain readable. E9 measures the logical payload reduction without claiming model-speed gains.
+- Recovery candidates can share a pinned `baseSnapshotId`. Optional deterministic replay reuses identical divergent-prefix evidence, reporting skipped checkpoints separately from physical forks; tool execution failures remain visible and are not cached as semantic mismatches.
+- `recoverAgentWorkspace` reconstructs a stopped agent's saved read/edit prefix in a fresh workspace transaction, returns rejection evidence, and binds the restored checkpoint and transaction in one journal event. Agent workspace bindings reject cross-Run, closed or already-owned transactions. E7 compares actual file-tool recovery with whole-task restart.
+- Experimental `AgentRuntime`: journal-backed agent identity, parent/task association, cooperative round-robin dispatch, bounded concurrency, evidence gates, independent pause/resume, checkpoint selection/restoration and persistent step budgets. No provider dependency is added. Runs with nonterminal agents cannot report success.
+- Recovery experiments E4-E6 compare prefix reuse, exact runner checkpoint resume and kernel-owned scheduling. Deterministic providers and tool work are reported separately; these are not real-model cost benchmarks.
+
 ## [0.6.0] - 2026-10-01
 
 ### Fixed

@@ -8,6 +8,9 @@ export * from './driver/reaper-driver.js';
 export * from './supervisor/supervisor.js';
 export * from './recovery/engine.js';
 export * from './quick-run.js';
+export * from './agents/runtime.js';
+export type { AgentExecution, AgentCommandOptions, AgentCommandResult } from './agents/execution.js';
+export * from './agents/workspace-recovery.js';
 export * from './snapshot/git-shadow.js';
 export type {
   CommitOptions,

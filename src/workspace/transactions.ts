@@ -5,6 +5,7 @@ import { JournalEvent, SnapshotRef } from '../types.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
 import { isPathContained } from '../capability/index.js';
 import { collectReadSet, normalizeAccessTimes, probeReadTracking, ReadTracking } from './read-tracking.js';
+import { replayObservationLog } from './observation-replay.js';
 
 /**
  * 工作区事务：并行 agent 的乐观并发控制（ARCHITECTURE §3.9）。
@@ -117,7 +118,7 @@ export class WorkspaceTransactions {
 
   constructor(private readonly host: TransactionHost) {}
 
-  public async begin(options: { txId: string; runId: string; root: string; forkPath: string }): Promise<WorkspaceTransaction> {
+  public async begin(options: { txId: string; runId: string; root: string; forkPath: string; baseSnapshotId?: string }): Promise<WorkspaceTransaction> {
     const { snapshotDriver } = this.host;
     // txId 会成为快照 id 与 git ref 名的一部分
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(options.txId)) {
@@ -128,7 +129,22 @@ export class WorkspaceTransactions {
     }
     const root = fs.realpathSync(options.root);
     const { repoRoot } = await snapshotDriver.assertGitRepo(root);
-    const base = await this.host.captureSnapshot(options.runId, `${options.txId}-base`, root);
+    let base: SnapshotRef;
+    if (options.baseSnapshotId !== undefined) {
+      const store = this.host.domain.getStore();
+      const saved = store.getSnapshot(options.baseSnapshotId);
+      const run = store.getRun(options.runId);
+      if (!run || run.domainId !== this.host.domain.domainId || !['queued', 'starting', 'running'].includes(run.status)) {
+        throw new Error('A workspace transaction requires an active Run in its domain');
+      }
+      if (!saved || saved.domainId !== this.host.domain.domainId || saved.driver !== snapshotDriver.name
+        || saved.roots.length !== 1 || fs.realpathSync(saved.roots[0]) !== root) {
+        throw new Error('Transaction base snapshot must cover the same root in this domain');
+      }
+      base = saved;
+    } else {
+      base = await this.host.captureSnapshot(options.runId, `${options.txId}-base`, root);
+    }
     const forkPath = path.resolve(options.forkPath);
     await this.host.materialize(base.id, forkPath);
     const forkRoot = path.join(fs.realpathSync(forkPath), path.relative(repoRoot, root));
@@ -310,23 +326,11 @@ export class WorkspaceTransactions {
     await this.host.materialize(snapshot.id, replayPath);
     const replayRoot = path.join(fs.realpathSync(replayPath), path.relative(tx.repoRoot, tx.root));
 
-    let outcome: ObservationOutcome | undefined;
-    for (let i = 0; i < observations.log.length && !outcome; i++) {
-      const entry = observations.log[i];
-      try {
-        const seen = await observations.replay(entry, replayRoot);
-        if ((entry.kind === 'observe' || entry.resultHash !== undefined) && seen !== entry.resultHash) {
-          outcome = { attempted: true, divergedAt: i, reason: 'observation_changed' };
-        }
-      } catch {
-        // 重放一步失败：改动无法应用，或观测在新基线上已经不成立（读的文件没了）
-        outcome = { attempted: true, divergedAt: i, reason: entry.kind === 'mutate' ? 'mutation_not_applicable' : 'observation_changed' };
-      }
-    }
-    if (outcome) {
+    const replayed = await replayObservationLog(observations, replayRoot);
+    if (replayed.status === 'diverged') {
       await this.host.dematerialize(replayPath);
       await this.host.pruneSnapshot(snapshot.id, tx.runId);
-      return { outcome };
+      return { outcome: { attempted: true, divergedAt: replayed.divergedAt, reason: replayed.reason } };
     }
 
     // 写集取「主工作区当前状态 → 重放分叉」的差异：它就是要落到主工作区的全部改动
