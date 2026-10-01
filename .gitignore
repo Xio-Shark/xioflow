@@ -10,3 +10,11 @@ dist/
 effects.log
 *.log
 .xiotask/
+
+# audit bench run output (transcripts contain full harness prompts and local paths)
+audit/results/
+# per-harness reproduction scripts, generated from audit/results/ by audit/repro/generate.mjs;
+# they name unpublished findings about third-party harnesses
+audit/repro/*.sh
+# drafts issues about third-party harnesses from audit results; not published
+audit/issue-drafts.mjs
