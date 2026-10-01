@@ -263,7 +263,7 @@ export const TOOLS: ToolDefinition[] = [
   {
     name: 'commit_transaction',
     title: 'Commit a workspace transaction',
-    description: 'Validate the transaction against changes committed since it began and apply it to the workspace. On conflict nothing is applied and the conflicting paths are listed.',
+    description: 'Validate the transaction against changes committed since it began and apply it to the workspace. On conflict nothing is applied and the conflicting paths are listed. Validation here is file-level (read and write sets); replaying a transaction\'s observations needs a host-side replay function and is only available to embedded hosts.',
     inputSchema: {
       type: 'object',
       properties: { txId: str('Transaction id.') },

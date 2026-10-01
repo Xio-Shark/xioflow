@@ -22,6 +22,8 @@ import {
   normalizeResourceName,
   ProcessOperationResult,
   CapabilityViolationError,
+  ObservationEntry,
+  ObservationValidation,
 } from '../index.js';
 
 export interface ConsumerContext {
@@ -2181,6 +2183,110 @@ export function defineContractTestSuite(
       expect(fs.readFileSync(path.join(repoDir, '.env'), 'utf8')).toBe('SECRET=1\n');
       expect(fs.readFileSync(path.join(repoDir, 'init.txt'), 'utf8')).toBe('init\n');
       expect(fs.existsSync(path.join(repoDir, 'cache.tmp'))).toBe(true);
+    });
+
+    // 契约 58–60 共用的宿主：两种工具（read 是观测，edit 是改动），重放就是在给定根目录里再执行一次
+    type TxStep = { tool: 'read'; path: string } | { tool: 'edit'; path: string; old: string; new: string };
+    const txHash = (text: string) => crypto.createHash('sha256').update(text).digest('hex');
+    function txExecute(step: TxStep, root: string): string {
+      const abs = path.join(root, step.path);
+      const text = fs.readFileSync(abs, 'utf8');
+      if (step.tool === 'read') return text;
+      if (!text.includes(step.old)) throw new Error(`edit: "${step.old}" not found in ${step.path}`);
+      fs.writeFileSync(abs, text.replace(step.old, step.new));
+      return 'ok';
+    }
+    function txObservations(steps: TxStep[], root: string): ObservationValidation {
+      return {
+        log: steps.map((step) => {
+          const seen = txHash(txExecute(step, root));
+          return step.tool === 'read'
+            ? { kind: 'observe' as const, call: { tool: step.tool, args: { ...step } }, resultHash: seen }
+            : { kind: 'mutate' as const, call: { tool: step.tool, args: { ...step } } };
+        }),
+        closedWorld: true,
+        replay: async (entry, replayRoot) => txHash(txExecute(entry.call.args as unknown as TxStep, replayRoot)),
+      };
+    }
+    /** 仓库含 a.txt / b.txt；事务 A 执行 steps，事务 B 把 b.txt 的第二行改掉并先提交。 */
+    async function txRace(tag: string, steps: TxStep[]) {
+      const { supervisor, domain, tempDir } = ctx;
+      const repoDir = path.join(tempDir, `repo-${tag}`);
+      fs.mkdirSync(repoDir, { recursive: true });
+      await execFileAsync('git', ['init', '-b', 'main'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], { cwd: repoDir });
+      await execFileAsync('git', ['config', 'user.email', 'tester@test.local'], { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'a.txt'), 'alpha\n');
+      fs.writeFileSync(path.join(repoDir, 'b.txt'), 'first\nsecond\n');
+      await execFileAsync('git', ['add', '.'], { cwd: repoDir });
+      await execFileAsync('git', ['commit', '-m', 'init'], { cwd: repoDir });
+      ensureTaskAndRun(domain, `task-${tag}`, `run-${tag}`);
+      const begin = (id: string) =>
+        supervisor.beginWorkspaceTransaction({ txId: `${tag}-${id}`, runId: `run-${tag}`, root: repoDir, forkPath: path.join(tempDir, `fork-${tag}-${id}`) });
+      const txA = await begin('A');
+      const txB = await begin('B');
+      const observations = txObservations(steps, txA.forkRoot);
+      fs.writeFileSync(path.join(txB.forkRoot, 'b.txt'), 'first\nSECOND\n');
+      expect((await supervisor.commitWorkspaceTransaction(`${tag}-B`)).status).toBe('committed');
+      return { repoDir, txA, observations, replayFork: `${path.join(tempDir, `fork-${tag}-A`)}-replay` };
+    }
+
+    it('契约 58: 事务读过的文件被并发提交改动，但在当前工作区上重放的观测全部相同：提交成功并声明 validation: "observations"，双方改动都在', async () => {
+      const { supervisor } = ctx;
+      // A 对 b.txt 的「观测」只取第一行：B 改的是第二行，文件变了，观测没变
+      const steps: TxStep[] = [{ tool: 'read', path: 'b.txt' }, { tool: 'edit', path: 'a.txt', old: 'alpha', new: 'beta' }];
+      const { repoDir, txA, observations, replayFork } = await txRace('c58', steps);
+      const firstLine = (entry: ObservationEntry, root: string) =>
+        txHash(fs.readFileSync(path.join(root, entry.call.args.path as string), 'utf8').split('\n')[0]);
+      observations.log[0].resultHash = firstLine(observations.log[0], txA.forkRoot);
+      const replay = observations.replay;
+      observations.replay = async (entry, root) => (entry.kind === 'observe' ? firstLine(entry, root) : replay(entry, root));
+
+      const result = await supervisor.commitWorkspaceTransaction('c58-A', { observations });
+      // 读集观测不到的文件系统上，文件级校验本来就不会报 read_write：声明的是 write_only，不冒充更强的证据
+      expect(result).toMatchObject({ status: 'committed', validation: txA.readTracking === 'atime' ? 'observations' : 'write_only' });
+      expect(fs.readFileSync(path.join(repoDir, 'a.txt'), 'utf8')).toBe('beta\n');
+      expect(fs.readFileSync(path.join(repoDir, 'b.txt'), 'utf8')).toBe('first\nSECOND\n');
+      expect(fs.existsSync(replayFork)).toBe(false);
+    });
+
+    it('契约 59: 重放的观测与记录不同：保持冲突，报告第一处不同的位置与原因，主工作区不变', async () => {
+      const { supervisor } = ctx;
+      const steps: TxStep[] = [{ tool: 'read', path: 'a.txt' }, { tool: 'read', path: 'b.txt' }, { tool: 'edit', path: 'a.txt', old: 'alpha', new: 'beta' }];
+      const { repoDir, txA, observations, replayFork } = await txRace('c59', steps);
+      if (txA.readTracking !== 'atime') return;
+
+      const result = await supervisor.commitWorkspaceTransaction('c59-A', { observations });
+      expect(result.status).toBe('conflict');
+      if (result.status !== 'conflict') return;
+      expect(result.conflicts).toEqual([{ path: 'b.txt', kind: 'read_write', otherTxId: 'c59-B' }]);
+      expect(result.observation).toEqual({ attempted: true, divergedAt: 1, reason: 'observation_changed' });
+      expect(fs.readFileSync(path.join(repoDir, 'a.txt'), 'utf8')).toBe('alpha\n');
+      expect(fs.existsSync(replayFork)).toBe(false);
+    });
+
+    it('契约 60: 分叉里运行过进程的事务不使用观测校验：保持文件级冲突并写 TX_VALIDATION_DOWNGRADED', async () => {
+      const { supervisor, domain } = ctx;
+      const steps: TxStep[] = [{ tool: 'read', path: 'b.txt' }, { tool: 'edit', path: 'a.txt', old: 'alpha', new: 'beta' }];
+      const { repoDir, txA, observations } = await txRace('c60', steps);
+      if (txA.readTracking !== 'atime') return;
+      await supervisor.executeProcess({
+        runId: 'run-c60',
+        opId: 'c60-proc',
+        name: 'shell-in-fork',
+        command: { execPath: process.execPath, args: ['-e', '0'], cwd: txA.forkRoot },
+        requiredResources: [`workspace:write:${txA.forkRoot}`],
+      });
+      // 宿主的重放会说「观测相同」；内核不得因此放行
+      observations.replay = async (entry) => entry.resultHash;
+
+      const result = await supervisor.commitWorkspaceTransaction('c60-A', { observations });
+      expect(result.status).toBe('conflict');
+      if (result.status !== 'conflict') return;
+      expect(result.observation).toEqual({ attempted: false, reason: 'not_closed_world' });
+      const downgraded = domain.getStore().getJournalEvents(domain.domainId).filter((e) => e.type === 'TX_VALIDATION_DOWNGRADED');
+      expect(downgraded.at(-1)?.payload).toMatchObject({ txId: 'c60-A', operationId: 'c60-proc' });
+      expect(fs.readFileSync(path.join(repoDir, 'a.txt'), 'utf8')).toBe('alpha\n');
     });
   });
 }

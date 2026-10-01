@@ -31,6 +31,7 @@ import { runProcess, ProcessRunContext } from './process-run.js';
 import * as snapshotOps from './snapshot-ops.js';
 import { rollback } from './rollback.js';
 import {
+  CommitOptions,
   CommitResult,
   TransactionEffects,
   WorkspaceTransaction,
@@ -149,8 +150,8 @@ export class ProcessSupervisor {
     return this.workspaceTransactions().inspect(txId);
   }
 
-  public async commitWorkspaceTransaction(txId: string): Promise<CommitResult> {
-    return this.workspaceTransactions().commit(txId);
+  public async commitWorkspaceTransaction(txId: string, options?: CommitOptions): Promise<CommitResult> {
+    return this.workspaceTransactions().commit(txId, options);
   }
 
   public async abortWorkspaceTransaction(txId: string, reason?: string): Promise<void> {
@@ -183,6 +184,9 @@ export class ProcessSupervisor {
         }
       },
       dematerialize: (forkPath) => this.dematerialize(forkPath, { force: true }),
+      pruneSnapshot: async (snapshotId, runId) => {
+        await this.pruneSnapshots([snapshotId], { runId });
+      },
     });
     return this.transactions;
   }

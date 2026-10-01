@@ -10,7 +10,12 @@ export * from './recovery/engine.js';
 export * from './quick-run.js';
 export * from './snapshot/git-shadow.js';
 export type {
+  CommitOptions,
   CommitResult,
+  CommitValidation,
+  ObservationEntry,
+  ObservationOutcome,
+  ObservationValidation,
   TransactionConflict,
   TransactionEffects,
   WorkspaceTransaction,
