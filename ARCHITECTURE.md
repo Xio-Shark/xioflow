@@ -83,8 +83,8 @@
 内核不做安全沙箱（§8），因此无法观察受管进程写到了哪里。回滚能力的承诺边界由两个正交能力共同决定：
 - **快照驱动（SnapshotDriver）**：决定「能恢复什么」——git 影子引用、APFS clonefile、btrfs/ZFS 快照、overlay 等均作为驱动，内核只定义契约（§3.5、§4.1）；
 - **写入限制驱动（ConfinementDriver，可选）**：决定「是否确知没写到别处」——可借助 bubblewrap、`sandbox-exec`、Anthropic `srt` 等外部工具把写入限制在快照根目录内。它服务于**回滚正确性**，不作为安全边界承诺；
-- **覆盖声明**：每次回滚结果必须携带 `coverage`：`complete`（有写入限制且快照覆盖全部根目录）/ `declared_roots`（仅保证声明根目录，范围外副作用未知）/ `none`；
-- **禁止虚报**：没有写入限制时，回滚结果永远不得声明 `complete`。
+- **覆盖声明**：每次回滚结果必须携带 `coverage`：`complete`（有写入限制，且根内的被忽略文件已随快照恢复或被清单证明未变）/ `non_ignored`（有写入限制，但被忽略文件不在快照内、也没有证据说明它们未变）/ `declared_roots`（仅保证声明根目录，范围外副作用未知）/ `none`；同时携带 `ignoredFiles` 与 `coverageBasis`（得出结论的依据列表）；
+- **禁止虚报**：没有写入限制时，回滚结果永远不得声明 `complete`；快照不含被忽略文件、又拿不出「它们没变」的证据时，同样不得声明 `complete`。
 
 #### 5. ABI 稳定：协议与契约是产品，实现是参考
 Linux 发行版生态建立在 syscall ABI 长期稳定之上。xioflow 的等价物是：
@@ -113,7 +113,7 @@ Linux 发行版生态建立在 syscall ABI 长期稳定之上。xioflow 的等�
 #### 9. capability：授权事实的结构化载体，统一租约、写根与快照
 - capability 由发行版策略签发（内核不判定谁该拿到），内核在准入时只做结构校验：存在、未过期、属于当前 epoch、op 申请的资源与写根都被 capability 覆盖（路径先 realpath 再判包含）。校验失败显式拒绝，签发、收窄、使用都写 journal；
 - 同一个 capability 同时决定租约集合、`ConfinementDriver` 的可写根、快照根。op 只声明 `capabilityId` 时，这三者由它推导，不再是三个可能互相矛盾的字段；
-- 回滚 `coverage` 由「本次是否真的在 capability 范围内受限执行」推导：有写入限制 ⇒ 可达 `complete`；没有 ⇒ 最多 `declared_roots`；
+- 回滚 `coverage` 由「本次是否真的在 capability 范围内受限执行」推导：有写入限制 ⇒ 可达 `non_ignored`，被忽略文件也有着落时才是 `complete`（裁决 4）；没有 ⇒ 最多 `declared_roots`；
 - 不是安全边界（§8.1 不变）；嵌入模式不做签名（D18），daemon 模式再议。
 
 ---
@@ -296,10 +296,20 @@ export interface RollbackOperationResult extends BaseResult {
   kind: 'rollback';
   status: 'restored' | 'partial' | 'failed';
   snapshotId: string;
-  coverage: 'complete' | 'declared_roots' | 'none';     // §0.2 裁决 4：无写入限制时不得为 complete
+  // §0.2 裁决 4：无写入限制时不得为 complete；被忽略文件既不在快照内、又未被证明未变时最多 non_ignored
+  coverage: 'complete' | 'non_ignored' | 'declared_roots' | 'none';
   verifiedFingerprint: boolean;    // 回滚后工作区指纹是否与快照一致
-  unrestoredPaths?: string[];      // partial 时列出未能恢复的路径
+  unrestoredPaths?: string[];      // partial 时列出未能恢复的路径（含 full_tree 快照之后新出现、被有意保留的被忽略文件）
   outOfScopeEffects: 'none_possible' | 'possible';      // 受管操作期间是否可能写到根目录之外
+  // 回滚对被忽略文件能说什么：在快照内且已恢复 / 不在快照内但清单证明未变 / 不在快照内且未证明 / 在快照内但核验未通过
+  ignoredFiles: 'restored' | 'unchanged_verified' | 'not_captured' | 'unverified';
+  ignoredChanges?: {               // 带清单时：被忽略文件相对清单的变化，每类最多 50 条，counts 为总数
+    added: string[]; removed: string[]; modified: string[];
+    metadataOnly: string[];        // 只有 ctime 变了：无法证明未变，也不断言已变
+    truncated: boolean;
+    counts: { added: number; removed: number; modified: number; metadataOnly: number };
+  };
+  coverageBasis: string[];         // 依据，例如 all_ops_confined、snapshot_full_tree、ignored_manifest_unchanged、ignored_not_captured
 }
 
 /**
@@ -377,7 +387,7 @@ export type IdentityVerificationResult =
 
 ---
 
-## 3. 九大核心运行协议 (Formal Protocols)
+## 3. 核心运行协议 (Formal Protocols)
 
 ### 3.1 启动协议：先登记意图，再执行 (Intent-First Spawn Protocol)
 杜绝“启动了进程却无记录”的崩溃盲区。规范实现采用**两段式受控启动（Gated Spawn）**：子进程在 `exec` 之前阻塞在一道门上，身份落库后才放行，从构造上消除“已执行但无身份记录”的窗口：
@@ -460,17 +470,23 @@ export type IdentityVerificationResult =
 3. [驱动恢复] SnapshotDriver.restore(snapshot)
 4. [核验] SnapshotDriver.fingerprint(roots) 与 snapshot.treeFingerprint 比对
    ├── 一致 -> status: restored
-   ├── 部分路径无法恢复 -> status: partial + unrestoredPaths
-   └── 驱动失败 -> status: failed
-5. [覆盖声明] 依 §0.2 裁决 4 计算 coverage 与 outOfScopeEffects：
+   ├── 部分路径无法恢复，或 full_tree 快照之后新出现的被忽略文件被保留 -> status: partial + unrestoredPaths
+   │   （被保留的新文件不计入指纹比对；removeNewIgnored: true 时删除它们，可达 restored）
+   └── 其余内容与快照不一致 -> status: failed
+5. [覆盖声明] 依 §0.2 裁决 4，由一个纯函数（deriveRollbackCoverage）从事实推导 coverage / outOfScopeEffects / ignoredFiles / coverageBasis：
    自上次快照以来任一受管操作在无写入限制下运行 ⇒ outOfScopeEffects = 'possible'，coverage ≤ declared_roots
+   全部受限、快照为 full_tree ⇒ complete（ignoredFiles: restored）
+   全部受限、默认快照、清单比对未变 ⇒ complete（ignoredFiles: unchanged_verified）
+   全部受限、默认快照、无清单 / 清单有变化 / 只有 ctime 变了 / 清单不可读 ⇒ non_ignored（ignoredFiles: not_captured）
 6. [事务提交] 写入 RollbackOperationResult，释放租约
 
-崩溃恢复：rollback 处于未终结状态时，恢复引擎重新计算指纹：与快照一致 ⇒ restored；否则 indeterminate 并保留租约。
+崩溃恢复：rollback 处于未终结状态时，恢复引擎重新计算指纹：与快照一致 ⇒ restored，覆盖声明经同一推导函数得出
+（未重新核验受限情况，所以最多 declared_roots，依据 effects_unverified）；否则 indeterminate 并保留租约。
 ```
 
 - **快照保留与回收**：内核只提供 `pruneSnapshots(filter)` 原语，且拒绝回收仍被未终结 / 未裁决操作引用的快照；保留策略由发行版决定；
-- **首个规范驱动**：`git-shadow`——用临时 `GIT_INDEX_FILE` 执行 `add -A` + `write-tree` + `commit-tree`，写入私有 ref `refs/xioflow/snapshots/<id>`，不触碰用户 index 与分支；覆盖声明为 `worktree_non_ignored`（被忽略文件如 `node_modules` 不在快照内，必须如实声明）；
+- **首个规范驱动**：`git-shadow`——用临时 `GIT_INDEX_FILE` 执行 `add -A` + `write-tree` + `commit-tree`，写入私有 ref `refs/xioflow/snapshots/<id>`，不触碰用户 index 与分支；覆盖声明为 `worktree_non_ignored`（被忽略文件如 `node_modules` 不在快照内，必须如实声明）；`includeIgnored: true` 时为 `full_tree`，回滚仍不删除快照之后新出现的被忽略文件，除非调用方显式给出 `removeNewIgnored`；
+- **被忽略文件清单（可选）**：`captureSnapshot({ trackIgnored: 'manifest' })` 不复制内容，只记录根内每个被忽略文件的 `size / mtime / ctime / mode`，写入域的 `artifacts/<snapshotId>-ignored.manifest`，`SnapshotRef.ignoredManifestDigest` 记其 sha256，journal 只记摘要与条目数。回滚时重新采集并比对：四项全等才算未变（内容改写必然推进 ctime，非特权进程无法把它改回去）；只有 ctime 变了（`utimes`、`chmod` 来回、内核自己的读集归一）归为 `metadataOnly`，结论是「无法证明」。清单随 `pruneSnapshots` 删除；
 - **快照绑定 Journal Seq**：捕获事务内写入 `SNAPSHOT_CAPTURED` 事件，并将该事件在 journal 中的全局递增序号记录到 `SnapshotRef.journalSeq`。语义是「工作区在事件 seq N 时的状态」。发行版回退对话到 seq N 时，据此查询 `journalSeq <= N` 的最近快照，内核不触碰对话状态；
 - **分叉工作区（Materialize 与 Dematerialize）**：
   - `snapshot.materialize(snapshotId, newRoot)`：在新根目录生成独立工作区（首个驱动使用 `git worktree add --detach <newRoot> refs/xioflow/snapshots/<snapshotId>`），登记为受管独占资源 `workspace:write:<newRoot>`；源工作区、用户 index、HEAD 与分支保持不变；
@@ -537,8 +553,22 @@ executeProcess(op) 准入与重放判定表：
   - 主工作区自基线以来、未被已提交事务解释的改动（绕过事务的直接写入）同样参与校验 ⇒ `external_write`；
   - 同一域只有一个 owner，校验与应用在进程内串行化，保证相对其他提交是原子的。
 - **应用**：持主工作区的 `workspace:write` 租约，先写 `TX_COMMITTING`（带写集，意图先行），再把写集原样落到主工作区（保留可执行位与符号链接，拒绝经符号链接父目录写出事务根），最后写 `TX_COMMITTED` 并回收 fork。应用途中崩溃：fork 就是重做日志，重启后再次 commit 从 journal 重建事务并幂等重放应用，不重新校验。
-- **冲突即终止**：校验失败写 `TX_CONFLICTED`，主工作区不变，fork 保留供查看；宿主只能 abort 并从当前工作区重新开始（重放 / rebase 属于宿主策略，不在内核内）。
+- **观测级校验**（可选，`commit(txId, { observations })`）：文件级读集是「读过这个文件」，而 agent 依据的往往只是其中一段，或一次搜索的结果。别人改了同一个文件的另一处，文件级校验照样报 `read_write`，这是误冲突。宿主可以在提交时交出事务的观测日志（按顺序的每一步：只读观测带结果哈希；改动的返回值如果也向 agent 展示了别处的内容，同样带结果哈希）和一个重放函数。内核只在文件级校验**已经报了冲突**时才使用它：
+  1. 冲突里有 `write_write`，或冲突路径在本事务的写集里 ⇒ 不尝试，保持冲突（`observation: { attempted: false, reason: 'write_conflict' }`）。内核不解释工具调用，分不清带范围的编辑与整文件覆盖，两边都写过的文件不靠观测放行；
+  2. 事务开始以来有进程或 service 在分叉里运行过（按声明的写根与租约判断）⇒ 不尝试，写 `TX_VALIDATION_DOWNGRADED`（`reason: 'not_closed_world'`）。进程能读到日志之外的东西，宿主的 `closedWorld` 声明此时不作数；
+  3. 否则先写 `TX_REPLAY_STARTED`（记下重放分叉与快照，崩溃后 abort 据此回收），对主工作区当前状态拍一个快照、materialize 出重放分叉，按顺序让宿主重放每一步：观测的结果哈希与记录不同，或某一步改动无法应用 ⇒ 保持冲突，并报告第一处不同（`observation: { attempted: true, divergedAt, reason }`）；
+  4. 全部相同 ⇒ 写集取「当前状态 → 重放分叉」的差异。拿到主工作区写租约后再核对一次主工作区仍是拍快照时的状态：重放期间又被改动（绕过事务的直接写入）⇒ 结论作废，保持冲突（`observation: { attempted: true, reason: 'workspace_changed' }`），不应用；否则以重放分叉为来源提交。`TX_COMMITTING` 记下来源目录与 `validation`，崩溃后重试仍从重放分叉应用。
+  提交结果带 `validation`，说明「无冲突」凭的是什么：`observations`（重放的观测）、`files`（文件级读写集）、`write_only`（读集观测不到，只校验了写集）。观测级校验的正确性取决于宿主的日志是否完整、规范化后的结果是否可复现，内核能核对的只有上面第 2 条；它不保证合并后的代码语义正确（两个各自成立的改动合在一起仍可能不成立），这一点与文件级校验相同。
+- **冲突即终止**：校验失败写 `TX_CONFLICTED`（尝试过观测校验时带 `observation`），主工作区不变，fork 保留供查看；宿主只能 abort 并从当前工作区重新开始（从分叉点续跑、rebase 属于宿主策略，不在内核内）。
 - **边界**：只观测 fork 内的读取；fork 由快照树检出，不含被忽略的文件（如 `node_modules`）。
+
+### 3.10 读集证据：验证结果带着它的依赖
+验证命令的结论（测试通过、类型检查通过）只对它依赖的文件成立。`executeProcess({ trackReads: { roots } })` 用 §3.9 的同一种观测（访问时间，无特权）记下命令在 roots 内读过的文件与列过的目录，结果带 `readEvidence` 摘要，详情写入 `artifacts/<opId>-reads.json.gz`：
+- **记录**：启动前对 roots 做一趟归一（只动上次归一之后被读过的文件，目录每次都归一），进程退出后收集读集，对读过的文件算内容哈希、对列过的目录算条目集合哈希，并记下 roots 内每个文件的 size / mtime。`scope` 恒为 `content_reads`：只 stat 不读内容的依赖不在读集里。
+- **`evidenceStatus(opId)`**：读过的文件内容变了或列过的目录条目变了 ⇒ `stale`（列出它们）；roots 内什么都没变 ⇒ `fresh`（`basis: 'tree_unchanged'`）；只有读集之外的文件变了 ⇒ 调用方声明过 `statCaches: 'ruled_out'` 时为 `fresh`（`basis: 'reads_unchanged'`），否则为 `unknown`（`changed_outside_read_set`）。
+- **为什么默认是 `unknown`**：命中有效缓存的命令只 stat 源文件、不读它（Python 字节码缓存、增量编译器），源文件因此不在读集里。实测默认配置下按读集选测试，对源码变异的召回率只有 0.015；把字节码缓存指到空目录后为 1.000。内核无法知道一条命令有没有这类缓存，所以只有调用方声明排除之后才按读集放行。
+- **观测不到时**：文件系统不推进 atime（`no_atime`），或同一个根上另一条被观测的命令正在运行（`roots_busy`，后来者不做归一，先来者的证据不受影响）⇒ `tracking: 'unobserved'`，只能凭「什么都没变」答 `fresh`，否则 `unknown`。证据收集本身失败 ⇒ `tracking: 'failed'`，命令结果照常落盘，状态为 `unknown`。
+- **边界**：roots 之外的依赖、环境变量、常驻进程代读的文件、命令运行期间别人的写入都不在证据里；证据不是密闭性（hermeticity）保证。归一会改动被读过文件的 ctime，§3.5 的被忽略文件清单会把它记为仅元数据变化。
 
 ---
 
@@ -857,7 +887,7 @@ domainBudget = {
 
 ### 7.2 契约清单
 
-状态列：`S<n>` 表示已在共享套件（`@xioflow/kernel/testing`，44 项）中以第 n 项实现；`R` 表示仅在内核仓自身测试中实现、待提升进共享套件；`计划` 表示尚未实现（落地阶段见 `ROADMAP.md`）。
+状态列：`S<n>` 表示已在共享套件（`@xioflow/kernel/testing`，50 项）中以第 n 项实现；`R` 表示仅在内核仓自身测试中实现、待提升进共享套件；`计划` 表示尚未实现（落地阶段见 `ROADMAP.md`）。
 
 | # | 等级 | 契约 | 状态 |
 |---|---|---|---|
@@ -916,7 +946,12 @@ domainBudget = {
 | 53 | L3 | `SnapshotRef.journalSeq` 与捕获事件 seq 一致；可按 seq 查询不晚于它的最近快照 | 计划 |
 | 54 | L3 | materialize 生成的工作区独立；源工作区、用户 index、HEAD 与分支不变；dematerialize 后无残留 worktree | 计划 |
 | 55 | L3 | capability 结构校验失败（过期 / 旧 epoch / 越界路径 / 越界资源）在准入期显式拒绝并写 journal | 计划 |
-| 56 | L3 | 无 `ConfinementDriver` 时回滚 `coverage` 不得为 `complete`；有且受限执行时才可能为 `complete` | 计划 |
+| 56 | L3 | 无 `ConfinementDriver` 时回滚 `coverage` 不得为 `complete`；全部受限执行时根外无副作用（`outOfScopeEffects: 'none_possible'`），`complete` 还要求被忽略文件在快照内（`full_tree`）或被清单证明未变，否则为 `non_ignored` | S56 |
+| 57 | L3 | `full_tree` 快照之后新出现的被忽略文件：回滚不擅自删除，如实列入 `unrestoredPaths`（`partial`），不报 `failed` | S57 |
+| 58 | L3 | 事务读过的文件被并发提交改动，但在当前工作区上重放的观测全部相同：提交成功并声明 `validation: 'observations'`，双方改动都保留 | S58 |
+| 59 | L3 | 重放的观测与记录不同，或改动无法重放：保持冲突，报告第一处不同的位置与原因，主工作区不变 | S59 |
+| 60 | L3 | 分叉里运行过进程的事务不使用观测校验：保持文件级冲突并写 `TX_VALIDATION_DOWNGRADED` | S60 |
+| 61 | L3 | 读集证据不得在依赖变化后仍答 `fresh`：读过的文件变了为 `stale` 并列出它；只有读集之外变了且未排除 stat 缓存、或读取没有被观测到，为 `unknown` | S61 |
 
 ### 7.3 崩溃点矩阵与形式化规格
 

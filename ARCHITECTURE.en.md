@@ -82,8 +82,8 @@ The kernel strictly differentiates between **"Outcome is indeterminate"** and **
 The kernel is not a security sandbox (§8) and cannot observe arbitrary writes by unmanaged child processes. Rollback assurance is governed by two orthogonal capabilities:
 - **Snapshot Driver (`SnapshotDriver`)**: Governs *what can be restored* — Git shadow references, APFS clonefile, btrfs/ZFS snapshots, overlayfs, etc. The kernel defines the driver contract (§3.5, §4.1).
 - **Confinement Driver (`ConfinementDriver`, optional)**: Governs *whether writes were verified not to leak outside* — using bubblewrap, `sandbox-exec`, Anthropic `srt`, or container primitives to restrict writes to snapshot roots. Serves **rollback correctness**, not security promises.
-- **Honest Coverage Declaration**: Every rollback result must report `coverage`: `complete` (writes were confined and snapshot covered all roots), `declared_roots` (guaranteed within declared roots only; outside side-effects unknown), or `none`.
-- **No False Claims**: Without write confinement during execution, rollback results must never claim `complete`.
+- **Honest Coverage Declaration**: Every rollback result must report `coverage`: `complete` (writes were confined, and ignored files inside the roots were either restored from the snapshot or proven unchanged by a manifest), `non_ignored` (writes were confined, but ignored files were not in the snapshot and nothing proves they are unchanged), `declared_roots` (guaranteed within declared roots only; outside side-effects unknown), or `none`. It also carries `ignoredFiles` and `coverageBasis` (the list of facts the claim rests on).
+- **No False Claims**: Without write confinement during execution, rollback results must never claim `complete`. The same holds when the snapshot excludes ignored files and there is no evidence that they are unchanged.
 
 #### 5. ABI Stability: Protocol and Conformance Contracts are the Product; Implementations are Reference
 The Linux distribution ecosystem relies upon long-term stability of the syscall ABI. xioflow's equivalents are:
@@ -121,7 +121,7 @@ The Linux distribution ecosystem relies upon long-term stability of the syscall 
 #### 9. Capability as Structured Authorization Bearer: Unifying Leases, Writable Roots, and Snapshots
 - Capabilities are issued by distribution security policies (the kernel does not decide who deserves permissions). The kernel performs structural admission validation: presence, unexpired, matches current epoch, and verifies that requested resources and mutation roots are contained within the capability (resolving symlinks with `realpath` before inclusion checks).
 - A single capability unifies resource leases, `ConfinementDriver` writable roots, and snapshot roots into a single coherent truth source.
-- Rollback `coverage` is derived directly from whether execution was verifiably confined by capability: confined ⇒ eligible for `complete`; unconfined ⇒ capped at `declared_roots`.
+- Rollback `coverage` is derived directly from whether execution was verifiably confined by capability: confined ⇒ eligible for `non_ignored`, and for `complete` once ignored files are accounted for (Decision 4); unconfined ⇒ capped at `declared_roots`.
 - Not a substitute for OS security boundaries (§8); unauthenticated in embedded mode (D18).
 
 ---
@@ -219,15 +219,20 @@ Rollback (rollback):
 3. [Driver Restore] SnapshotDriver.restore(snapshot)
 4. [Verification] Compare SnapshotDriver.fingerprint(roots) with snapshot.treeFingerprint
    ├── Matches -> status: restored
-   ├── Partial paths unrecoverable -> status: partial + unrestoredPaths
-   └── Driver failure -> status: failed
-5. [Coverage Declaration] Calculate coverage and outOfScopeEffects per §0.2 Decision 4:
+   ├── Partial paths unrecoverable, or ignored files that appeared after a full_tree snapshot were kept -> status: partial + unrestoredPaths
+   │   (kept new files are left out of the fingerprint comparison; removeNewIgnored: true deletes them and can reach restored)
+   └── Anything else differs from the snapshot -> status: failed
+5. [Coverage Declaration] One pure function (deriveRollbackCoverage) derives coverage / outOfScopeEffects / ignoredFiles / coverageBasis per §0.2 Decision 4:
    If any operation ran without write confinement since snapshot ⇒ outOfScopeEffects = 'possible', coverage <= declared_roots
+   All confined, full_tree snapshot ⇒ complete (ignoredFiles: restored)
+   All confined, default snapshot, manifest unchanged ⇒ complete (ignoredFiles: unchanged_verified)
+   All confined, default snapshot, no manifest / manifest changed / only ctime changed / manifest unreadable ⇒ non_ignored (ignoredFiles: not_captured)
 6. [Transaction Commit] Write RollbackOperationResult, release leases
 ```
 
 - **Retention and Pruning**: The kernel provides `pruneSnapshots(filter)`, and strictly refuses to prune snapshots referenced by non-terminal or unadjudicated operations.
-- **Reference Driver**: `git-shadow` uses a temporary `GIT_INDEX_FILE` to perform `add -A` + `write-tree` + `commit-tree` to private ref `refs/xioflow/snapshots/<id>`, without touching user index or branches; declares `coverage: 'worktree_non_ignored'`.
+- **Reference Driver**: `git-shadow` uses a temporary `GIT_INDEX_FILE` to perform `add -A` + `write-tree` + `commit-tree` to private ref `refs/xioflow/snapshots/<id>`, without touching user index or branches; declares `coverage: 'worktree_non_ignored'` (`full_tree` with `includeIgnored: true`; rollback still never deletes ignored files that appeared after the snapshot unless the caller passes `removeNewIgnored`).
+- **Ignored-file manifest (optional)**: `captureSnapshot({ trackIgnored: 'manifest' })` copies no content. It records `size / mtime / ctime / mode` for every ignored file inside the roots in `artifacts/<snapshotId>-ignored.manifest`, stores the sha256 in `SnapshotRef.ignoredManifestDigest`, and journals only the digest and entry count. Rollback collects the same facts again and compares: all four equal means unchanged (rewriting content always advances ctime, and an unprivileged process cannot move it back). An entry whose ctime alone changed (`utimes`, a `chmod` round trip, the kernel's own read-set normalisation) is reported as `metadataOnly`, meaning "cannot be proven". The manifest is deleted by `pruneSnapshots`.
 - **Journal Sequence Binding**: Snapshot transactions write `SNAPSHOT_CAPTURED` and record the global sequence number into `SnapshotRef.journalSeq`. Enables distributions to revert conversation state to sequence N and locate the corresponding workspace snapshot (`journalSeq <= N`).
 - **Workspace Forking (`materialize` / `dematerialize`)**:
   - `snapshot.materialize(snapshotId, newRoot)`: Creates an independent detached worktree (`git worktree add --detach <newRoot> refs/xioflow/snapshots/<snapshotId>`), registered as exclusive resource `workspace:write:<newRoot>`.
@@ -365,4 +370,9 @@ Status column: `S<n>` indicates implementation as test #n in the shared conforma
 | 53 | L3 | `SnapshotRef.journalSeq` matches event seq; enables querying nearest snapshot not exceeding given sequence number. | Planned |
 | 54 | L3 | Workspaces materialized from snapshots are isolated; source worktree, index, HEAD, and branch unaffected; dematerialize leaves no residue. | Planned |
 | 55 | L3 | Capability validation failure (expired / stale epoch / path out of bounds / resource out of bounds) rejected at admission. | Planned |
-| 56 | L3 | Rollback without `ConfinementDriver` cannot claim `complete`; only verifiably confined runs can achieve `complete`. | Planned |
+| 56 | L3 | Rollback without `ConfinementDriver` cannot claim `complete`. When every operation ran confined there are no out-of-scope effects (`outOfScopeEffects: 'none_possible'`); `complete` additionally requires ignored files to be in the snapshot (`full_tree`) or proven unchanged by a manifest, otherwise the result is `non_ignored`. | S56 |
+| 57 | L3 | Ignored files that appear after a `full_tree` snapshot: rollback does not delete them on its own, lists them in `unrestoredPaths` (`partial`), and does not report `failed`. | S57 |
+| 58 | L3 | A file the transaction read was changed by a concurrent commit, but every observation replayed on the current workspace is unchanged: the commit succeeds with `validation: 'observations'` and both sides' changes are kept. | S58 |
+| 59 | L3 | A replayed observation differs from the record, or a replayed change cannot be applied: the conflict stands, the first difference (index and reason) is reported, and the workspace is unchanged. | S59 |
+| 60 | L3 | A transaction in whose fork a process ran does not use observation validation: the file-level conflict stands and `TX_VALIDATION_DOWNGRADED` is journaled. | S60 |
+| 61 | L3 | Read evidence never answers `fresh` after a dependency changed: a changed file the command read gives `stale` and names it; a change only outside the read set without stat caches ruled out, or unobserved reads, gives `unknown`. | S61 |

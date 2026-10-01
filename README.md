@@ -26,7 +26,7 @@ Besides one-shot commands, the kernel supervises long-running services (MCP stdi
 | No implicit environment | `envWhiteList` is exact: whatever you pass is what the child gets, with no injected `PATH`. Without a whitelist the child inherits `process.env`, unless you pass `inheritEnv: false` to get an empty environment. |
 | No orphan leak | Termination escalates SIGINT to SIGTERM to SIGKILL across the process group, then re-enumerates descendants. Escaped (`setsid`) survivors are reported honestly as `{ stopped: 'cannot_determine', residualPids: [...] }` instead of a fake success. If the group is confirmed empty but the output pipes are still held by a process the driver never saw, the operation is `indeterminate`, not `succeeded`. |
 | No blind retry | Resubmitting an `opId` with the same input fingerprint joins the in-flight execution or replays the recorded result (`replayed: true`); an `indeterminate` result is returned as-is and never re-executed. A different fingerprint throws `OperationIdConflictError`. |
-| No out-of-scope rollback | A rollback only rewrites and deletes files inside the snapshot's declared roots, never touches ignored files unless they were captured, and is verified by fingerprint. `coverage: 'complete'` is claimed only when every operation since the snapshot ran under a confinement driver. |
+| No out-of-scope rollback | A rollback only rewrites and deletes files inside the snapshot's declared roots, never touches ignored files unless they were captured, and is verified by fingerprint. `coverage: 'complete'` is claimed only when every operation since the snapshot ran under a confinement driver and ignored files are accounted for: they were in the snapshot, or a manifest proves they are unchanged. Otherwise the result says `non_ignored` or `declared_roots`, with the reasons in `coverageBasis`. |
 | No split brain | A domain has one active owner, held by an exclusive lock file plus a heartbeat lease. Stale owners are fenced by an epoch counter; their writes are rejected. |
 
 ## Requirements
@@ -253,7 +253,20 @@ await supervisor.materialize(snap.snapshot.id, '/tmp/candidate-a');
 await supervisor.dematerialize('/tmp/candidate-a');
 ```
 
-Rollback only rewrites and deletes files inside the snapshot's roots and leaves ignored files alone unless the snapshot used `includeIgnored: true`. It is verified by fingerprint against the snapshot tree. `coverage` is `complete` only when every operation since the snapshot ran confined; otherwise it is `declared_roots` with `outOfScopeEffects: 'possible'`.
+Rollback only rewrites and deletes files inside the snapshot's roots and leaves ignored files alone unless the snapshot used `includeIgnored: true`. It is verified by fingerprint against the snapshot tree. `coverage` says how much the rollback vouches for:
+
+| `coverage` | Meaning |
+|---|---|
+| `complete` | Every operation since the snapshot ran confined, and ignored files inside the roots were restored (`includeIgnored: true`) or proven unchanged by a manifest. |
+| `non_ignored` | Every operation ran confined, so nothing outside the roots changed, but ignored files (`.env`, `node_modules`, build output) were not in the snapshot and nothing proves they are unchanged. |
+| `declared_roots` | The roots were restored; an unconfined operation may have written elsewhere (`outOfScopeEffects: 'possible'`), or some paths could not be restored (`status: 'partial'`). |
+| `none` | Verification failed (`status: 'failed'`). |
+
+`ignoredFiles` (`restored` / `unchanged_verified` / `not_captured` / `unverified`) states what the rollback knows about ignored files, and `coverageBasis` lists the facts behind the claim, for example `['all_ops_confined', 'ignored_not_captured']`.
+
+A default snapshot can still reach `complete` without copying ignored files: `captureSnapshot({ ..., trackIgnored: 'manifest' })` records size, mtime, ctime and mode of every ignored file (about 0.2 s for 20,000 files and 0.45 s for 100,000 on an M-series Mac). At rollback the manifest is compared again; any added, removed or modified ignored file yields `non_ignored` and is listed in `ignoredChanges`. A file whose ctime alone changed is listed under `metadataOnly` and also prevents `complete`, because the kernel cannot prove its content is the same.
+
+With `includeIgnored: true`, ignored files that appeared after the snapshot are kept and listed in `unrestoredPaths` with `status: 'partial'` (a wholly new directory is one entry). Pass `removeNewIgnored: true` to `rollback` to delete them.
 
 To make `complete` reachable, bind operations to a capability and run them confined:
 
@@ -301,12 +314,58 @@ if (res.status === 'conflict') {
 - **Read set**: observed without privileges through access times. Each entry in the fork gets an atime just before its mtime, so any later read (file contents or directory listings) moves the atime past the mtime on both Linux (`relatime`) and macOS (APFS only updates an atime that is older than the mtime). On a `noatime` filesystem the result says `readTracking: 'unobserved'` and `readSet: null`.
 - **Validation**: a commit fails with `write_write` if a transaction committed since this one began wrote the same file, and with `read_write` if it changed something this one read. A listed directory only conflicts when entries were added to it or removed from it. A write that bypassed transactions and went straight to the workspace fails with `external_write`.
 - **Apply**: only a validated transaction is applied to the workspace. `TX_COMMITTING` is journaled first, so a commit interrupted by a crash finishes when it is called again after restart.
+- **Evidence**: a committed result says what "no conflict" rests on: `validation: 'files'` (read and write sets), `'write_only'` (reads could not be observed) or `'observations'` (below).
+
+### Fewer false conflicts: validating what the agent saw
+
+"It read this file" is coarser than what an agent relies on: usually a few lines, or the result of a search. When someone else changes another part of the same file, file-level validation still reports `read_write`. A host that logs the agent's steps can hand the log to the commit:
+
+```js
+const res = await supervisor.commitWorkspaceTransaction('agent-a-1', {
+  observations: {
+    // in order: { kind: 'observe', call, resultHash } for reads and searches, { kind: 'mutate', call } for edits
+    // (a mutation whose return value also showed the agent other content carries a resultHash too)
+    log,
+    closedWorld: true, // the log is everything the agent saw of the fork
+    // re-run one step in `root` and return its result hash; throw if a mutation cannot be applied
+    replay: async (entry, root) => myTools.run(entry.call, root),
+  },
+});
+// committed: res.validation === 'observations' when the log was what cleared the conflict
+// conflict:  res.observation says where the replay first differed, or why it was not tried
+```
+
+The kernel uses the log only after file-level validation has reported a conflict. It forks the current workspace, asks the host to replay the steps in order, and commits from that fork when every observation returns the recorded hash and every change still applies. If the workspace was changed again while the replay ran, nothing is applied (`observation.reason: 'workspace_changed'`). It does not try when both sides wrote the same file, and it does not trust `closedWorld` when a process ran inside the fork (`TX_VALIDATION_DOWNGRADED`): a process can read what the log does not show. Whether the log is complete and the hashes are reproducible is the host's responsibility; like file-level validation, this checks that the agent's inputs are unchanged, not that the merged code is correct.
+
+## Evidence with dependencies: is this test result still true?
+
+"Tests passed" is a statement about the files the test run depended on. A host that reuses an earlier result needs to know whether those files are still the same. `trackReads` records what a command read, and `evidenceStatus` answers later:
+
+```js
+const res = await supervisor.executeProcess({
+  runId, opId: 'verify-1', name: 'pytest',
+  command: { execPath: 'pytest', args: ['-q'], cwd: repo },
+  trackReads: { roots: [repo] },
+});
+// ...the agent keeps working...
+supervisor.evidenceStatus('verify-1');
+// { status: 'fresh', basis: 'tree_unchanged' }        nothing under the roots changed
+// { status: 'stale', changed: ['/repo/fixtures/case3.json'], truncated: false }
+// { status: 'unknown', reason: 'changed_outside_read_set', changedOutside: ['/repo/src/util.py'], truncated: false }
+```
+
+- **What is recorded**: every file under the roots whose content the command read (content hash) and every directory it listed (hash of its entry names), observed through access times as in workspace transactions, plus size and mtime of every file under the roots when the command finished. It works for any command, in any language, without instrumenting it, and it includes non-source inputs (fixtures, JSON, templates) that import-graph tools do not see.
+- **`stale`** lists the read files whose content changed and the listed directories whose entries changed.
+- **`fresh`** means one of two things, and says which. `tree_unchanged`: nothing under the roots changed at all. `reads_unchanged`: files changed, but none the command read, and the caller declared `trackReads: { roots, statCaches: 'ruled_out' }`.
+- **`unknown`** is the answer when files outside the read set changed and stat-validated caches were not ruled out. This is the default, and it matters: a command that finds a valid cache entry only `stat`s the source and never reads it, so the source is not in the read set. Python's bytecode cache is the common case; with it in place, read-set selection missed almost every source change in our measurements, and caught all of them once the cache was pointed at an empty directory (`PYTHONPYCACHEPREFIX`). Only a caller that knows the command runs without such caches should declare `ruled_out`.
+- **Not covered**: dependencies outside the roots, environment variables, files read on the command's behalf by a long-running helper process, and writes by someone else while the command was running. `unobserved` filesystems (`noatime`) and a second tracked command on the same root while one is running have no read set; they can still answer `fresh / tree_unchanged`, and `unknown` otherwise.
+- **Cost**: the roots are walked once before the command and once after, and read files are hashed. Pass narrow roots for large trees. Resetting access times changes ctime of files that were read since the previous reset, which an ignored-file manifest (`trackIgnored: 'manifest'`) reports as metadata-only changes.
 
 ## Design notes
 
 ### Verify your own runtime
 
-The package ships the same 44-item contract suite that the kernel itself is tested against, so an embedding runtime can prove its consumer honors these guarantees:
+The package ships the same 50-item contract suite that the kernel itself is tested against, so an embedding runtime can prove its consumer honors these guarantees:
 
 ```js
 import { defineContractTestSuite } from '@xioflow/kernel/testing';
