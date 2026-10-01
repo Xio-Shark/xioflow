@@ -129,6 +129,7 @@ Each writes `run/<name>.started` (pid and time) so a scenario can align on it.
 
 ## Other experiments in this directory
 
+- [Observation-aware recovery](observation/RECOVERY.md): prior art and E4, a deterministic comparison of whole-task restart with valid-prefix reuse. Includes reconstruction costs; no real-model savings claim.
 - `observation/` measures how many of xiocode's parallel-edit conflicts are false conflicts, by replaying a worker's recorded observations on the workspace as it is when its commit is refused.
 - `behavior/` is the experiment on what a model does after a tool call with an unknown outcome. It gives a **real** model a shell, so every command runs inside a deny-by-default `sandbox-exec` profile (`sandboxProfile` in `behavior/environment.mjs`): no reads outside the run's own directories, no view of other processes, no network except the run's local service. `node audit/behavior/selftest.mjs` asserts each of those denials and must pass before any model is called.
 - `freshness/` is the prototype and the experiments for evidence with observed dependencies.
