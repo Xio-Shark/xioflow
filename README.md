@@ -394,7 +394,7 @@ Beyond the contracts, the repository kills its own supervisor at every durable s
 
 ## Status
 
-0.5.1 on npm (native tree-holding reaper, workspace transactions for parallel agents, MCP server, OpenTelemetry export, crash-point matrix and TLA+ model; see [`CHANGELOG.md`](./CHANGELOG.md)), pre-1.0: the API may change. Not implemented yet: Linux cgroup v2 backend (hard memory/CPU/PID enforcement), enforced domain-wide memory budgets, artifact retrieval helpers, daemon mode and non-TypeScript bindings. Remaining gaps are tracked in [`ROADMAP.md`](./ROADMAP.md).
+0.6.0 on npm (native tree-holding reaper, workspace transactions validated by file sets or replayed observations, read evidence for results, honest rollback coverage for ignored files, MCP server, OpenTelemetry export, crash-point matrix and TLA+ model; see [`CHANGELOG.md`](./CHANGELOG.md)), pre-1.0: the API may change. Not implemented yet: Linux cgroup v2 backend (hard memory/CPU/PID enforcement), enforced domain-wide memory budgets, artifact retrieval helpers, daemon mode and non-TypeScript bindings. Remaining gaps are tracked in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Releasing
 

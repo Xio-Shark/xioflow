@@ -6,6 +6,8 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-01
+
 ### Fixed
 - **Rollback no longer claims `coverage: 'complete'` when ignored files were outside the snapshot.** With a default (`worktree_non_ignored`) snapshot, a confined command that deleted, modified or created an ignored file (`.env`, build output) still got `restored / complete / none_possible`, although the file was not restored and the kernel had never looked at it. The result is now `coverage: 'non_ignored'` with `ignoredFiles: 'not_captured'`. Callers that only test `coverage === 'complete'` fall to the not-vouched side.
 - **A `full_tree` rollback no longer reports `failed` because new ignored files exist.** Ignored files created after an `includeIgnored: true` snapshot are deliberately kept, but they were counted in the verification fingerprint, so any new cache file or `.DS_Store` turned the rollback into `failed / none`. They are now left out of the comparison and listed in `unrestoredPaths` with `status: 'partial'` (a wholly new directory is a single entry).
