@@ -1,5 +1,6 @@
 import { ManagedProcessHandle, StructuredCommand, StopProcessResult } from '../driver/types.js';
 import { ConfinementDriver, ProcessOperationResult, ResourceBudget, TerminationReason } from '../types.js';
+import type { TrackReadsSpec } from './read-evidence.js';
 
 export interface ExecuteProcessOptions {
   runId: string;
@@ -19,6 +20,11 @@ export interface ExecuteProcessOptions {
   waitTimeoutMs?: number;
   artifactsDir?: string;
   abortSignal?: AbortSignal;
+  /**
+   * 记录这条命令在 roots 里读过的文件与目录，结果带 `readEvidence`；之后用 `supervisor.evidenceStatus(opId)`
+   * 问这份结果是否仍然有效。启动前要遍历一次 roots，结束后再遍历一次并对读过的文件做哈希。
+   */
+  trackReads?: TrackReadsSpec;
   /**
    * 流式投影：每个 stdout/stderr chunk 原样转发，不做缓冲或截断。
    * 回调抛错不会中断排空，首个错误以 result.streamCallbackError 记录。

@@ -798,6 +798,8 @@ export class ExecutionDomain {
         if ((op.result as any)?.stdoutRef) protectedFiles.add(path.basename((op.result as any).stdoutRef));
         if ((op.result as any)?.stderrRef) protectedFiles.add(path.basename((op.result as any).stderrRef));
       }
+      // 读集证据：结果还在，证据就得在，否则 evidenceStatus 只能答 unknown
+      if ((op.result as any)?.readEvidence?.ref) protectedFiles.add(path.basename((op.result as any).readEvidence.ref));
     }
 
     // 仍在的快照的被忽略文件清单：随 pruneSnapshots 删除，不在这里回收

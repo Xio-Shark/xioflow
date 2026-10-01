@@ -5,6 +5,7 @@ import { CapabilityAdmission, recordCapabilityUsed } from './admission.js';
 import { computeInputFingerprint } from './fingerprint.js';
 import { finalizeOperation, indeterminateResult } from './finalize.js';
 import { superviseActive } from './process-monitor.js';
+import type { ReadTrackingSession } from './read-evidence.js';
 import { ActiveOperationState, ExecuteProcessOptions } from './types.js';
 
 /** 执行期需要回调监督器的能力：停止流水线与在飞表清理都归监督器所有。 */
@@ -24,6 +25,8 @@ export interface ProcessRunPlan {
   confined: boolean;
   confinementDriverName?: string;
   capAdmission?: CapabilityAdmission;
+  /** `trackReads` 时存在：启动前归一访问时间，退出后收集读集证据。 */
+  readTracking?: ReadTrackingSession;
 }
 
 /**
@@ -62,6 +65,8 @@ export async function runProcess(ctx: ProcessRunContext, plan: ProcessRunPlan): 
     opState.phase = 'spawning';
     let handle: ManagedProcessHandle;
     try {
+      // 读集观测的起点必须在进程能读到任何东西之前；归一失败按启动失败处理，不带着残缺的证据跑
+      plan.readTracking?.begin();
       handle = await ctx.driver.spawn(plan.command);
       opState.handle = handle;
       opState.command = plan.command;
@@ -76,6 +81,7 @@ export async function runProcess(ctx: ProcessRunContext, plan: ProcessRunPlan): 
     return await superviseActive(ctx, plan, handle, cleanups);
   } finally {
     for (const cleanup of cleanups) cleanup();
+    plan.readTracking?.close();
     if (opState.stopResolve) {
       const resolveFn = opState.stopResolve;
       opState.stopResolve = undefined;

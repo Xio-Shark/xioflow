@@ -162,7 +162,38 @@ export interface ProcessOperationResult extends BaseResult {
   residualPids?: number[];           // 逃逸或未完全停止的残留进程 PID 列表
   identityVerification: IdentityVerificationResult;
   evidence?: 'observed' | 'unobserved';
+  /** 仅在 `trackReads` 时出现：这条命令读过什么的证据摘要，详情在 `ref` 指向的文件里。 */
+  readEvidence?: ReadEvidence;
 }
+
+/**
+ * 命令在 `roots` 里读过的文件与目录（`content_reads`：读了内容或列了目录；只 stat 的不算）。
+ * `tracking` 不是 `atime` 时没有读集，证据只剩命令结束时的全树 stat 清单。
+ */
+export interface ReadEvidence {
+  tracking: 'atime' | 'unobserved' | 'failed';
+  /** unobserved 的原因：文件系统不推进 atime，或同一个根上另一条被观测的命令正在运行。 */
+  reason?: 'no_atime' | 'roots_busy';
+  scope: 'content_reads';
+  /** 调用方是否声明已排除只靠 stat 校验的缓存。`possible` 时读集之外的改动只能答 `unknown`。 */
+  statCaches: 'ruled_out' | 'possible';
+  roots: string[];
+  entryCount?: number;
+  digest?: string;
+  ref?: string;
+  /** tracking 为 failed 时：收集证据失败的原因。 */
+  error?: string;
+}
+
+export type EvidenceStatus =
+  | { status: 'fresh'; basis: 'tree_unchanged' | 'reads_unchanged' }
+  | { status: 'stale'; changed: string[]; truncated: boolean }
+  | {
+      status: 'unknown';
+      reason: 'not_tracked' | 'reads_unobserved' | 'evidence_missing' | 'evidence_unreadable' | 'changed_outside_read_set';
+      changedOutside?: string[];
+      truncated?: boolean;
+    };
 
 export interface FilesystemOperationResult extends BaseResult {
   kind: 'filesystem';

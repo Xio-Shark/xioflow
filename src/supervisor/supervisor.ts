@@ -14,6 +14,7 @@ import {
   SnapshotOperationResult,
   RollbackOperationResult,
   ConfinementDriver,
+  EvidenceStatus,
 } from '../types.js';
 import { NodePlatformDriver } from '../driver/node-driver.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
@@ -30,6 +31,7 @@ import { joinInFlight, replayRecorded } from './replay.js';
 import { runProcess, ProcessRunContext } from './process-run.js';
 import * as snapshotOps from './snapshot-ops.js';
 import { rollback } from './rollback.js';
+import { ReadTracker, evaluateReadEvidence } from './read-evidence.js';
 import {
   CommitOptions,
   CommitResult,
@@ -50,6 +52,7 @@ export { normalizeResourceName, computeInputFingerprint } from './fingerprint.js
 
 export class ProcessSupervisor {
   private activeOperations: Map<string, ActiveOperationState> = new Map();
+  private readonly readTracker = new ReadTracker();
   private serviceSupervisor: ServiceSupervisor;
   private snapshotDriver: SnapshotDriver;
   private confinementDriver?: ConfinementDriver;
@@ -227,6 +230,7 @@ export class ProcessSupervisor {
       resourceBudget: options.resourceBudget,
       status: 'pending',
     };
+    const readTracking = options.trackReads ? this.readTracker.open(options.opId, options.trackReads) : undefined;
     const opState = this.trackOperation(options, inputFingerprint, startTime);
     const executionPromise = runProcess(this.runContext, {
       options,
@@ -236,6 +240,7 @@ export class ProcessSupervisor {
       confined: confinementDriver !== undefined,
       confinementDriverName: confinementDriver?.name,
       capAdmission,
+      readTracking,
     });
     opState.resultPromise = executionPromise;
     return await executionPromise;
@@ -383,6 +388,16 @@ export class ProcessSupervisor {
     }
 
     return active;
+  }
+
+  /**
+   * 一条带 `trackReads` 的命令的结果，是否仍然代表当前的工作区：`fresh` / `stale`（列出变了的依赖）/ `unknown`。
+   * 只读，不改动访问时间之外的任何东西；重启后仍可查询（证据在 artifacts 里）。
+   */
+  public evidenceStatus(opId: string): EvidenceStatus {
+    const op = this.domain.getStore().getOperation(opId);
+    if (!op) throw new Error(`Operation "${opId}" does not exist in domain ${this.domain.domainId}`);
+    return evaluateReadEvidence((op.result as ProcessOperationResult | undefined)?.readEvidence);
   }
 
   public pruneArtifacts(filter?: { olderThanMs?: number; prefix?: string }): {

@@ -70,6 +70,10 @@ export async function superviseActive(
     }
   }
 
+  if (plan.readTracking) {
+    result.readEvidence = plan.readTracking.collect(capture.artifactsDir);
+  }
+
   // 6. [事务提交结果与释放资源 - Single Writer]
   return finalizeOperation(ctx.domain, options.opId, result, {
     requiredResources: options.requiredResources,

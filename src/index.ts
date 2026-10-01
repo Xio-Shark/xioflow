@@ -22,6 +22,7 @@ export type {
   WriteEntry,
 } from './workspace/transactions.js';
 export type { ReadTracking } from './workspace/read-tracking.js';
+export type { TrackReadsSpec } from './supervisor/read-evidence.js';
 export * from './capability/index.js';
 export * from './confinement/index.js';
 export * from './otel/otlp.js';

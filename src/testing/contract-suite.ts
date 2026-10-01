@@ -2288,6 +2288,41 @@ export function defineContractTestSuite(
       expect(downgraded.at(-1)?.payload).toMatchObject({ txId: 'c60-A', operationId: 'c60-proc' });
       expect(fs.readFileSync(path.join(repoDir, 'a.txt'), 'utf8')).toBe('alpha\n');
     });
+
+    it('契约 61: 读集证据不得在依赖变化后仍答 fresh：读过的文件变了为 stale 并列出它；只有读集之外变了且未排除 stat 缓存、或读取没有被观测到，为 unknown', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      const root = path.join(tempDir, 'repo-c61');
+      fs.mkdirSync(root, { recursive: true });
+      fs.writeFileSync(path.join(root, 'input.txt'), 'one\n');
+      fs.writeFileSync(path.join(root, 'other.txt'), 'other\n');
+      ensureTaskAndRun(domain, 'task-c61', 'run-c61');
+      const run = (opId: string) =>
+        supervisor.executeProcess({
+          runId: 'run-c61',
+          opId,
+          name: 'verify',
+          command: { execPath: process.execPath, args: ['-e', "require('fs').readFileSync('input.txt')"], cwd: root },
+          trackReads: { roots: [root] },
+        });
+
+      const first = await run('c61-a');
+      expect(first.readEvidence?.scope).toBe('content_reads');
+      expect(supervisor.evidenceStatus('c61-a')).toEqual({ status: 'fresh', basis: 'tree_unchanged' });
+
+      fs.writeFileSync(path.join(root, 'other.txt'), 'changed\n');
+      const outside = supervisor.evidenceStatus('c61-a');
+      expect(outside.status).toBe('unknown');
+      if (outside.status === 'unknown') {
+        expect(outside.reason).toBe(first.readEvidence?.tracking === 'atime' ? 'changed_outside_read_set' : 'reads_unobserved');
+      }
+
+      fs.writeFileSync(path.join(root, 'input.txt'), 'two\n');
+      const after = supervisor.evidenceStatus('c61-a');
+      expect(after.status).not.toBe('fresh');
+      if (first.readEvidence?.tracking === 'atime') {
+        expect(after).toEqual({ status: 'stale', changed: [path.join(fs.realpathSync(root), 'input.txt')], truncated: false });
+      }
+    });
   });
 }
 
