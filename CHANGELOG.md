@@ -6,6 +6,8 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-05
+
 ### Fixed
 - **A command that daemonized a child came back `succeeded` with its leases released while the child kept running.** Root exit plus drained output pipes was taken to mean the tree was empty, but a descendant that calls `setsid()` and redirects its stdio to `/dev/null` holds no pipe. Reproduced with both drivers on macOS and Linux. After a natural root exit the supervisor now asks the driver whether the tree is empty (`PlatformDriver.settleTree`, waiting up to 1 s for descendants to finish): known survivors are reaped through the stop pipeline (`residualProcessesReaped: true`) or, if the stop cannot be confirmed, the result is `indeterminate` and the leases are kept. The result says what the answer rests on: `treeSettlement: 'empty' | 'reaped' | 'unverified'`. The reaper driver proves `empty` on Linux (subreaper); on macOS and with `NodePlatformDriver`, which cannot see a process that left its group, the result says `unverified`. **Behaviour change:** background processes a command leaves running (for example `nohup server >log 2>&1 &`) are now stopped when the command ends, the same as background processes that keep the output pipes open already were; use `startService` for long-running processes.
 - The reaper driver's `stopped` reply now also wakes waiters for an empty tree.

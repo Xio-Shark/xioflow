@@ -1,6 +1,6 @@
 # xioflow Kernel & xiocode Distribution Architecture and Protocol Specification
 
-> **Unreleased extension (2026-10-01):** [AgentRuntime](spec/agent-runtime.md) adds kernel-owned agent lifecycle, cooperative dispatch, evidence gates and persisted checkpoints/step budgets. Existing model/tool adapters remain in distributions. The extension supersedes the execution-primitives-only positioning below for this experimental scope; it is not a complete multi-agent runtime.
+> **Experimental extension (2026-10-01, shipped in 0.7.0):** [AgentRuntime](spec/agent-runtime.md) adds kernel-owned agent lifecycle, cooperative dispatch, evidence gates and persisted checkpoints/step budgets. Existing model/tool adapters remain in distributions. The extension supersedes the execution-primitives-only positioning below for this experimental scope; it is not a complete multi-agent runtime.
 
 > **Document Status**: Authoritative Protocol Specification for the xioflow kernel repository. Sections 0, 3, and 7 define the core kernel protocol and conformance guarantees. For phased roadmap and current implementation status, see [`ROADMAP.md`](./ROADMAP.md). Chinese version: [`ARCHITECTURE.md`](./ARCHITECTURE.md).  
 > **Status**: Target-state protocol specification (v2 planning: Rust core + snapshot rollback + dual deployment topology). Sections marked "Target State" are in the roadmap for upcoming milestones; refer to `ROADMAP.md` for current implementation alignment.  
