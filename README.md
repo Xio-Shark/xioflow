@@ -26,7 +26,7 @@ The working tree also includes an **experimental `AgentRuntime`**: kernel-owned 
 | No premature release | Exclusive resource leases are released only after the platform driver confirms the process is gone. An unconfirmed stop keeps the lease and escalates to `indeterminate`. |
 | No silent output loss | In-memory output is capped by `maxOutputBytes` (default 10 MiB); each stream is spilled to `<domain>/artifacts/<opId>-stdout.log` / `-stderr.log`, `fsync`ed, and hashed. Truncation is reported per stream (`stdoutTruncated` / `stderrTruncated`) with `stdoutRef` / `stderrRef`, `stdoutBytes` / `stderrBytes` and `stdoutHash` / `stderrHash`; `isTruncated` / `outputRef` / `outputHash` remain as aggregate compatibility fields. |
 | No implicit environment | `envWhiteList` is exact: whatever you pass is what the child gets, with no injected `PATH`. Without a whitelist the child inherits `process.env`, unless you pass `inheritEnv: false` to get an empty environment. |
-| No orphan leak | Termination escalates SIGINT to SIGTERM to SIGKILL across the process group, then re-enumerates descendants. Escaped (`setsid`) survivors are reported honestly as `{ stopped: 'cannot_determine', residualPids: [...] }` instead of a fake success. If the group is confirmed empty but the output pipes are still held by a process the driver never saw, the operation is `indeterminate`, not `succeeded`. |
+| No orphan leak | Termination escalates SIGINT to SIGTERM to SIGKILL across the process group, then re-enumerates descendants. Escaped (`setsid`) survivors are reported honestly as `{ stopped: 'cannot_determine', residualPids: [...] }` instead of a fake success. If the group is confirmed empty but the output pipes are still held by a process the driver never saw, the operation is `indeterminate`, not `succeeded`. Drained pipes are not taken as an empty tree either: after the root exits, survivors the driver knows about (including daemonized ones with closed stdio) are reaped, and `treeSettlement` says whether emptiness was proven (`empty`), enforced (`reaped`) or is beyond what the driver can see (`unverified`). |
 | No blind retry | Resubmitting an `opId` with the same input fingerprint joins the in-flight execution or replays the recorded result (`replayed: true`); an `indeterminate` result is returned as-is and never re-executed. A different fingerprint throws `OperationIdConflictError`. |
 | No out-of-scope rollback | A rollback only rewrites and deletes files inside the snapshot's declared roots, never touches ignored files unless they were captured, and is verified by fingerprint. `coverage: 'complete'` is claimed only when every operation since the snapshot ran under a confinement driver and ignored files are accounted for: they were in the snapshot, or a manifest proves they are unchanged. Otherwise the result says `non_ignored` or `declared_roots`, with the reasons in `coverageBasis`. |
 | No split brain | A domain has one active owner, held by an exclusive lock file plus a heartbeat lease. Stale owners are fenced by an epoch counter; their writes are rejected. |
@@ -34,7 +34,7 @@ The working tree also includes an **experimental `AgentRuntime`**: kernel-owned 
 ## Requirements
 
 - Node.js >= 22.13 (`node:sqlite` without a flag). CI covers Node 22.13 and 24 on Ubuntu and macOS. `node:sqlite` is still marked experimental upstream, so Node prints an `ExperimentalWarning`; that is expected.
-- Linux and macOS. The default driver enumerates descendants with `ps(1)` and terminates POSIX process groups; the optional native reaper holds the whole tree instead (see [Holding the process tree](#holding-the-process-tree)).
+- Linux and macOS. The default driver enumerates descendants with `ps(1)` and terminates POSIX process groups; the optional native reaper holds the whole tree instead, and on Linux the cgroup v2 driver contains it and enforces hard memory and process limits (see [Holding the process tree](#holding-the-process-tree)).
 - Snapshots need `git` on `PATH` and a git working tree. Confinement is optional and uses `sandbox-exec` (macOS), `bubblewrap` (Linux) or `srt` when available.
 - Windows is not supported. There the driver reports `processGroupKill: false` and `descendantEnumeration: 'none'` rather than pretending it can contain processes.
 
@@ -148,6 +148,21 @@ const supervisor = new ProcessSupervisor(domain, new ReaperPlatformDriver());
 | Supervisor process dies | helper stops the whole tree | helper stops the whole tree |
 
 `ReaperPlatformDriver.isAvailable()` tells whether this platform's helper is present; the constructor throws rather than falling back to another driver. Build one from source with `node scripts/build-native.mjs`, or point `XIOFLOW_REAPER_PATH` at a binary.
+
+On Linux, `CgroupPlatformDriver` puts each operation in its own cgroup v2 while the process is still blocked at the spawn gate, so nothing it forks can leave:
+
+```js
+import { CgroupPlatformDriver, ProcessSupervisor } from '@xioflow/kernel';
+
+// run the host under: systemd-run --user --scope -p Delegate=yes node host.js
+const supervisor = new ProcessSupervisor(domain, new CgroupPlatformDriver());
+await supervisor.executeProcess({ /* ... */, resourceBudget: { enforcement: 'hard', maxMemoryBytes: 512 * 2 ** 20, maxPids: 256 } });
+```
+
+- `confirmed_stopped` means `cgroup.events` reports `populated 0` (`scope: 'containment_cgroup'`); stops end with `cgroup.kill`.
+- `hard` budgets become `memory.max` (no swap; an OOM kill takes the whole tree and ends as `memory_exceeded`) and `pids.max` (a hit stops the tree with `pids_exceeded`).
+- The cgroup path is stored with the process identity before the process runs. After a host crash, recovery reaps whatever is left in it, escapees included, before it releases the leases.
+- It needs a cgroup delegated to the host; otherwise the constructor throws `CgroupUnavailableError` with the reason (`CgroupPlatformDriver.unavailableReason()` checks without side effects). It moves the processes of that cgroup into a `xioflow-host` leaf, because cgroup v2 only lets a cgroup without processes hand controllers to its children.
 
 ## Use it from any agent: MCP server
 
@@ -367,7 +382,7 @@ supervisor.evidenceStatus('verify-1');
 
 ### Verify your own runtime
 
-The package ships the same 50-item contract suite that the kernel itself is tested against, so an embedding runtime can prove its consumer honors these guarantees:
+The package ships the same 53-item contract suite that the kernel itself is tested against, so an embedding runtime can prove its consumer honors these guarantees:
 
 ```js
 import { defineContractTestSuite } from '@xioflow/kernel/testing';
@@ -396,7 +411,7 @@ Beyond the contracts, the repository kills its own supervisor at every durable s
 
 ## Status
 
-0.6.0 on npm (native tree-holding reaper, workspace transactions validated by file sets or replayed observations, read evidence for results, honest rollback coverage for ignored files, MCP server, OpenTelemetry export, crash-point matrix and TLA+ model; see [`CHANGELOG.md`](./CHANGELOG.md)), pre-1.0: the API may change. Not implemented yet: Linux cgroup v2 backend (hard memory/CPU/PID enforcement), enforced domain-wide memory budgets, artifact retrieval helpers, daemon mode and non-TypeScript bindings. Remaining gaps are tracked in [`ROADMAP.md`](./ROADMAP.md).
+0.6.0 on npm (native tree-holding reaper, workspace transactions validated by file sets or replayed observations, read evidence for results, honest rollback coverage for ignored files, MCP server, OpenTelemetry export, crash-point matrix and TLA+ model; see [`CHANGELOG.md`](./CHANGELOG.md)), pre-1.0: the API may change. Unreleased on `main`: the Linux cgroup v2 driver with hard memory and process limits, and tree settlement after root exit. Not implemented yet: hard CPU limits, enforced domain-wide memory budgets, artifact retrieval helpers, daemon mode and non-TypeScript bindings. Remaining gaps are tracked in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Releasing
 

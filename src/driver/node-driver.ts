@@ -6,6 +6,7 @@ import {
   ManagedProcessHandle,
   ProcessIdentity,
   StopProcessResult,
+  TreeSettlement,
 } from './types.js';
 import { IdentityVerificationResult } from '../types.js';
 import { readBootId, readStartTime, getGroupMembers } from './process-facts.js';
@@ -365,6 +366,22 @@ export class NodePlatformDriver implements PlatformDriver {
 
     this.cumulativeDescendantsMap.delete(pid);
     return { stopped: 'confirmed_stopped', scope: 'process_group' };
+  }
+
+  /**
+   * 只能看到仍留在原进程组里的后代：它们在 waitMs 内没结束就是 `residual`。
+   * 组空不能证明树空——setsid 换了进程组的逃逸者对 ps 的组视图不可见，所以只答 `unknown`。
+   */
+  public async settleTree(identity: ProcessIdentity, waitMs: number): Promise<TreeSettlement> {
+    const pgid = identity.pgid;
+    if (pgid === undefined || !this.capabilities.processGroupKill) return 'unknown';
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      this.sampler.clearCache();
+      if (!(await this.sampler.isGroupAlive(pgid))) return 'unknown';
+      if (Date.now() >= deadline) return 'residual';
+      await new Promise((r) => setTimeout(r, 25));
+    }
   }
 
   public async terminateGroup(pgid: number, graceMs: number = 2000): Promise<StopProcessResult> {

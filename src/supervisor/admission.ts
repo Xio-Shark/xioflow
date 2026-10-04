@@ -1,5 +1,5 @@
 import { ExecutionDomain } from '../domain.js';
-import { PlatformDriver } from '../driver/types.js';
+import { PlatformDriver, StructuredCommand } from '../driver/types.js';
 import { ConfinementDriver, ResourceBudget, UnsupportedCapabilityError } from '../types.js';
 import { createConfinementDriver } from '../confinement/index.js';
 import { normalizeResourceName } from './fingerprint.js';
@@ -80,6 +80,18 @@ export function assertHardBudgetSupported(driver: PlatformDriver, budget: Resour
   if (budget.maxCpuTimeMs && !driver.capabilities.cpuLimit) {
     throw new UnsupportedCapabilityError('cpuLimit', driver.name, 'hard');
   }
+}
+
+/** hard 预算转成驱动在放行前施加的 OS 限制；其余模式原样返回命令。 */
+export function withHardLimits(command: StructuredCommand, budget: ResourceBudget | undefined): StructuredCommand {
+  if (budget?.enforcement !== 'hard' || (!budget.maxMemoryBytes && !budget.maxPids)) return command;
+  return {
+    ...command,
+    hardLimits: {
+      ...(budget.maxMemoryBytes ? { memoryMaxBytes: budget.maxMemoryBytes } : {}),
+      ...(budget.maxPids ? { pidsMax: budget.maxPids } : {}),
+    },
+  };
 }
 
 /** N3 契约：未登记的 Run 与终态 Run 都不能登记或重放操作。 */

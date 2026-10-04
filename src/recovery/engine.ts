@@ -231,7 +231,27 @@ export class RecoveryEngine {
           // 证据齐全时才按 pgid 定向清场；清不掉如实隔离。
           const pgid = op.processIdentity.pgid;
           let reapedOrphans = false;
-          if (pgid !== undefined && this.isGroupAlive(pgid)) {
+          if (op.processIdentity.cgroupPath && this.driver.capabilities.descendantEnumeration === 'cgroup') {
+            // 专属 cgroup 装着整棵树（含换了进程组的逃逸者），且只属于这个操作：不需要 pgid 复用核验
+            const tree = this.driver.settleTree ? await this.driver.settleTree(op.processIdentity, 0) : 'unknown';
+            if (tree !== 'empty') {
+              const reaped = await this.driver.terminate(op.processIdentity, 2000);
+              if (reaped.stopped !== 'confirmed_stopped') {
+                const indetResult: IndeterminateResult = {
+                  kind: 'indeterminate',
+                  status: 'indeterminate',
+                  reason: `Owner is dead but cgroup ${op.processIdentity.cgroupPath} could not be confirmed empty: ${reaped.errorDetails ?? 'still populated'}`,
+                  recoveryGuidance: 'Processes left by the crashed owner are still in its cgroup; inspect them before retrying.',
+                  durationMs: calcDurationMs(),
+                  completedAt: new Date().toISOString(),
+                };
+                store.recordOperationResult(op.id, indetResult, false);
+                report.recoveredOperations.push({ opId: op.id, action: 'isolated_indeterminate', resourcesReleased: false });
+                continue;
+              }
+              reapedOrphans = true;
+            }
+          } else if (pgid !== undefined && this.isGroupAlive(pgid)) {
             // N2 检查项 1：bootId 跨宿主重启核验
             if (op.processIdentity.bootId && this.driver.readBootId) {
               const currentBootId = await this.driver.readBootId();

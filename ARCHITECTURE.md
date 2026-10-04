@@ -801,7 +801,7 @@ domainBudget = {
 
 | 操作系统平台 | hard 内存/CPU/PIDs 限制 | 整组终止与逃逸防护 | v1 落地与交付策略 |
 |---|---|---|---|
-| **Linux** | **cgroup v2 统一治理**：<br>• `memory.max`（硬限 OOM kill）<br>• `memory.high`（软节流）<br>• `pids.max`（防 fork 炸弹）<br>• `cpu.max`（CPU 配额） | **`cgroup.kill`**：<br>内核级原子终止整组，成员枚举天然完备，从根源杜绝逃逸后代 | **双轨实现**：<br>1. 优先调用 `systemd-run --user --scope -p MemoryMax=...`（免 root 优雅建组）；<br>2. 无 systemd 用户会话时降级写入委派子树 cgroupfs；<br>3. 均不可用时 `memoryHardLimit` 诚实声明为 `false` |
+| **Linux** | **cgroup v2 统一治理**：<br>• `memory.max`（硬限 OOM kill）<br>• `memory.high`（软节流）<br>• `pids.max`（防 fork 炸弹）<br>• `cpu.max`（CPU 配额） | **`cgroup.kill`**：<br>内核级原子终止整组，成员枚举天然完备，从根源杜绝逃逸后代 | **已实现（TS，`CgroupPlatformDriver`）**：<br>1. 宿主运行在委派给它的 cgroup 里（`systemd-run --user --scope -p Delegate=yes`，或私有 cgroup 命名空间的容器），驱动直接读写 cgroupfs；<br>2. 进程停在启动门上时放入专属 cgroup，`hard` 预算落到 `memory.max` / `pids.max`（`cpu.max` 未实现）；<br>3. 前提不满足时构造显式抛 `CgroupUnavailableError`，不退回别的驱动；控制器启用失败时 `memoryHardLimit` / `pidsLimit` 如实为 `false` |
 | **macOS** | **无原生等价进程树硬限**：<br>`setrlimit` 仅限单进程，无法约束衍生子进程树 | **PGID 进程组终止**：<br>依赖 `kill(-pgid, signal)` 广播 | **诚实声明**：<br>• 支持 `observe` + `soft` + PGID kill；<br>• `memoryHardLimit` 显式声明为 `false`；<br>• 可选通过 `sandbox-exec` 做文件/网络策略约束，但绝不包装成假内存硬限制 |
 | **Windows** | **Job Object 容器**：<br>• `JOB_OBJECT_LIMIT_JOB_MEMORY`<br>• `ACTIVE_PROCESS`<br>• `KILL_ON_JOB_CLOSE` | **`TerminateJobObject`**：<br>句柄关联的所有进程整组原子退出 | **Rust 核心直接调用 Win32 Job API**：<br>• `CREATE_SUSPENDED` + 关联 Job + `ResumeThread` 同时兑现受控启动与整组容器；<br>• 0.1.x TypeScript 实现不支持 Windows，如实声明 `processGroupKill: false` |
 
@@ -931,8 +931,8 @@ domainBudget = {
 | 34 | L4 | 嵌入方遇到 daemon 持有的域必须以客户端接入，不得抢锁或另开影子域 | 计划 |
 | 35 | L4 | Observer 连接只读、不持有租约、不打断所有者 | 计划 |
 | 36 | L4 | 客户端断连：其操作在宽限后以 `client_lost` 进入停止流水线（`detached` 除外） | 计划 |
-| 37 | H | 硬内存限制（Linux cgroup `memory.max` / Windows Job）生效并记录 `memory_exceeded` | 计划 |
-| 38 | H | 进程数上限（`pids.max` / Job `ACTIVE_PROCESS`）拦截 fork 炸弹，宿主不受影响 | 计划 |
+| 37 | H | 硬内存限制（Linux cgroup `memory.max` / Windows Job）生效并记录 `memory_exceeded` | S37（Linux cgroup v2；Windows 计划） |
+| 38 | H | 进程数上限（`pids.max` / Job `ACTIVE_PROCESS`）拦截 fork 炸弹，宿主不受影响 | S38（Linux cgroup v2；Windows 计划） |
 | 39 | H | 域级内存总额度：占满后新操作排队，释放后按序放行 | 计划 |
 | 40 | L1 | 重复 opId 被显式拒绝（0.2.0：`DuplicateOperationError`）；原操作的租约、活跃状态与可取消性不受影响 | S22 |
 | 41 | L1 | 每个 op 恰好一条 `OPERATION_RESULT_RECORDED`；未观测字段为 `null`，不得填默认信号或退出码 | R |
@@ -956,6 +956,7 @@ domainBudget = {
 | 59 | L3 | 重放的观测与记录不同，或改动无法重放：保持冲突，报告第一处不同的位置与原因，主工作区不变 | S59 |
 | 60 | L3 | 分叉里运行过进程的事务不使用观测校验：保持文件级冲突并写 `TX_VALIDATION_DOWNGRADED` | S60 |
 | 61 | L3 | 读集证据不得在依赖变化后仍答 `fresh`：读过的文件变了为 `stale` 并列出它；只有读集之外变了且未排除 stat 缓存、或读取没有被观测到，为 `unknown` | S61 |
+| 62 | L1 | 根进程退出且管道排空不等于树已空：关闭了 stdio 的脱离后代要么被回收（`treeSettlement: 'reaped'`），要么结果声明 `unverified`，绝不声称 `empty`；声明 `cgroup` / `subreaper` 枚举能力的驱动必须回收它 | S62 |
 
 ### 7.3 崩溃点矩阵与形式化规格
 

@@ -276,7 +276,7 @@ xiocode 侧待办（已关闭，2026-09-29）：`kernel-adapter.ts` 已由 `kern
 | §4.3 产物回收 `pruneArtifacts` | 已实现（自动清理未截断转储 + 域级 prune） | 0.2.0（B3） |
 | §4.4.3 计数口径 / FIFO / 预算持久化 | 已实现（独立并发计数 + FIFO 严格排队） | 0.2.0（B2） |
 | §4.4.3 域级内存 / 输出总额度 | 未实现 | P2（H 等级） |
-| §4.4.4 Linux cgroup v2 | 未实现 | P2 之后（H 等级） |
+| §4.4.4 Linux cgroup v2 | 已实现（TS：`CgroupPlatformDriver`，契约 #37、#38；CPU 硬限未实现） | 未发布（main） |
 | §4.4.4 Windows Job Object | 不支持 | P2 |
 | §4.4.5 第 4 条 不阻塞宿主 | 已实现（全域异步采样器，热路径零同步子进程） | 0.2.0（B4） |
 | §5 协议 | 无 | P1（协议 + stdio 适配器）/ P4（daemon） |

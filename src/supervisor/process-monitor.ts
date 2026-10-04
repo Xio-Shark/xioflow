@@ -8,6 +8,8 @@ import { crashpoint } from '../fault/crashpoint.js';
 type Settled = { exit: ExitFacts } | { final: ProcessOperationResult };
 
 const ROOT_EXIT_WAIT_MS = 1000;
+/** 根进程自然退出后，等后代自行结束的上限；超过仍有存活者即按残留回收。 */
+const TREE_SETTLE_WAIT_MS = 1000;
 
 /**
  * 已 active 的进程：监督运行、有界排空与流式转储、身份核验、结果落盘。
@@ -56,9 +58,11 @@ export async function superviseActive(
   });
   if ('final' in drained) return drained.final;
 
+  await recordHardLimitHits(ctx, plan, handle);
   const result = buildProcessResult(plan, capture, {
     exit: settled.exit,
     residualProcessesReaped: drained.residualProcessesReaped,
+    treeSettlement: drained.treeSettlement,
     peaks: sampler.peaks(),
     identityVerification: await ctx.driver.verifyIdentity(handle.identity),
   });
@@ -81,7 +85,7 @@ export async function superviseActive(
   });
 }
 
-/** Soft / Observe 模式资源采样治理：记录峰值，soft 超限时走停止流水线。 */
+/** Soft / Observe 模式资源采样治理：记录峰值，soft 超限时走停止流水线；hard 模式读取 OS 限制命中事实。 */
 function startBudgetSampler(ctx: ProcessRunContext, plan: ProcessRunPlan, handle: ManagedProcessHandle) {
   const { options, opState } = plan;
   const budget = options.resourceBudget;
@@ -93,7 +97,7 @@ function startBudgetSampler(ctx: ProcessRunContext, plan: ProcessRunPlan, handle
   };
   const peaks = () => ({ peakMemoryBytes, peakCpuTimeMs });
 
-  if (!ctx.driver.sampleMetrics || !budget || (budget.enforcement !== 'soft' && budget.enforcement !== 'observe')) {
+  if (!ctx.driver.sampleMetrics || !budget) {
     return { stop, peaks };
   }
   const stopFor = async (reason: 'memory_exceeded' | 'cpu_exceeded' | 'pids_exceeded') => {
@@ -106,6 +110,13 @@ function startBudgetSampler(ctx: ProcessRunContext, plan: ProcessRunPlan, handle
       const metrics = await ctx.driver.sampleMetrics!(handle.identity);
       peakMemoryBytes = Math.max(peakMemoryBytes, metrics.rssBytes);
       peakCpuTimeMs = Math.max(peakCpuTimeMs, metrics.cpuTimeMs);
+      if (budget.enforcement === 'hard') {
+        // OS 已经在执行上限：OOM 时内核杀掉整组，这里只记原因；pids 上限只拦 fork，不停树就会一直撞线
+        const hits = await ctx.driver.readLimitEvents?.(handle.identity);
+        if (hits && hits.memoryOomKills > 0) opState.terminationReason ??= 'memory_exceeded';
+        else if (hits && hits.pidsMaxHits > 0) await stopFor('pids_exceeded');
+        return;
+      }
       if (budget.enforcement !== 'soft') return;
       if (budget.maxMemoryBytes && metrics.rssBytes > budget.maxMemoryBytes) {
         await stopFor('memory_exceeded');
@@ -117,6 +128,15 @@ function startBudgetSampler(ctx: ProcessRunContext, plan: ProcessRunPlan, handle
     } catch {}
   }, 100);
   return { stop, peaks };
+}
+
+/** 退出之后补读一次 OS 限制命中事实，覆盖采样间隔里发生的命中。 */
+async function recordHardLimitHits(ctx: ProcessRunContext, plan: ProcessRunPlan, handle: ManagedProcessHandle) {
+  const { options, opState } = plan;
+  if (options.resourceBudget?.enforcement !== 'hard' || opState.terminationReason || !ctx.driver.readLimitEvents) return;
+  const hits = await ctx.driver.readLimitEvents(handle.identity);
+  if (hits && hits.memoryOomKills > 0) opState.terminationReason = 'memory_exceeded';
+  else if (hits && hits.pidsMaxHits > 0) opState.terminationReason = 'pids_exceeded';
 }
 
 type RootOutcome =
@@ -235,6 +255,8 @@ function holdLeases(
   });
 }
 
+type Drained = { residualProcessesReaped: boolean; treeSettlement?: ProcessOperationResult['treeSettlement'] };
+
 /**
  * 有界等待流排空。排空超时说明根进程已退出但仍有后代持有管道：回收整个进程组，
  * 否则操作会一直挂到超时，且 root 的真实退出事实会被超时掩盖。
@@ -245,7 +267,7 @@ async function drainOrReap(
   handle: ManagedProcessHandle,
   capture: OutputCapture,
   facts: { exit: ExitFacts; exitedNaturally: boolean }
-): Promise<{ residualProcessesReaped: boolean } | { final: ProcessOperationResult }> {
+): Promise<Drained | { final: ProcessOperationResult }> {
   const { options, opState } = plan;
   const drainTimeoutMs = options.drainTimeoutMs ?? 2000;
   const drainPromise = Promise.all([capture.stdout.finishPromise, capture.stderr.finishPromise]);
@@ -269,7 +291,10 @@ async function drainOrReap(
   }
 
   if (drained) {
-    return { residualProcessesReaped };
+    // 停止流水线在途时由它确认整棵树（停止结果的 scope），不再另做结算
+    if (!facts.exitedNaturally || opState.stopPromise) return { residualProcessesReaped };
+    if (residualProcessesReaped) return { residualProcessesReaped, treeSettlement: 'reaped' };
+    return settleTree(ctx, plan, handle);
   }
   // 排空超时路径强制调用 fsyncSync + closeSync 结清刷盘
   capture.stdout.forceFinalize();
@@ -285,4 +310,29 @@ async function drainOrReap(
     startTime: opState.startTime,
   });
   return { final: holdLeases(ctx, plan, indet) };
+}
+
+/**
+ * 管道排空不代表树已空：关闭了 stdio 的 daemon 化后代（setsid + /dev/null）不持有管道。
+ * 问驱动树是否已空；已知有残留就走停止流水线回收，确认不了则保留租约判 indeterminate。
+ */
+async function settleTree(
+  ctx: ProcessRunContext,
+  plan: ProcessRunPlan,
+  handle: ManagedProcessHandle
+): Promise<Drained | { final: ProcessOperationResult }> {
+  const answer = ctx.driver.settleTree ? await ctx.driver.settleTree(handle.identity, TREE_SETTLE_WAIT_MS) : 'unknown';
+  if (answer === 'empty') return { residualProcessesReaped: false, treeSettlement: 'empty' };
+  if (answer === 'unknown') return { residualProcessesReaped: false, treeSettlement: 'unverified' };
+
+  const reapResult = await ctx.driver.terminate(handle.identity, 1500);
+  if (reapResult.stopped !== 'confirmed_stopped') {
+    const indet = indeterminateResult({
+      reason: `Process ${handle.identity.pid} exited but descendants that left its output pipes could not be confirmed stopped: ${reapResult.errorDetails ?? 'residual processes still alive'}`,
+      capabilityId: plan.options.capabilityId,
+      startTime: plan.opState.startTime,
+    });
+    return { final: holdLeases(ctx, plan, indet) };
+  }
+  return { residualProcessesReaped: true, treeSettlement: 'reaped' };
 }

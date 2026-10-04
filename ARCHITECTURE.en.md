@@ -353,8 +353,8 @@ Status column: `S<n>` indicates implementation as test #n in the shared conforma
 | 34 | L4 | Embedded instances attach as clients when domain is held by daemon; lock contention or shadow domains forbidden. | Planned |
 | 35 | L4 | Observer connections are read-only: hold no leases and never interrupt domain owners. | Planned |
 | 36 | L4 | Client disconnect: in-flight operations enter stop pipeline with `terminationReason: 'client_lost'` after grace period. | Planned |
-| 37 | H | Hard memory limit (Linux cgroup `memory.max` / Windows Job) triggers termination with `memory_exceeded`. | Planned |
-| 38 | H | Process count limit (`pids.max` / Job `ACTIVE_PROCESS`) blocks fork bombs without impacting host. | Planned |
+| 37 | H | Hard memory limit (Linux cgroup `memory.max` / Windows Job) triggers termination with `memory_exceeded`. | S37 (Linux cgroup v2; Windows planned) |
+| 38 | H | Process count limit (`pids.max` / Job `ACTIVE_PROCESS`) blocks fork bombs without impacting host. | S38 (Linux cgroup v2; Windows planned) |
 | 39 | H | Domain total memory budget: admission queues when full; admits sequentially upon resource release. | Planned |
 | 40 | L1 | Duplicate `opId` rejected explicitly (0.2.0: `DuplicateOperationError`); leases and cancellability of existing op untouched. | S22 |
 | 41 | L1 | Exactly one `OPERATION_RESULT_RECORDED` event per op; unobserved fields are `null` (no default signals/exit codes). | R |
@@ -378,3 +378,4 @@ Status column: `S<n>` indicates implementation as test #n in the shared conforma
 | 59 | L3 | A replayed observation differs from the record, or a replayed change cannot be applied: the conflict stands, the first difference (index and reason) is reported, and the workspace is unchanged. | S59 |
 | 60 | L3 | A transaction in whose fork a process ran does not use observation validation: the file-level conflict stands and `TX_VALIDATION_DOWNGRADED` is journaled. | S60 |
 | 61 | L3 | Read evidence never answers `fresh` after a dependency changed: a changed file the command read gives `stale` and names it; a change only outside the read set without stat caches ruled out, or unobserved reads, gives `unknown`. | S61 |
+| 62 | L1 | Root exit with drained pipes is not an empty tree: a detached descendant with closed stdio is reaped (`treeSettlement: 'reaped'`) or the result says `unverified`, never `empty`; drivers declaring `cgroup` / `subreaper` enumeration must reap it. | S62 |

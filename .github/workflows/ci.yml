@@ -34,6 +34,30 @@ jobs:
           XIOFLOW_EXPECT_READ_TRACKING: atime
       - run: pnpm verify:package
 
+  cgroup:
+    # cgroup v2 驱动、契约 37/38/62 与崩溃恢复：一次在委派给宿主的 systemd scope 里，
+    # 一次在私有 cgroup 命名空间的容器里（宿主位于命名空间根）。XIOFLOW_EXPECT_CGROUP 让跳过变成失败。
+    # --init：容器里 PID 1 若是 node，它不回收过继来的孤儿，被杀的进程会以僵尸形式让「进程已消失」的断言失败。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: delegated systemd scope
+        run: >-
+          sudo systemd-run --scope -p Delegate=yes --quiet --
+          env PATH="$PATH" XIOFLOW_EXPECT_CGROUP=1
+          pnpm vitest run tests/driver/cgroup-driver.test.ts tests/contract/cgroup-consumer.test.ts
+      - name: container with a private cgroup namespace
+        run: >-
+          docker run --rm --init --privileged --cgroupns=private -v "$PWD:/work" -w /work -e XIOFLOW_EXPECT_CGROUP=1 node:24
+          node node_modules/vitest/vitest.mjs run tests/driver/cgroup-driver.test.ts tests/contract/cgroup-consumer.test.ts
+
   native:
     uses: ./.github/workflows/native.yml
 

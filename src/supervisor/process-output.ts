@@ -79,6 +79,7 @@ export function buildProcessResult(
   facts: {
     exit: ExitFacts;
     residualProcessesReaped: boolean;
+    treeSettlement?: ProcessOperationResult['treeSettlement'];
     peaks: { peakMemoryBytes: number; peakCpuTimeMs: number };
     identityVerification: ProcessOperationResult['identityVerification'];
   }
@@ -123,6 +124,7 @@ export function buildProcessResult(
     stdoutHash: !stdoutData.spillError ? stdoutData.outputHash : undefined,
     stderrHash: !stderrData.spillError ? stderrData.outputHash : undefined,
     ...(facts.residualProcessesReaped ? { residualProcessesReaped: true } : {}),
+    ...(facts.treeSettlement ? { treeSettlement: facts.treeSettlement } : {}),
     ...(streamCallbackError ? { streamCallbackError } : {}),
     ...(spillError ? { spillError } : {}),
     ...(stdoutData.spillError ? { stdoutSpillError: stdoutData.spillError } : {}),

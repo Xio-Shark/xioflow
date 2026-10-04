@@ -323,15 +323,12 @@ export function defineContractTestSuite(
       newDomain.close();
     });
 
-    it('契约 7: 平台驱动能力缺失内核准入拒绝，绝不静默降级或伪造成功', async () => {
+    it('契约 7: 平台驱动能力缺失内核准入拒绝，绝不静默降级或伪造成功；声明了能力则准入', async () => {
       const { domain, tempDir, driver } = ctx;
       ensureTaskAndRun(domain, 'task-c7', 'run-c7');
 
-      // 使用真实驱动（其 memoryHardLimit 为 false）
       const realSupervisor = new ProcessSupervisor(domain, driver);
-
-      // 申请 hard 内存限制，内核必须在准入期显式抛出 UnsupportedCapabilityError
-      await expect(
+      const run = () =>
         realSupervisor.executeProcess({
           runId: 'run-c7',
           opId: 'op-c7-hard',
@@ -342,8 +339,14 @@ export function defineContractTestSuite(
             maxMemoryBytes: 100 * 1024 * 1024,
             enforcement: 'hard',
           },
-        })
-      ).rejects.toThrowError(UnsupportedCapabilityError);
+        });
+
+      if (driver.capabilities.memoryHardLimit) {
+        expect((await run()).status).toBe('succeeded');
+      } else {
+        // 申请 hard 内存限制，内核必须在准入期显式抛出 UnsupportedCapabilityError
+        await expect(run()).rejects.toThrowError(UnsupportedCapabilityError);
+      }
 
       expect(domain.isResourceLocked('res:c7')).toBe(false);
     });
@@ -655,20 +658,24 @@ export function defineContractTestSuite(
       expect(run?.terminationReason).toBe('completed');
     });
 
-    it('契约 13: 多维 Hard 请求遇不支持平台准入拒绝', async () => {
+    it('契约 13: 多维 Hard 请求：驱动不支持的维度准入拒绝，声明支持的维度准入', async () => {
       const { supervisor, tempDir } = ctx;
+      ensureTaskAndRun(ctx.domain, 'task-c13', 'run-c13');
 
-      // 验证 pidsLimit hard 准入拒绝
-      await expect(
-        supervisor.executeProcess({
-          runId: 'run-c13',
-          opId: 'op-c13-pids',
-          name: 'pids-test',
-          command: { execPath: 'echo', args: ['1'], cwd: tempDir },
-          requiredResources: ['res:c13:pids'],
-          resourceBudget: { maxPids: 20, enforcement: 'hard' },
-        })
-      ).rejects.toThrowError(UnsupportedCapabilityError);
+      // 验证 pidsLimit hard：不支持的驱动准入拒绝，声明支持的驱动准入
+      const pids = supervisor.executeProcess({
+        runId: 'run-c13',
+        opId: 'op-c13-pids',
+        name: 'pids-test',
+        command: { execPath: 'echo', args: ['1'], cwd: tempDir },
+        requiredResources: ['res:c13:pids'],
+        resourceBudget: { maxPids: 20, enforcement: 'hard' },
+      });
+      if (ctx.driver.capabilities.pidsLimit) {
+        expect((await pids).status).toBe('succeeded');
+      } else {
+        await expect(pids).rejects.toThrowError(UnsupportedCapabilityError);
+      }
 
       // 验证 cpuLimit hard 准入拒绝
       await expect(
@@ -2323,6 +2330,118 @@ export function defineContractTestSuite(
         expect(after).toEqual({ status: 'stale', changed: [path.join(fs.realpathSync(root), 'input.txt')], truncated: false });
       }
     });
+
+    it('契约 37: hard 内存上限由 OS 执行：超限时整棵树被杀，结果为 memory_exceeded 并释放租约；不支持的驱动准入拒绝', async () => {
+      const { supervisor, domain, tempDir, driver } = ctx;
+      ensureTaskAndRun(domain, 'task-c37', 'run-c37');
+      const run = () =>
+        supervisor.executeProcess({
+          runId: 'run-c37',
+          opId: 'op-c37',
+          name: 'allocate',
+          command: {
+            execPath: process.execPath,
+            args: ['-e', 'const a = []; for (;;) a.push(Buffer.alloc(16 * 1024 * 1024, 1));'],
+            cwd: tempDir,
+          },
+          requiredResources: ['res:c37'],
+          resourceBudget: { maxMemoryBytes: 96 * 1024 * 1024, enforcement: 'hard' },
+          timeoutMs: 15000,
+        });
+      if (!driver.capabilities.memoryHardLimit) {
+        await expect(run()).rejects.toThrowError(UnsupportedCapabilityError);
+        return;
+      }
+      const result = await run();
+      expect(result.status).toBe('failed');
+      expect(result.terminationReason).toBe('memory_exceeded');
+      expect(domain.isResourceLocked('res:c37')).toBe(false);
+    });
+
+    it('契约 38: hard 进程数上限挡住 fork 炸弹：命中后停掉整棵树，结果为 pids_exceeded，所有派生进程都已消失', async () => {
+      const { supervisor, domain, tempDir, driver } = ctx;
+      ensureTaskAndRun(domain, 'task-c38', 'run-c38');
+      const pidFile = path.join(tempDir, 'c38-pids.txt');
+      const run = () =>
+        supervisor.executeProcess({
+          runId: 'run-c38',
+          opId: 'op-c38',
+          name: 'fork-many',
+          command: {
+            execPath: '/bin/sh',
+            args: ['-c', `i=0; while [ $i -lt 200 ]; do sleep 30 & echo $! >> "${pidFile}"; i=$((i+1)); done; wait`],
+            cwd: tempDir,
+          },
+          requiredResources: ['res:c38'],
+          resourceBudget: { maxPids: 16, enforcement: 'hard' },
+          timeoutMs: 15000,
+        });
+      if (!driver.capabilities.pidsLimit) {
+        await expect(run()).rejects.toThrowError(UnsupportedCapabilityError);
+        return;
+      }
+      const result = await run();
+      expect(result.status).toBe('failed');
+      expect(result.terminationReason).toBe('pids_exceeded');
+      expect(domain.isResourceLocked('res:c38')).toBe(false);
+      const spawned = fs.readFileSync(pidFile, 'utf8').split('\n').map(Number).filter((pid) => pid > 0);
+      expect(spawned.length).toBeGreaterThan(0);
+      expect(spawned.length).toBeLessThan(200);
+      for (const pid of spawned) expect(await waitUntilGone(pid, 2000)).toBe(true);
+    });
+
+    it('契约 62: 根进程退出且管道已排空不等于树已空：关闭了 stdio 的脱离后代要么被回收（reaped），要么结果如实声明 unverified，绝不声称 empty', async () => {
+      const { supervisor, domain, tempDir, driver } = ctx;
+      ensureTaskAndRun(domain, 'task-c62', 'run-c62');
+      const pidFile = path.join(tempDir, 'c62-daemon.pid');
+      const daemonize = `
+        const { spawn } = require('node:child_process');
+        const d = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });
+        require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(d.pid));
+        d.unref();
+      `;
+      const provable =
+        driver.capabilities.descendantEnumeration === 'cgroup' || driver.capabilities.descendantEnumeration === 'subreaper';
+      let daemonPid = 0;
+      try {
+        const result = await supervisor.executeProcess({
+          runId: 'run-c62',
+          opId: 'op-c62-daemon',
+          name: 'daemonize',
+          command: { execPath: process.execPath, args: ['-e', daemonize], cwd: tempDir },
+          requiredResources: ['res:c62'],
+          timeoutMs: 15000,
+        });
+        daemonPid = Number(fs.readFileSync(pidFile, 'utf8'));
+        expect(result.status).toBe('succeeded');
+        expect(result.treeSettlement).not.toBe('empty');
+        if (provable) {
+          expect(result.treeSettlement).toBe('reaped');
+          expect(result.residualProcessesReaped).toBe(true);
+        }
+        if (result.treeSettlement === 'reaped') {
+          expect(await waitUntilGone(daemonPid, 2000)).toBe(true);
+        } else {
+          expect(result.treeSettlement).toBe('unverified');
+        }
+        expect(domain.isResourceLocked('res:c62')).toBe(false);
+
+        // 没有残留的命令：能证明的驱动答 empty，且不报告回收
+        const clean = await supervisor.executeProcess({
+          runId: 'run-c62',
+          opId: 'op-c62-clean',
+          name: 'clean',
+          command: { execPath: process.execPath, args: ['-e', '0'], cwd: tempDir },
+        });
+        if (provable) expect(clean.treeSettlement).toBe('empty');
+        expect(clean.residualProcessesReaped).toBeUndefined();
+      } finally {
+        if (daemonPid > 0) {
+          try {
+            process.kill(daemonPid, 'SIGKILL');
+          } catch {}
+        }
+      }
+    });
   });
 }
-

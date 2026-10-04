@@ -101,6 +101,8 @@ export interface Operation {
     osStartTime?: string;
     commandFingerprint?: string;
     bootId?: string;
+    /** 专属 cgroup（CgroupPlatformDriver）：恢复时据此判断整棵树是否已空。 */
+    cgroupPath?: string;
   };
 }
 
@@ -154,7 +156,13 @@ export interface ProcessOperationResult extends BaseResult {
   spawnFailure?: string;           // 非空表示可执行文件根本没起来（与子进程自己返回 127 区分）
   peakMemoryBytes?: number;
   cpuTimeMs?: number;
-  residualProcessesReaped?: boolean; // 根进程退出后仍持有管道的后代已被停止流水线回收
+  residualProcessesReaped?: boolean; // 根进程退出后仍存活的后代（持有管道或已脱离）已被停止流水线回收
+  /**
+   * 根进程自然退出后，「没有后代残留」这一结论的依据：`empty` 驱动证明树已空；
+   * `reaped` 发现残留并确认回收；`unverified` 驱动无法证明（可能存在换了进程组的逃逸者）。
+   * 停止 / 超时路径不出现：那里由停止结果的 scope 说明。
+   */
+  treeSettlement?: 'empty' | 'reaped' | 'unverified';
   streamCallbackError?: string;      // onStreamChunk 回调抛出的首个错误（不中断排空）
   spillError?: string;               // 转储打开/写入/fsync/关闭失败记录（P0-9）
   stdoutSpillError?: string;         // stdout 转储失败错误

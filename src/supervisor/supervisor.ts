@@ -22,6 +22,7 @@ import { ServiceSupervisor } from './service.js';
 import {
   admitProcessScope,
   assertHardBudgetSupported,
+  withHardLimits,
   assertRunAcceptsOperations,
   resolveConfinementDriver,
 } from './admission.js';
@@ -203,9 +204,10 @@ export class ProcessSupervisor {
     // 0. 准入：capability 范围、写入限制、hard 预算能力、调用 Run 状态
     const { mutationRoots, capAdmission } = admitProcessScope(this.domain, options);
     const confinementDriver = resolveConfinementDriver(options, this.confinementDriver);
-    const command = confinementDriver ? confinementDriver.wrap(options.command, mutationRoots || []) : options.command;
+    const wrapped = confinementDriver ? confinementDriver.wrap(options.command, mutationRoots || []) : options.command;
     const startTime = Date.now();
     assertHardBudgetSupported(this.driver, options.resourceBudget);
+    const command = withHardLimits(wrapped, options.resourceBudget);
     const inputFingerprint = options.inputFingerprint || computeInputFingerprint(options);
     assertRunAcceptsOperations(this.domain, options.runId, options.opId);
 

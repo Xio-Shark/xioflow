@@ -11,6 +11,7 @@ import {
   ManagedProcessHandle,
   ProcessIdentity,
   StopProcessResult,
+  TreeSettlement,
 } from './types.js';
 import { IdentityVerificationResult } from '../types.js';
 import { NodePlatformDriver } from './node-driver.js';
@@ -20,6 +21,8 @@ import { computeCommandFingerprint, resolveExecutable } from './spawn-support.js
 type ExitFacts = { exitCode: number | null; signal: NodeJS.Signals | null };
 
 const HELPER_NAME = 'xioflow-reaper';
+/** 树已空的会话在通道关闭后保留多久，供结算查询。 */
+const SETTLED_SESSION_TTL_MS = 30_000;
 
 /**
  * 解析当前平台的 reaper helper：`XIOFLOW_REAPER_PATH` 优先，否则取包内
@@ -57,6 +60,8 @@ interface ReaperSession {
   rootExitListeners: Array<(facts: ExitFacts) => void>;
   /** helper 报告整棵树已空（root 退出后后代也全部结束，或 stop 已确认）。 */
   treeEmpty: boolean;
+  /** 等待 `empty`（或通道关闭）的结算回调。 */
+  treeEmptyListeners: Array<() => void>;
   /** 控制通道关闭时树未被确认清空：helper 已不再持有它，此后只能退回操作系统事实。 */
   helperLost: boolean;
   /** 在途 stop 请求的应答回调（stopped / residual；通道关闭时为 null）。 */
@@ -223,6 +228,32 @@ export class ReaperPlatformDriver implements PlatformDriver {
     return session.stopPromise;
   }
 
+  /**
+   * Linux：helper 是子收割者，脱离的后代必然回到它名下，`empty` 是证明，超时未空即 `residual`。
+   * macOS：helper 只跟踪它看到的 fork，`empty` 不能排除未跟踪的逃逸者，只答 `unknown`。
+   */
+  public async settleTree(identity: ProcessIdentity, waitMs: number): Promise<TreeSettlement> {
+    const session = this.sessions.get(identity.pid);
+    if (!session) return this.facts.settleTree(identity, waitMs);
+    if (!session.treeEmpty && !session.helperLost) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, waitMs);
+        session.treeEmptyListeners.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+    if (session.treeEmpty) {
+      this.sessions.delete(identity.pid);
+      return process.platform === 'linux' ? 'empty' : 'unknown';
+    }
+    // helper 丢失：树不再被持有，退回操作系统事实
+    if (session.helperLost) return this.facts.settleTree(identity, 0);
+    // 会话留给随后的停止流水线：由 helper 回收它持有的残留
+    return 'residual';
+  }
+
   private treeScope(): StopProcessResult['scope'] {
     return process.platform === 'linux' ? 'subreaper_tree' : 'tracked_tree';
   }
@@ -233,7 +264,7 @@ export class ReaperPlatformDriver implements PlatformDriver {
     const line = await reply;
     session.stopPromise = undefined;
     if (line === 'stopped') {
-      session.treeEmpty = true;
+      markTreeEmpty(session);
       return { stopped: 'confirmed_stopped', scope: this.treeScope() };
     }
     if (line?.startsWith('residual ')) {
@@ -304,6 +335,7 @@ export class ReaperPlatformDriver implements PlatformDriver {
       rootPid,
       rootExitListeners: [],
       treeEmpty: false,
+      treeEmptyListeners: [],
       helperLost: false,
     };
     this.sessions.set(rootPid, session);
@@ -323,7 +355,14 @@ export class ReaperPlatformDriver implements PlatformDriver {
     session.ctl.on('close', () => {
       if (!session.treeEmpty) session.helperLost = true;
       session.onStopReply?.(null);
-      if (session.treeEmpty) this.sessions.delete(rootPid);
+      for (const listener of session.treeEmptyListeners.splice(0)) listener();
+      // 树已空时保留会话一段时间：根进程退出、管道排空之后监督器还要来问结算结果
+      // 只删这一个会话：pid 在保留期内可能已被新的操作复用
+      if (session.treeEmpty) {
+        setTimeout(() => {
+          if (this.sessions.get(rootPid) === session) this.sessions.delete(rootPid);
+        }, SETTLED_SESSION_TTL_MS).unref();
+      }
       if (!session.rootExit) this.watchOrphanedRoot(session);
     });
     return session;
@@ -342,7 +381,7 @@ export class ReaperPlatformDriver implements PlatformDriver {
       session.helper.unref();
       session.ctl.unref();
     } else if (line === 'empty') {
-      session.treeEmpty = true;
+      markTreeEmpty(session);
     } else if (line === 'stopped' || line.startsWith('residual ')) {
       session.onStopReply?.(line);
     } else if (line.startsWith('error ')) {
@@ -401,6 +440,11 @@ export class ReaperPlatformDriver implements PlatformDriver {
       helper.stdin.end(payload);
     }
   }
+}
+
+function markTreeEmpty(session: ReaperSession): void {
+  session.treeEmpty = true;
+  for (const listener of session.treeEmptyListeners.splice(0)) listener();
 }
 
 function signalName(signo: number): NodeJS.Signals | null {
