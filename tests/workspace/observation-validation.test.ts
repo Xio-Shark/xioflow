@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -388,12 +388,16 @@ describe('commit with observation validation', () => {
   it('finishes an observation-validated commit that was interrupted after TX_COMMITTING', async () => {
     const { repo, txA, log } = await race('crash', B_UNRELATED_EDIT);
     if (txA.readTracking !== 'atime') return;
-    // Validation passes and TX_COMMITTING is journaled, then applying fails: the workspace directory is read-only.
-    fs.chmodSync(path.join(repo, 'src'), 0o555);
+    // Inject the apply failure directly: root bypasses chmod-based permission failures.
+    const rmSync = fs.rmSync;
+    const failure = vi.spyOn(fs, 'rmSync').mockImplementation((file, options) => {
+      if (file === path.join(repo, 'src/c1.mjs')) throw Object.assign(new Error('EACCES: injected apply failure'), { code: 'EACCES' });
+      return rmSync(file, options);
+    });
     try {
       await expect(supervisor.commitWorkspaceTransaction('crash-A', { observations: observations(log) })).rejects.toThrow(/EACCES|EPERM/);
     } finally {
-      fs.chmodSync(path.join(repo, 'src'), 0o755);
+      failure.mockRestore();
     }
     expect(events('TX_COMMITTING').at(-1)?.payload).toMatchObject({ txId: 'crash-A', validation: 'observations' });
     expect(fs.readFileSync(path.join(repo, 'src/util.mjs'), 'utf8')).toContain('export function foo()');

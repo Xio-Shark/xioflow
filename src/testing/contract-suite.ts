@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
+import { gunzipSync } from 'node:zlib';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import util from 'node:util';
@@ -2315,10 +2316,18 @@ export function defineContractTestSuite(
       const first = await run('c61-a');
       expect(first.readEvidence?.scope).toBe('content_reads');
       expect(supervisor.evidenceStatus('c61-a')).toEqual({ status: 'fresh', basis: 'tree_unchanged' });
+      // Filesystem atime may include other readers. Check freshness against the
+      // recorded conservative set, not assumed per-process attribution.
+      const reads = first.readEvidence?.tracking === 'atime'
+        ? JSON.parse(gunzipSync(fs.readFileSync(first.readEvidence.ref!)).toString('utf8')).roots[0].reads
+        : null;
+      if (reads) expect(reads).toHaveProperty('input.txt');
+      const otherWasRead = reads !== null && Object.hasOwn(reads, 'other.txt');
 
       fs.writeFileSync(path.join(root, 'other.txt'), 'changed\n');
       const outside = supervisor.evidenceStatus('c61-a');
-      expect(outside.status).toBe('unknown');
+      expect(outside.status).toBe(otherWasRead ? 'stale' : 'unknown');
+      if (otherWasRead) expect(outside).toEqual({ status: 'stale', changed: [path.join(fs.realpathSync(root), 'other.txt')], truncated: false });
       if (outside.status === 'unknown') {
         expect(outside.reason).toBe(first.readEvidence?.tracking === 'atime' ? 'changed_outside_read_set' : 'reads_unobserved');
       }
@@ -2327,7 +2336,7 @@ export function defineContractTestSuite(
       const after = supervisor.evidenceStatus('c61-a');
       expect(after.status).not.toBe('fresh');
       if (first.readEvidence?.tracking === 'atime') {
-        expect(after).toEqual({ status: 'stale', changed: [path.join(fs.realpathSync(root), 'input.txt')], truncated: false });
+        expect(after).toEqual({ status: 'stale', changed: ['input.txt', ...(otherWasRead ? ['other.txt'] : [])].map((name) => path.join(fs.realpathSync(root), name)), truncated: false });
       }
     });
 

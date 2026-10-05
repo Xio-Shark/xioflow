@@ -357,7 +357,7 @@ describe('Task 02: Real Platform Driver, Stopping Pipeline & Headless Contract T
   it('9. 复杂孤儿逃逸检测：中间父进程先退出导致 PPID 断链变 1 场景下诚实探测到逃逸孤儿', async () => {
     const bPidFile = path.join(tempDir, 'b.pid');
     const orphanPidFile = path.join(tempDir, 'orphan.pid');
-    const childScriptFile = path.join(tempDir, 'child_b.js');
+    const childScriptFile = path.join(tempDir, 'child_b.cjs');
 
     // 写入中间子进程 B 脚本：
     // 1. 记录 B 的 PID

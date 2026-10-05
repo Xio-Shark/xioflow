@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { isPathContained } from '../capability/path-utils.js';
 import { EvidenceStatus, ReadEvidence } from '../types.js';
-import { probeReadTracking } from '../workspace/read-tracking.js';
+import { probeReadTracking, resetAccessTime, wasAccessed } from '../workspace/read-tracking.js';
 
 /**
  * 读集证据：一条命令跑完后，记下它在 roots 里读过哪些文件（内容哈希）、列过哪些目录（条目集合哈希），
@@ -39,7 +39,6 @@ interface EvidenceFile {
 }
 
 const SKIP_TOP = new Set(['.git']);
-const ATIME_MARGIN_NS = 2_000_000_000n;
 const CHANGED_LIMIT = 50;
 const sha = (data: string | Buffer) => crypto.createHash('sha256').update(data).digest('hex');
 
@@ -57,11 +56,6 @@ function walk(dir: string, visit: (abs: string, rel: string, st: fs.BigIntStats)
   }
 }
 
-function resetAccessTime(abs: string, st: fs.BigIntStats): void {
-  const mtime = Number(st.mtimeNs) / 1e9;
-  fs.utimesSync(abs, mtime - Number(ATIME_MARGIN_NS) / 1e9, mtime);
-}
-
 /**
  * 一趟遍历的归一：只动 atime 不早于 mtime 的文件（上次归一之后被读过的，以及两个时间相等的新文件）。
  * 目录每次都归一，因为这趟遍历本身就列了它。事务路径用的全量归一（`normalizeAccessTimes`）不受影响。
@@ -71,7 +65,7 @@ export function normalizeAccessTimesOnePass(root: string): void {
   walk(root, (abs, _rel, st) => {
     if (st.isSymbolicLink()) return; // utimes 会跟随链接，改到链接目标上
     if (st.isDirectory()) dirs.push([abs, st]);
-    else if (st.atimeNs >= st.mtimeNs) resetAccessTime(abs, st);
+    else if (wasAccessed(st)) resetAccessTime(abs, st);
   });
   // 深的目录先归一：父目录的 mtime 不受子目录 atime 变化影响
   for (const [abs, st] of dirs.reverse()) resetAccessTime(abs, st);
@@ -98,7 +92,7 @@ function scan(root: string): { reads: string[]; tree: Record<string, string> } {
   walk(root, (_abs, rel, st) => {
     if (!st.isDirectory()) tree[rel] = `${st.size}:${st.mtimeNs}`;
     if (st.isSymbolicLink()) return;
-    if (st.atimeNs > st.mtimeNs) reads.push(st.isDirectory() ? `${rel || '.'}/` : rel);
+    if (wasAccessed(st)) reads.push(st.isDirectory() ? `${rel || '.'}/` : rel);
   });
   return { reads: reads.sort(), tree };
 }
