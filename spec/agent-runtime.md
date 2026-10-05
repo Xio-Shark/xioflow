@@ -32,7 +32,7 @@ full checkpoint. Local E9 measurements and limitations are recorded in
 [the persistence experiment](../audit/observation/JOURNAL.md).
 
 - `create`: register an agent in an existing nonterminal Run; optional parent
-  must belong to the same Run. Input/checkpoints are JSON data.
+  must belong to the same Run and an open task scope. Input/checkpoints are JSON data.
 - `drain`: dispatch ready agents in journal-sequence order with a fixed
   `maxConcurrentAgents` ceiling. A completed quantum rejoins at the queue tail.
 - Before a quantum, `validate` can return `valid`, `stale` or `unknown`.
@@ -43,6 +43,9 @@ full checkpoint. Local E9 measurements and limitations are recorded in
   token usage, and it does not bound time spent inside a quantum.
 - `pause` on ready agents is immediate; on checking/running agents it takes
   effect at the next boundary. It does not kill an in-flight provider or tool.
+- `interrupt` requests cancellation and waits for the active validator or step
+  and its managed command batch. It retains the last checkpoint and spent
+  budget. See the interruption contract below.
 - A successful quantum persists its checkpoint, then becomes ready, completed,
   or paused (explicit request or exhausted budget).
 - A thrown step becomes `interrupted`, retaining the reserved budget and last
@@ -70,12 +73,151 @@ full checkpoint. Local E9 measurements and limitations are recorded in
   fork was fully reconstructed. Leftover candidate transactions remain available
   for inspection/cleanup through the existing transaction journal.
 - A Run cannot report success while its agents are nonterminal. Agent completion
-  does not automatically finish its Run or cancel its children.
+  does not finish its Run. A parent waits for its children as described below.
 
-One live runtime owns a domain. `close` requires `drain` and active recovery
+One live runtime owns a domain. `close` requires `drain`, active checkpoint selection and recovery
 promises to have settled. The
 domain's existing owner/epoch mechanism protects persistent writes across host
 restart. The runtime does not introduce a daemon or a cross-host scheduler.
+
+## Task scopes
+
+`parentId` defines a structured task tree within a Run. Separate roots in the same
+Run share budgets but not cancellation. A successful parent quantum saves its
+checkpoint and enters `waiting` until its children complete. Waiting consumes no
+dispatch slot, so a single-slot runtime can run those children. The runtime marks
+the parent `completed` only after the join. A waiting parent cannot accept new
+direct children; its existing children may still create their own descendants.
+
+`drain()` settles runnable work, not paused work. If a child pauses for evidence,
+budget or a host request, its parent stays `waiting` and `drain()` can return.
+After an explicit child resume, another drain continues the join. Waiting state
+and its checkpoint survive reopening without rerunning the parent quantum.
+Drain also waits for reconstruction cancelled by a task failure; unrelated
+uncancelled reconstruction remains independent of runnable work.
+
+A failed or interrupted member cancels its entire root task, including siblings.
+This is a fail-fast policy, not a supervisor/restart policy. `interrupt(id)` on any
+nonterminal member requests cancellation for that root and joins all its active
+quanta, managed commands and workspace reconstruction. Completed/failed members
+reject direct interruption. Unrelated roots continue running.
+
+Cancellation writes the tree's states in one SQLite transaction before invoking
+abort listeners. A journal failure rolls back the request and does not notify the
+adapters. Closed ancestors fence child creation, resumption, command admission and
+restoration. Concurrent/reentrant interruption calls share the root barrier.
+Do not await that barrier from any callback in the affected tree.
+
+Reconstruction remains cooperative: cancellation waits for preparation, discards
+its prepared candidate, and leaves the agent interrupted without binding it.
+Cleanup errors reject both recovery and the interruption barrier after settlement.
+Checkpoint searches are read-only, do not participate in the task execution join,
+and return candidates rather than authority to restore a closed scope.
+
+After cancellation settles, restore interrupted ancestors before descendants,
+then resume selected agents. Restoration does not reopen other interrupted members
+or refund their budgets. A remaining failed/interrupted member will cancel the
+root again on drain. A terminal validation failure requires a new task tree/Run.
+Host restart never dispatches the saved tree: interrupted descendants also cancel
+their waiting or paused ancestors. These rules extend the experimental API and
+change the historical metadata-only meaning of `parentId`.
+
+## Shared Run admission budgets
+
+`runBudget: { maxSteps, maxAgents, maxPendingCommands }` sets defaults for Runs
+first used by this runtime. All values must be positive safe integers. The default
+limits are 10,000 quanta, 1,024 lifetime agent identities, and 64 outstanding
+commands per Run. Choose smaller application-specific limits when appropriate.
+
+The runtime writes an `AGENT_RUN_BUDGET` version-1 event before the Run's first
+agent creation/execution. Existing persisted limits win over constructor defaults
+on reopen. Legacy journals acquire limits on first subsequent admission; existing
+agents and spent steps count toward them. Limits cannot be increased by reopening
+or checkpoint restoration. Start a new Run for a new allocation.
+
+The shared step count is the sum of persisted agent `stepsUsed`. One `step_started`
+event reserves both the agent's step and its Run charge before invoking the
+adapter. Concurrent validators recheck the shared balance when they dispatch.
+Failed/interrupted work retains its charge. A shared budget exhaustion pauses
+ready work with `run_budget_exhausted`; `resume` rejects an exhausted Run.
+
+`maxAgents` counts completed and interrupted identities too, bounding the lifetime
+agent queue of a Run. `maxPendingCommands` includes active commands and resource
+waiters across that Run's agents. The runtime reserves a slot synchronously before
+allocating the submitted command's asynchronous work, and releases it at settlement.
+It rejects overflow instead of creating another waiter. A batch admission failure
+interrupts the quantum even if the adapter catches it. Once a batch fails, later
+submissions reject with its first failure; already accepted commands still settle.
+Settled promises no longer accumulate in the batch.
+
+`getRunUsage(runId)` returns detached limits, `agentsCreated`, `stepsUsed`, and
+`pendingCommands`. The first two counters come from the journal. Pending commands
+are a live count, not a replay queue: after restart the supervisor recovers existing
+operations and leases, and the runtime does not resubmit queued commands.
+
+These limits govern this runtime's managed path. They do not cap the number of
+Runs, journal bytes, command calls made sequentially within one quantum, direct
+supervisor users, arbitrary adapter allocations, tokens, cost or wall-clock time.
+Set domain/process budgets separately. Token/cost accounting requires adapter
+reports and is not implemented.
+
+## Validation and workspace versions
+
+Without `workspaceVersion`, `validate` is a read-only dispatch gate, not a freshness
+certificate. The workspace can change while the validator is suspended even when
+it returns `valid`. A regression test demonstrates that legacy behavior.
+
+With `workspaceVersion(agent)`, the runtime samples a nonempty revision string
+before validation and again on the dispatch continuation. A changed revision
+pauses with `evidence_stale` without charging a step. An unchanged revision travels
+in `AgentState.validatedWorkspaceVersion` and the durable `step_started` event.
+The runtime also rechecks that a bound workspace transaction remains open after
+validation. An invalid revision source or a closed transaction fails validation.
+
+The host must make this synchronous revision source cover all evidence read by
+the validator. Use an immutable snapshot identity or a generation that advances
+for every relevant write, including changes that restore old contents (ABA).
+A raw journal sequence, timestamp or transaction ID is not a content revision.
+The runtime does not provide such a filesystem-wide revision counter.
+
+There is no asynchronous yield between the final revision check and adapter
+invocation. This is a dispatch boundary guarantee only: external processes can
+write concurrently, the adapter can await again, and commands may wait for leases.
+Execute against an immutable/isolated workspace or maintain a write lease for a
+whole-quantum guarantee. Rechecking a version does not create that isolation.
+Checkpoint search still returns only a candidate; dispatch validates again.
+
+## Shutdown contract
+
+`await agents.shutdown()` closes admission immediately: creation, pause, resumption,
+restoration, new recovery, validation selection and drain requests reject.
+Already queued scheduler microtasks cannot dispatch a new quantum. Ready agents
+are persisted as paused with reason `shutdown`; existing paused and terminal
+states are preserved. Active validation and steps use the existing durable
+interruption protocol, including their managed commands and spent budgets.
+A validator already settled at the shutdown boundary can pause without starting
+the step or spending budget, rather than starting new work before cancellation.
+
+The barrier waits for active quanta, drain, scope interruptions, checkpoint selection and workspace reconstruction (including
+failure cleanup). Standalone reconstruction may finish binding a checkpoint;
+reconstruction inside a cancelled task scope discards its prepared candidate.
+Neither can resume the agent during shutdown. The runtime owner is
+released only after these callbacks settle. Concurrent shutdown calls join the
+same promise. Reads remain available while stopping, but a completed shutdown
+closes the runtime. The domain itself and other supervisor instances remain open.
+An active checkpoint search may finish its current read-only validation, but
+does not start another candidate once shutdown has been requested.
+
+Journal or recovery failures reject shutdown after the same settlement barrier;
+the runtime is closed even on rejection. Reopening reconstructs uncertain states
+from the journal and never automatically replays them. A non-cooperative adapter
+or reconstruction callback can keep shutdown pending indefinitely. Do not await
+shutdown from a callback that shutdown itself must join. It neither proves an
+indeterminate process tree empty nor releases that operation's retained leases.
+
+This follows the stop-admission/settlement distinction in
+[Temporal worker shutdown](https://github.com/temporalio/documentation/blob/main/docs/encyclopedia/workers/worker-shutdown.mdx),
+without adding a force-timeout success path or a background daemon.
 
 ## Embedding
 
@@ -102,6 +244,45 @@ The two adapter functions are host implementations: `validate` returns the
 three-way verdict; `step` returns `{ status: 'ready' | 'completed', checkpoint }`.
 Checkpoint contents and input formats belong to that adapter. The kernel gives
 callbacks detached values so mutations cannot bypass persistence.
+
+## Interruption contract
+
+`await agents.interrupt(id)` returns that member's settled `AgentState` after
+the task-scope barrier. Ready, paused and waiting members become `interrupted`
+without another dispatch or charge. Checking/running members first record
+`interrupt_requested`, then receive their abort signal. Recovering members wait
+for preparation and cleanup. A subsequent `pause` cannot override cancellation.
+An already interrupted member still joins outstanding work in its root scope.
+
+Adapters receive `execution.signal` in `step` and an `AbortSignal` as the second
+argument to `validate`. Pass that signal to cancellable provider APIs. The
+runtime combines it with each command's optional `abortSignal`, so either can
+cancel that command through the supervisor's existing stop pipeline. Commands
+submitted after interruption reject without admission. A command-only abort
+does not abort the agent or its other commands.
+
+The runtime waits even if an adapter catches cancellation and returns a
+successful result. It does not save that result as a checkpoint. Command
+failures and indeterminate outcomes remain in the agent error and operation
+journal; `interrupted` does not certify that an unconfirmed process tree is
+empty. The supervisor retains leases for indeterminate operations.
+
+Interruption is cooperative for adapter-owned work. An adapter that ignores the
+signal keeps `interrupt()` and `drain()` pending; the runtime does not claim a
+timeout or force-kill the JavaScript callback. Do not await `interrupt(id)` from
+any callback in that task tree: the barrier waits for those callbacks to return.
+Detached work outside the execution context and external side-effect rollback
+remain outside this API.
+
+After settlement, use explicit checkpoint restoration before resuming. A host
+crash after a recorded request leaves checking/running agents interrupted on
+reopen, without automatic retry or budget refund. Process recovery and
+adjudication remain the supervisor's responsibility.
+
+This follows the cancellation-request versus cancellation-completion distinction
+used by [Temporal's cancellation scopes](https://github.com/temporalio/documentation/blob/main/docs/design-patterns/pick-first.mdx).
+The implementation uses native `AbortSignal` and existing process supervision;
+it adds no runtime dependency or database schema migration.
 
 ## Managed command batches
 
@@ -159,15 +340,27 @@ For a workspace-bound agent, the runtime includes its fork in `mutationRoots`,
 so transaction validation can detect process access even when `cwd` is elsewhere.
 It does not rewrite `cwd`, add implicit exclusive locks, or confine the process.
 Commands launched outside this context do not participate in the checkpoint
-barrier. Provider calls, arbitrary file tools, command priority/preemption and
-parent-child cancellation remain outside this increment.
+barrier. Provider protocols, arbitrary file tools and command priority/preemption
+remain host responsibilities; parent-child cancellation follows the task scope.
 
 ## Verified scope
+
+- `scripts/agent-soak.mjs` exercises repeated scoped cancellation, queue overflow,
+  journal-boundary fault injection and real SIGKILL restart. Run `pnpm build` then
+  `XIOFLOW_SOAK_SECONDS=120 node scripts/agent-soak.mjs`. It reports sampled RSS,
+  journal/database growth, event-loop delay, rejected commands and remaining known
+  process IDs. Set `XIOFLOW_EXPECT_CGROUP=1` inside a delegated Linux cgroup to
+  test that driver. Duration defaults to 120 seconds and accepts up to 86,400.
+  ENOSPC is an injected journal exception, not a full-disk experiment. A bounded
+  run does not establish day-long stability or bounded journal retention.
 
 - Unit tests cover round-robin ordering, parallel bounds, child creation,
   independent pauses, evidence gates, checkpoint selection and budget retention.
 - A separate worker dies with SIGKILL after budget reservation. Recovery keeps
   it interrupted without redispatching; explicit restoration retains the charge.
+- Interruption tests cover queued and running commands, cooperative validation,
+  an adapter ignoring cancellation, duplicate requests, journal-write failure,
+  and SIGKILL after the request during validation or execution.
 - Real child-process tests cover two concurrent agents with two commands each,
   domain caps of one/two, shared-resource exclusion, pause, cancellation and
   checkpoint ordering. Ownership survives reopen and includes queued requests.

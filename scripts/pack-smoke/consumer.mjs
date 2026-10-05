@@ -92,6 +92,45 @@ try {
   }), /context is closed/);
   ok('packaged agent commands', 'unawaited batch settled, ownership persisted, expired context rejected');
 
+  const stoppingAgents = new AgentRuntime(domain, {
+    maxConcurrentAgents: 1,
+    step: async () => { throw new Error('Shutdown must not dispatch queued work'); },
+  });
+  stoppingAgents.create({ id: 'packaged-shutdown', runId: 'agent-smoke', input: null, checkpoint: 0, maxSteps: 2 });
+  const stopping = stoppingAgents.shutdown();
+  assert.equal(stoppingAgents.shutdown(), stopping);
+  assert.throws(() => stoppingAgents.drain(), /shutting down/);
+  await stopping;
+  const reopenedAgents = new AgentRuntime(domain, {
+    maxConcurrentAgents: 1,
+    step: async () => ({ status: 'completed', checkpoint: 1 }),
+  });
+  assert.equal(reopenedAgents.get('packaged-shutdown').status, 'paused');
+  assert.equal(reopenedAgents.get('packaged-shutdown').reason, 'shutdown');
+  assert.equal(reopenedAgents.get('packaged-shutdown').stepsUsed, 0);
+  reopenedAgents.close();
+  ok('packaged agent shutdown', 'admission closed before dispatch, queued state persisted, runtime ownership released');
+
+  ensureRun('scope-smoke');
+  const scopes = new AgentRuntime(domain, {
+    maxConcurrentAgents: 1,
+    runBudget: { maxSteps: 2, maxAgents: 2, maxPendingCommands: 1 },
+    validate: async () => 'valid', workspaceVersion: () => 'tree-1',
+    step: async (agent) => {
+      assert.equal(agent.validatedWorkspaceVersion, 'tree-1');
+      if (agent.id === 'scope-parent') scopes.create({ id: 'scope-child', parentId: agent.id, runId: 'scope-smoke', input: null, checkpoint: 0, maxSteps: 2 });
+      else assert.equal(scopes.get('scope-parent').status, 'waiting');
+      return { status: 'completed', checkpoint: 1 };
+    },
+  });
+  scopes.create({ id: 'scope-parent', runId: 'scope-smoke', input: null, checkpoint: 0, maxSteps: 2 });
+  await scopes.drain();
+  assert.equal(scopes.get('scope-parent').status, 'completed');
+  assert.equal(scopes.getRunUsage('scope-smoke').stepsUsed, 2);
+  assert.throws(() => scopes.create({ id: 'scope-overflow', runId: 'scope-smoke', input: null, checkpoint: 0, maxSteps: 2 }), /Run agent budget/);
+  await scopes.shutdown();
+  ok('packaged agent scopes', 'single-slot join, shared budget and validated revision');
+
   // 0. Boundary failure is actionable: operations cannot attach to an unknown run.
   assert.throws(
     () =>
