@@ -324,6 +324,7 @@ try {
   ensureRun('run-crash');
   domain.registerOperationIntent({
     id: 'op-crash',
+    spawnGated: true,
     runId: 'run-crash',
     kind: 'process',
     name: 'crash-before-spawn',
@@ -337,6 +338,18 @@ try {
   assert.equal(cleaned?.resourcesReleased, true);
   assert.equal(domain.isResourceLocked('embed:crash'), false);
   ok('recovery cleans unspawned intent', `action=${cleaned.action}`);
+
+  ensureRun('run-no-identity');
+  domain.registerOperationIntent({
+    id: 'op-no-identity', runId: 'run-no-identity', kind: 'process', name: 'unknown-launch',
+    inputFingerprint: 'fp-no-identity', requiredResources: ['embed:no-identity'], status: 'pending',
+  });
+  const noIdentity = await new RecoveryEngine(domain, driver).recover();
+  assert.equal(noIdentity.recoveredOperations.find((entry) => entry.opId === 'op-no-identity')?.action, 'isolated_indeterminate');
+  assert.equal(domain.isResourceLocked('embed:no-identity'), true);
+  assert.equal(store.getOperation('op-crash').spawnGated, true);
+  assert.equal(store.getOperation('op-no-identity').spawnGated, undefined);
+  ok('recovery needs durable launch evidence', 'missing identity without gated evidence stays isolated');
 
   // 5. No blind replay: an unverifiable process identity stays isolated and locked.
   ensureRun('run-unknown');

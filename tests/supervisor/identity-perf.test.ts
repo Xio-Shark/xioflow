@@ -102,6 +102,7 @@ describe('内核 0.2.0 批次 4 (B4): 身份核验、性能卫生与契约收口
       domain.getStore().registerOperationIntent(
         {
           id: 'op-unspawned-intent',
+          spawnGated: driver.capabilities.gatedSpawn === true,
           runId: 'run-b4',
           kind: 'process',
           name: 'unspawned-intent',

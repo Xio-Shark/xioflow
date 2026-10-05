@@ -49,6 +49,9 @@ export class SqliteStore {
     if (!existing.has('capability_id')) {
       this.db.exec('ALTER TABLE operations ADD COLUMN capability_id TEXT;');
     }
+    if (!existing.has('spawn_gated')) {
+      this.db.exec('ALTER TABLE operations ADD COLUMN spawn_gated INTEGER CHECK (spawn_gated IN (0, 1));');
+    }
     const snapshotColumns = new Set(
       (this.db.prepare('PRAGMA table_info(snapshots)').all() as Array<{ name: string }>).map((c) => c.name)
     );
@@ -450,6 +453,9 @@ export class SqliteStore {
   }
 
   public registerOperationIntent(op: Operation, domainId: string): void {
+    if (op.spawnGated !== undefined && typeof op.spawnGated !== 'boolean') {
+      throw new TypeError('spawnGated must be a boolean when provided');
+    }
     const run = this.getRun(op.runId);
     if (!run) {
       throw new Error(
@@ -472,9 +478,9 @@ export class SqliteStore {
         INSERT INTO operations (
           id, run_id, domain_id, kind, name, input_fingerprint, status,
           required_resources, mutation_roots, capability_id, timeout_ms,
-          resource_budget, output_ref, process_identity, result
+          resource_budget, output_ref, process_identity, result, spawn_gated
         )
-        VALUES (?, ?, ?, ?, ?, ?, 'intent_registered', ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 'intent_registered', ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       opStmt.run(
         op.id,
@@ -490,7 +496,8 @@ export class SqliteStore {
         op.resourceBudget ? JSON.stringify(op.resourceBudget) : null,
         op.outputRef || null,
         op.processIdentity ? JSON.stringify(op.processIdentity) : null,
-        op.result ? JSON.stringify(op.result) : null
+        op.result ? JSON.stringify(op.result) : null,
+        op.spawnGated === undefined ? null : Number(op.spawnGated)
       );
 
       // 2. 写入 resource_leases 表记录排他资源占用
@@ -522,6 +529,7 @@ export class SqliteStore {
           requiredResources: op.requiredResources,
           inputFingerprint: op.inputFingerprint,
           resourceBudget: op.resourceBudget,
+          spawnGated: op.spawnGated,
         },
         timestamp: now,
       });
@@ -724,6 +732,7 @@ export class SqliteStore {
       outputRef: row.output_ref || undefined,
       status: row.status as OperationStatus,
       processIdentity: row.process_identity ? JSON.parse(row.process_identity) : undefined,
+      spawnGated: row.spawn_gated === null ? undefined : row.spawn_gated === 1,
       result: row.result ? JSON.parse(row.result) : undefined,
     };
   }

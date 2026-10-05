@@ -232,6 +232,7 @@ export class ProcessSupervisor {
       capabilityId: options.capabilityId,
       timeoutMs: options.timeoutMs,
       resourceBudget: options.resourceBudget,
+      spawnGated: this.driver.capabilities.gatedSpawn === true,
       status: 'pending',
     };
     const readTracking = options.trackReads ? this.readTracker.open(options.opId, options.trackReads) : undefined;

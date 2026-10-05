@@ -211,6 +211,7 @@ describe('Task 02: Real Platform Driver, Stopping Pipeline & Headless Contract T
     // 在 SQLite 中手动登记未启动的意图
     domain.registerOperationIntent({
       id: 'op-crashed-before-spawn',
+      spawnGated: true,
       runId: 'run-drv',
       kind: 'process',
       name: 'crashed-op',

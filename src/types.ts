@@ -88,6 +88,8 @@ export interface Operation {
   capabilityId?: string;           // 绑定的授权 Capability 标识
   timeoutMs?: number;
   resourceBudget?: ResourceBudget; // 显式声明的资源治理预算
+  /** Recorded with the intent: the driver holds exec until identity is durable; EOF must not exec. */
+  spawnGated?: boolean;
   outputRef?: string;              // 产物文件引用路径
   status: OperationStatus;
   result?: OperationResult;
@@ -225,6 +227,7 @@ export interface IndeterminateResult extends BaseResult {
   status: 'indeterminate';
   reason: string;                  // 未知原因
   recoveryGuidance: string;        // 人工恢复或现场排查指引
+  adjudication?: AdjudicationRecord;
 }
 
 export type IdentityVerificationResult =
@@ -648,5 +651,4 @@ export interface ConfinementDriver {
   name: string;
   wrap(command: import('./driver/types.js').StructuredCommand, writableRoots: string[]): import('./driver/types.js').StructuredCommand;
 }
-
 

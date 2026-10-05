@@ -100,7 +100,8 @@ export interface PlatformCapabilities {
   pidsLimit: boolean;              // 是否支持后代进程总数限制
   cpuLimit: boolean;               // 是否支持 CPU 时间硬限制
   descendantEnumeration: 'full' | 'cgroup' | 'subreaper' | 'none'; // 后代枚举与逃逸检测能力（subreaper：孤儿必然回到持有者，可证明树空）
-  gatedSpawn?: boolean;            // 是否支持门管道受控启动 (0.2.0 P0-3)
+  /** True promises no command execution until releaseGate, and no exec on owner loss/EOF. Persisted per intent. */
+  gatedSpawn?: boolean;
   confinement?: string[];          // 支持的写入限制驱动名称列表 (契约 #56)
 }
 

@@ -1080,6 +1080,7 @@ export function defineContractTestSuite(
 
       domain.registerOperationIntent({
         id: 'op-c23-1',
+        spawnGated: true,
         runId,
         kind: 'process',
         name: 'clean-crashed-op',
@@ -1430,14 +1431,14 @@ export function defineContractTestSuite(
       const recoveryEngine = new RecoveryEngine(domain, driver);
       await recoveryEngine.recover();
 
-      // 恢复后该意图被收敛为 failed(never spawned)，新 Run 再次发起重放应命中已记录结果
+      // 旧意图没有持久化启动门证据：不能声称未执行；新 Run 只能重放不确定结果。
       ensureTaskAndRun(domain, 'task-c49', 'run-c49-new');
       const replayOptions = {
         ...options,
         runId: 'run-c49-new',
       };
       const res = await supervisor.executeProcess(replayOptions);
-      expect(res.status).toBe('failed');
+      expect(res.status).toBe('indeterminate');
       expect(res.replayed).toBe(true);
       expect(res.runId).toBe('run-c49');
     });

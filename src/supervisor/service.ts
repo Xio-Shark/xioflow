@@ -180,6 +180,7 @@ export class ServiceSupervisor {
       name: `service-instance-${state.serviceId}-${instanceIndex}`,
       inputFingerprint,
       requiredResources: state.spec.requiredResources ?? [],
+      spawnGated: this.driver.capabilities.gatedSpawn === true,
       status: 'intent_registered',
     };
     store.registerOperationIntent(op, this.domain.domainId);

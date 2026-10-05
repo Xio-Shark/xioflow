@@ -41,18 +41,32 @@ export class RecoveryEngine {
     const store = this.domain.getStore();
     const unfinishedOps = store.getUnfinishedOperations(this.domain.domainId);
     const report: RecoveryReport = { recoveredOperations: [] };
+    const serviceInstances = new Map<string, string[]>();
+    for (const op of store.getAllOperations(this.domain.domainId)) {
+      if (op.kind !== 'service') continue;
+      const serviceId = serviceIdOf(op);
+      const instances = serviceInstances.get(serviceId) ?? [];
+      instances.push(op.id);
+      serviceInstances.set(serviceId, instances);
+    }
+    const unsettledInstances = (serviceId: string) => (serviceInstances.get(serviceId) ?? []).filter((id) => {
+      const op = store.getOperation(id)!;
+      return op.status !== 'done' || (op.result?.status === 'indeterminate' && !op.result.adjudication);
+    });
 
     const releaseOpAndServiceResources = (op: Operation) => {
       this.domain.internalReleaseResources(op.id, op.requiredResources);
-      if (op.kind === 'service' || op.id.includes('#')) {
-        const serviceId = op.id.split('#')[0];
-        this.domain.internalReleaseResources(`service:${serviceId}`, op.requiredResources);
+      if (op.kind === 'service') {
+        const serviceId = serviceIdOf(op);
+        if (unsettledInstances(serviceId).length === 0) {
+          this.domain.internalReleaseResources(`service:${serviceId}`, op.requiredResources);
+        }
       }
     };
 
     const recordServiceStoppedIfNeeded = (op: Operation, action: string) => {
-      if (op.kind === 'service' || op.id.includes('#')) {
-        const serviceId = op.id.split('#')[0];
+      if (op.kind === 'service') {
+        const serviceId = serviceIdOf(op);
         store.recordEventAndTransitionState({
           domainId: this.domain.domainId,
           runId: op.runId,
@@ -146,16 +160,31 @@ export class RecoveryEngine {
         continue;
       }
 
+      if (!op.processIdentity && !(op.status === 'intent_registered' && op.spawnGated === true)) {
+        // Missing identity alone cannot distinguish an unstarted command from an unrecorded execution.
+        const result: IndeterminateResult = {
+          kind: 'indeterminate',
+          status: 'indeterminate',
+          reason: 'Process identity was not recorded; durable gated-spawn evidence does not prove non-execution',
+          recoveryGuidance: 'Inspect processes and side effects before adjudication. Do not retry with a new operation ID.',
+          durationMs: 0,
+          completedAt: new Date().toISOString(),
+        };
+        store.recordOperationResult(op.id, result, false);
+        recordServiceStoppedIfNeeded(op, 'isolated_indeterminate');
+        report.recoveredOperations.push({ opId: op.id, action: 'isolated_indeterminate', resourcesReleased: false });
+        continue;
+      }
+
       if (op.status === 'intent_registered' && !op.processIdentity) {
-        // 场景 1：意图登记后崩溃，驱动未启动（无进程身份）
-        // 安全清理资源，推进至失败终态
+        // The original launch contract, not the recovery driver's capabilities, proves the gate never opened.
         const failResult: ProcessOperationResult = {
           kind: 'process',
           status: 'failed',
           exitCode: null,
           signal: null,
           stdout: '',
-          stderr: 'Process was never spawned before crash occurred',
+          stderr: 'Command was not released through its execution gate before the crash',
           isTruncated: false,
           identityVerification: 'not_original_process',
           durationMs: 0,
@@ -405,9 +434,8 @@ export class RecoveryEngine {
 
     for (const rec of report.recoveredOperations) {
       const op = unfinishedOps.find((o) => o.id === rec.opId);
-      const isService = op?.kind === 'service' || rec.opId.includes('#');
-      if (isService) {
-        const serviceId = rec.opId.split('#')[0];
+      if (op?.kind === 'service') {
+        const serviceId = serviceIdOf(op);
         let entry = serviceMap.get(serviceId);
         if (!entry) {
           entry = {
@@ -425,11 +453,25 @@ export class RecoveryEngine {
       }
     }
 
-    // 检查并释放处于重启 backoff 间隙遗留的 service 租约（无活跃 op）
+    // Include previously isolated instances: they are already done and absent from this recovery's work list.
+    for (const serviceId of serviceInstances.keys()) {
+      const unsettled = unsettledInstances(serviceId);
+      if (unsettled.length === 0) continue;
+      const entry = serviceMap.get(serviceId) ?? {
+        instanceOpIds: [], actions: new Set<RecoveredServiceSummary['action']>(), resourcesReleased: false,
+      };
+      entry.instanceOpIds = [...new Set([...entry.instanceOpIds, ...unsettled])];
+      entry.actions.add('isolated_indeterminate');
+      entry.resourcesReleased = false;
+      serviceMap.set(serviceId, entry);
+    }
+
+    // Backoff cleanup must not release a service whose instance still requires adjudication.
     const persistedLeases = store.getPersistedResourceLeases(this.domain.domainId);
     for (const lease of persistedLeases) {
       if (lease.operationId.startsWith('service:')) {
         const serviceId = lease.operationId.slice('service:'.length);
+        if (serviceMap.get(serviceId)?.resourcesReleased === false) continue;
         this.domain.internalReleaseResources(lease.operationId, [lease.resourceId]);
         if (!serviceMap.has(serviceId)) {
           serviceMap.set(serviceId, {
@@ -485,4 +527,9 @@ export class RecoveryEngine {
       return err?.code === 'EPERM';
     }
   }
+}
+
+function serviceIdOf(op: Operation): string {
+  const suffix = op.id.lastIndexOf('#');
+  return suffix === -1 ? op.id : op.id.slice(0, suffix);
 }

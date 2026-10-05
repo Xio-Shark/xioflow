@@ -750,6 +750,7 @@ describe('内核 0.2.0 批次 2 (B2): 停止安全与资源收口 [N8, N2, N5, N
       // 登记一个未 spawn 的 op
       domain.getStore().registerOperationIntent({
         id: 'op-p06-clean-1',
+        spawnGated: true,
         runId,
         name: 'crashed-op',
         kind: 'process',

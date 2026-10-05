@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS operations (
   resource_budget TEXT,
   output_ref TEXT,
   process_identity TEXT,
+  spawn_gated INTEGER CHECK (spawn_gated IN (0, 1)),
   result TEXT,
   FOREIGN KEY(run_id) REFERENCES runs(id)
 );
