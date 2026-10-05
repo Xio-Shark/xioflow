@@ -1,11 +1,17 @@
 # xioflow Kernel & xiocode Distribution Architecture and Protocol Specification
 
+> **Start here for integration:** [Current implementation contract](spec/current-contract.md) separates the embedded TypeScript execution core, experimental AgentRuntime, and unimplemented Rust/daemon/Python/ABI plans. `CHANGELOG.md` distinguishes released behavior from worktree changes.
+
 > **Experimental extension (2026-10-01, shipped in 0.7.0):** [AgentRuntime](spec/agent-runtime.md) adds kernel-owned agent lifecycle, cooperative dispatch, evidence gates and persisted checkpoints/step budgets. Existing model/tool adapters remain in distributions. The extension supersedes the execution-primitives-only positioning below for this experimental scope; it is not a complete multi-agent runtime.
+
+The [interruption contract](spec/agent-runtime.md#interruption-contract) distinguishes requesting cancellation from settlement: record intent, notify the adapter, cancel managed commands, then await the batch without changing its checkpoint or spent budget. It does not force-kill JavaScript adapters or turn unconfirmed process stops into success.
+
+The [shutdown contract](spec/agent-runtime.md#shutdown-contract) closes admission before draining owned work. Runtime ownership remains held through active quanta, command settlement and workspace reconstruction; closing the runtime does not close its domain or release indeterminate leases.
 
 > **Document Status**: Authoritative Protocol Specification for the xioflow kernel repository. Sections 0, 3, and 7 define the core kernel protocol and conformance guarantees. For phased roadmap and current implementation status, see [`ROADMAP.md`](./ROADMAP.md). Chinese version: [`ARCHITECTURE.md`](./ARCHITECTURE.md).  
 > **Status**: Target-state protocol specification (v2 planning: Rust core + snapshot rollback + dual deployment topology). Sections marked "Target State" are in the roadmap for upcoming milestones; refer to `ROADMAP.md` for current implementation alignment.  
 > **Core Positioning**:  
-> - **xioflow**: A supervised execution kernel for AI agent framework authors. Provides execution primitives only: execution domain lifecycle, supervised processes, resource arbitration, verified stops, workspace snapshots and rollbacks, SQLite transactional persistence, and crash recovery. Zero UI bindings; agnostic to agent loops, languages, or file formats.  
+> - **xioflow**: A supervised execution kernel for AI agent framework authors. The execution core provides domain lifecycle, supervised processes, resource arbitration, verified stops, workspace transactions, SQLite persistence and recovery. Experimental AgentRuntime adds cooperative dispatch, task scopes and shared budgets. Distributions supply model protocols, prompts and business tools.
 > - **xiocode**: The reference distribution assembled on top of xioflow: a complete local coding agent (model routing, coding tools, permission policy, CLI/TUI) that showcases what the kernel does. How it is assembled is documented in xiocode's own ARCHITECTURE.md.  
 > **Repository Division**: xioflow is developed as an independent shared kernel repository; distributions like xiocode consume the kernel strictly through public protocols and thin language bindings.
 
@@ -21,10 +27,10 @@
 |---|---|
 | **Target Users** | Agent framework authors (not end-users of agents). Primary audience: **local-first** agent frameworks and coding agents executing commands directly on host machines. |
 | **Non-Target Users** | Frameworks executing entirely inside disposable remote containers or microVMs (where tearing down the container resets the world, minimizing kernel demand). |
-| **Kernel Form** | Rust core; the same core provides two deployment modes: "embedded mode" and "daemon mode" (§0.2 Decision 3, §5). |
-| **Integration** | Thin bindings in host languages (initial wave: TypeScript, Python) + language-agnostic protocol; bindings and protocol share the identical conformance suite. |
-| **Governance Scope** | Local process lifecycles + workspace filesystem mutations (snapshot / rollback); strictly excludes LLM calls and agent scheduling. |
-| **Controller Boundary** | Exclusively provides execution primitives (`spawn` / `stop` / `lease` / `snapshot` / `rollback` / `recover` / `adjudicate` / `journal`), analogous to syscalls; provides no component models or schedulers. |
+| **Kernel Form** | Current: embedded TypeScript/Node.js. Planned: Rust core and daemon mode (§0.2 Decision 3, §5). |
+| **Integration** | Current: Node.js package and TypeScript types. Language-neutral protocol and Python bindings remain planned. |
+| **Governance Scope** | Local processes and workspace transactions; experimental agent lifecycle, task scopes, shared Run budgets and evidence-gated dispatch. Model protocols remain in distributions. |
+| **Controller Boundary** | Execution primitives and cooperative AgentRuntime; no forced preemption, plugin component model or business orchestration policy. |
 | **Success Criteria** | Adoption by third-party agent frameworks and passing the conformance suite; xiocode is merely the reference distribution. |
 | **Moat** | Not in isolated primitives (snapshots, sandboxes, and durable execution all have existing implementations), but in the unique combination of **"transactional fact model + three-state honest semantics + portable conformance suite"**, backed by a long-term ABI stability commitment (§0.2 Decision 5). |
 
@@ -135,7 +141,7 @@ The Linux distribution ecosystem relies upon long-term stability of the syscall 
 Eliminates the crash blind spot where a process is launched but no record exists. The normative implementation uses **two-phase gated spawn (Gated Spawn)**: child processes are blocked before `exec` until their identity is safely recorded in SQLite:
 
 ```text
-1. [Transaction Commit] Write Operation intent, input fingerprint, and resource leases to SQLite (status: intent_registered)
+1. [Transaction Commit] Write Operation intent, input fingerprint, spawnGated evidence, and resource leases to SQLite (status: intent_registered)
    └── If snapshotBefore = true, capture pre-snapshot per §3.5 and record SnapshotRef in same transaction
 2. [Driver Preparation] PlatformDriver.spawn(command, { gated: true })
    ├── POSIX: child blocks on pre-exec gate pipe after fork; Windows: CREATE_SUSPENDED
@@ -143,13 +149,13 @@ Eliminates the crash blind spot where a process is launched but no record exists
 3. [Transaction Commit] Record execution identity and advance operation status to 'active'
 4. [Unblock Gate] Driver releases gate (writes gate pipe / calls ResumeThread); child executes target program
    └── If host crashes before step 3: gate pipe closes with EOF; child process exits immediately without executing target program
-       ⇒ "No identity ⇔ Never executed" is guaranteed by construction
+       ⇒ "No identity implies command not released" holds for an intent with recorded gated-spawn evidence
 5. [Active Supervision] Attach bounded stdio drain pumps, register timeout guards and exit listeners
 6. [Driver Termination] Process exits or stop triggered; driver produces preliminary result
 7. [Transaction Commit] Atomically write OperationResult and release associated resource leases
 ```
 
-**Drivers incapable of gated spawn** (such as standard Node.js `child_process`) must declare `capabilities.gatedSpawn = false`. During recovery, an operation with status `intent_registered` and no recorded identity **must not** be assumed unstarted: unless the driver proves no process in the OS process table matches the command fingerprint and working directory, it must be escalated to `indeterminate` with leases retained.
+**Drivers incapable of gated spawn** must declare `capabilities.gatedSpawn = false`. The supervisors persist this capability as `Operation.spawnGated` in the intent transaction. Recovery uses that original record, not the current driver's capabilities. An intent without identity and without `spawnGated: true` becomes `indeterminate` with leases retained. This includes legacy records: migration does not invent evidence. An empty process table cannot prove non-execution; the command may already have completed its side effects. See the [current recovery contract](spec/current-contract.md#crash-recovery-and-launch-evidence).
 
 ### 3.2 Resource Recovery Protocol: Isolation Before Execution
 
@@ -277,8 +283,8 @@ executeProcess(op) Admission & Idempotency Adjudication Table:
 2. **Relationship with Runs**: `opId` is globally unique within an execution domain and spans across Runs (D17). A Run always represents a single execution attempt. After a crash, higher-level runtimes open a new Run; submitting the same `opId` hits replay and returns facts recorded under the previous Run without changing original ownership. Calling Run must be non-terminal (N3 invariant).
 3. **In-Flight Cancellation Isolation**: When a caller joins an in-flight operation (`mode: 'joined'`), aborting the second caller's `AbortSignal` only cancels its own waiting promise; it **never cancels the underlying process** or the original caller's execution. To cancel the underlying process, callers must explicitly invoke `cancelOperation(opId)`.
 4. **Interaction with Gated Spawn**:
-   - If `gatedSpawn: true`: An unrecovered intent with no OS identity is proven to have never opened the execution gate; it resolves as safely clean/unstarted.
-   - If `gatedSpawn: false`: It cannot be proven whether the process spawned right before the crash; it must resolve to `indeterminate` with leases retained (Contract #49).
+   - Recorded `spawnGated: true` on `intent_registered` with no OS identity proves the command was not released; recovery records `failed` and reports `cleaned_unspawned`.
+   - `spawnGated: false` or absent cannot prove non-execution; recovery records `indeterminate` with leases retained (Contract #49). Both outcomes replay as recorded on same-ID submission, without re-execution.
 
 ### 3.8 Service Lifecycle Protocol (Target State)
 
@@ -365,7 +371,7 @@ Status column: `S<n>` indicates implementation as test #n in the shared conforma
 | 46 | L2 | Conflicting fingerprint with same `opId` throws `OperationIdConflictError`; existing operation facts remain unmodified. | S46 |
 | 47 | L2 | Replay hitting in-flight operation joins same promise; exactly one underlying process spawned. | S47 |
 | 48 | L2 | Replay hitting `indeterminate` operation returns indeterminate result as-is without re-running; preserves leases. | S48 |
-| 49 | L2 | Crash recovery scene with intent but no identity: `gatedSpawn=true` verifies non-execution; `false` escalates to `indeterminate`. | S49 |
+| 49 | L2 | Intent without identity: persisted `spawnGated=true` proves non-release; false/absent becomes `indeterminate`. Same-ID submission replays either result. | S49 |
 | 50 | L1 | Service instance bidirectional stdio via `stdinMode: 'stream'`; passthrough stdout; standard stop pipeline. | S50 |
 | 51 | L1 | Service restarts on-failure with exponential backoff up to limit; each restart is a new instance op logging to journal. | S51 |
 | 52 | L2 | Host crash cleans up and terminates service instances; recovery engine never automatically restarts services. | S52 |

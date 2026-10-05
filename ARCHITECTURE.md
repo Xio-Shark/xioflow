@@ -2,9 +2,9 @@
 
 > **本文位置**：这是 xioflow 内核仓的权威协议规范。第 0–5、7–8 节为内核协议；第 6 节只界定发行版与内核的边界，发行版内部结构见各发行版仓库。分阶段落地路线与当前实现差异见 [`ROADMAP.md`](./ROADMAP.md)。
 
-> **状态**：目标态协议规范（v2 规划版：Rust 核心 + 快照回滚 + 双部署形态）。标注「目标态」的章节尚未在当前 TypeScript 参考实现（0.5.x）中落地，以 `ROADMAP.md` 的「实现状态对照」为准。  
+> **状态**：本文同时保留目标态设计。接入当前包先读[当前实现契约](spec/current-contract.md)：执行核心是嵌入式 TypeScript/Node.js；`AgentRuntime` 是实验性扩展；Rust、daemon、Python 绑定和冻结 ABI 尚未实现。发布与本地未发布变更以 `CHANGELOG.md` 为界。
 > **核心定位**：  
-> - **xioflow**：面向 Agent 框架作者的受监督执行内核。只提供执行原语：执行域管理、受监督进程、资源仲裁、停止确认、工作区快照与回滚、SQLite 事务持久化与崩溃恢复；无 UI 绑定，不绑定特定 Agent Loop、语言或文件格式。  
+> - **xioflow**：面向 Agent 框架作者的受监督执行内核。执行核心提供执行域管理、受监督进程、资源仲裁、停止确认、工作区快照与回滚、SQLite 持久化与恢复；实验性 `AgentRuntime` 提供协作式调度、任务作用域和预算。模型协议、提示词与业务工具留在发行版。
 > - **xiocode**：基于 xioflow 装配的参考发行版，一个完整的本地 coding agent（模型接入、编程工具、权限策略、CLI/TUI），用来展示内核能力；装配方式见 xiocode 仓的 ARCHITECTURE.md。  
 > **仓库分工**：xioflow 作为独立共享内核仓库开发；xiocode 等发行版作为独立仓库，只通过公开协议 / 语言绑定消费内核。
 
@@ -20,10 +20,10 @@
 |---|---|
 | **目标用户** | Agent 框架作者（不是最终使用 agent 的开发者）。首要人群：在宿主机上直接执行命令的**本地优先**框架与 coding agent |
 | **非目标用户** | 执行完全托管在远程容器 / microVM 的框架（销毁容器即可清场，对本内核需求弱） |
-| **内核形态** | Rust 核心；同一核心提供「嵌入模式」与「daemon 模式」两种部署（§0.2 裁决 3、§5） |
-| **接入方式** | 各语言薄绑定（首批 TypeScript、Python）+ 语言无关协议；绑定与协议共享同一份 conformance 契约 |
-| **管辖范围** | 本地进程生命周期 + 工作区文件系统变更（快照 / 回滚）；不管 LLM 调用、不管 agent 调度 |
-| **控制器边界** | 只提供执行原语（spawn / stop / lease / snapshot / rollback / recover / adjudicate / journal），类比 syscall；不提供组件模型或调度器 |
+| **内核形态** | 当前：嵌入式 TypeScript/Node.js；目标：Rust 核心与 daemon 双部署（§0.2 裁决 3、§5） |
+| **接入方式** | 当前：Node.js 包与 TypeScript 类型；语言无关协议及 Python 绑定属于目标态 |
+| **管辖范围** | 本地进程、工作区事务；实验性 Agent 生命周期、父子任务联动、共享 Run 预算与证据门控派发；不实现模型协议 |
+| **控制器边界** | 执行原语与协作式 AgentRuntime；不提供强制抢占、插件组件模型或业务编排策略 |
 | **成功标准** | 被第三方 Agent 框架采用并通过 conformance 契约；xiocode 只是第一个发行版 |
 | **护城河** | 不在单项原语（快照、沙箱、持久化执行均有成熟项目），而在「一套事务事实模型 + 三态诚实语义 + 可移植 conformance 契约」的组合，以及对该 ABI 的长期稳定承诺（§0.2 裁决 5） |
 
@@ -393,20 +393,20 @@ export type IdentityVerificationResult =
 杜绝“启动了进程却无记录”的崩溃盲区。规范实现采用**两段式受控启动（Gated Spawn）**：子进程在 `exec` 之前阻塞在一道门上，身份落库后才放行，从构造上消除“已执行但无身份记录”的窗口：
 
 ```text
-1. [事务提交] 在 SQLite 中写入 Operation 意图、输入指纹与资源占用 (status: intent_registered)
+1. [事务提交] 在 SQLite 中写入 Operation 意图、输入指纹、spawnGated 证据与资源占用 (status: intent_registered)
    └── 若 snapshotBefore = true，先按 §3.5 完成前置快照并在同一事务登记 SnapshotRef
 2. [驱动预备] PlatformDriver.spawn(command, { gated: true })
    ├── POSIX：fork 后子进程在 pre-exec 阶段阻塞读取门管道；Windows：CREATE_SUSPENDED 创建
    └── 获得 ProcessIdentity（pid、pgid / job、OS 级进程启动时间、命令指纹）
 3. [事务提交] 登记执行身份并推进为 'active'
 4. [放行] 驱动打开门（写门管道 / ResumeThread），子进程才开始 exec 目标程序
-   └── 宿主在 3 之前崩溃：门管道 EOF，子进程必须直接退出、绝不 exec ⇒ “无身份 ⇔ 未执行” 由构造保证
+   └── 宿主在 3 之前崩溃：门管道 EOF，子进程必须直接退出、绝不 exec ⇒ 已记录门控证据的意图可由“无身份”推出“命令未放行”
 5. [正常监督] 挂载实时流排空泵、注册超时定时器与退出监听
 6. [驱动终止] 进程结束或触发停止，驱动产出初步结果
 7. [事务提交] 原子写入 OperationResult 并根据确认事实释放相关资源占用
 ```
 
-**无法提供受控启动的驱动**（如 0.1.x 的 Node `child_process` 实现）必须声明 `capabilities.gatedSpawn = false`，且恢复时对 `intent_registered` 且无身份的操作**不得**直接判定未启动：只有驱动能证明进程表中不存在与该操作命令指纹、工作目录匹配的进程时，才可判为 `cleaned_unspawned`；否则判为 `indeterminate` 并保留租约。
+**无法提供受控启动的驱动**必须声明 `capabilities.gatedSpawn = false`。监督器将该能力以 `Operation.spawnGated` 随意图原子持久化；恢复使用原始记录，不能拿恢复时 driver 的能力补充历史证据。`intent_registered` 且无身份的记录，只有 `spawnGated: true` 能证明命令未放行；false 或缺省均判为 `indeterminate` 并保留租约。旧库迁移不补造证据。进程表为空也不能证明未执行，因为命令可能已经完成副作用。详见[当前恢复契约](spec/current-contract.md#crash-recovery-and-launch-evidence)。
 
 ### 3.2 资源恢复协议：先建隔离，再开新操作 (Recovery-Before-Execution Protocol)
 启动内核时，严禁先接收新操作再慢悠悠恢复：
@@ -526,7 +526,7 @@ executeProcess(op) 准入与重放判定表：
 
 - **可审计性**：每次命中重放返回事实时，内核在 journal 中追加一条 `OPERATION_REPLAYED` 事件，记录 `opId`、`runId`、`originalRunId`、`fingerprint`，保证「没有盲目重执行」本身有明确审计证据；
 - **与 Run 的关系**：`opId` 在执行域内全局唯一，跨 Run 生效（D17）。Run 始终代表「单次执行尝试」。当崩溃后需要续跑任务时，上层必须开启新 Run，原 Run 终结，新 Run 中提交同 `opId` 触发重放，返回原 Run 下记录的事实；
-- **与两段式启动（Gated Spawn）的关系**：当崩溃现场存在意图但无 OS 身份记录时：若 `gatedSpawn: true`，可确知子进程未实际 `exec`，允许重执行；若 `gatedSpawn: false`，无法排除子进程已在崩溃瞬间启动的可能，必须置 `indeterminate`（契约 #49）。
+- **与两段式启动（Gated Spawn）的关系**：`intent_registered` 且无 OS 身份时，原意图中 `spawnGated: true` 可证明命令未放行，恢复记为 `failed` 并报告 `cleaned_unspawned`；false 或缺省则置 `indeterminate` 并保留租约。两者在同一 `opId` 再次提交时均只重放记录，不重新执行（契约 #49）。
 
 ### 3.8 service 生命周期协议：受监督的长驻进程（目标态）
 针对 MCP stdio server、开发调试服务器等长驻进程，内核提供 `kind: 'service'` 原语：
@@ -545,7 +545,7 @@ executeProcess(op) 准入与重放判定表：
 ### 3.9 工作区事务协议：并行 agent 的乐观并发控制
 多个 agent 同时改同一个工作区时，锁（§3.1 的 `workspace:write` 租约）只能让它们排队；工作区事务让它们**并行工作、提交时校验**，把数据库的 OCC（乐观并发控制，后向校验）搬到文件系统上：
 - **begin**：对事务根目录拍基线快照（§3.5），materialize 出独立 fork；fork 的独占租约移交给事务，agent 在 fork 内执行任意操作，互斥靠各自声明的 `workspace:write:<fork>`。写 `TX_BEGUN`，其 journal seq 即事务的开始点。
-- **读集**（无特权观测）：fork 建好后把每个条目的 atime 设到 mtime 之前（留 2 秒余量），此后的读取（读文件内容、列目录）会让 atime 越过 mtime——Linux relatime 在 atime ≤ mtime 时更新，macOS APFS 只在 atime 严格早于 mtime 时更新（atime == mtime 时读取不更新，实测）；只 stat 不改变 atime，所以采集本身不污染证据，且必须先于任何 git 读取完成。以 noatime 挂载的文件系统用探针实测后如实声明 `readTracking: 'unobserved'`、`readSet: null`，不假装知道。
+- **读集**（无特权观测）：fork 建好后把每个条目的 atime 设到 mtime 之前（留 2 秒余量），此后的读取（读文件内容、列目录）按 `atime >= mtime` 判定，包括 Linux 同一时钟 tick 内时间戳相等的情况。Linux relatime 在 atime ≤ mtime 时更新，macOS APFS 只在 atime 严格早于 mtime 时更新（atime == mtime 时读取不更新，实测）；事务和命令证据共用纳秒精度的判定与归一逻辑。只 stat 不改变 atime，所以采集本身不污染证据，且必须先于任何 git 读取完成。探针直接比较读取前后的 atime；以 noatime 挂载的文件系统如实声明 `readTracking: 'unobserved'`、`readSet: null`，不假装知道。
 - **写集**：基线快照树 → fork 当前树的逐文件差异（`A / M / D / T`），与快照同一口径，精确且与观测方式无关。
 - **后向校验**（commit 时）：
   - 本事务开始后提交的每个事务的写集，与本事务的写集相交 ⇒ `write_write`；与读集相交 ⇒ `read_write`（本事务依据的内容已过时）；
@@ -575,6 +575,10 @@ executeProcess(op) 准入与重放判定表：
 ### 3.10 实验性 agent 生命周期与依据感知调度
 
 `AgentRuntime` 将 agent 身份、输入、父子关系、checkpoint、轮次预算和协作式调度放进执行域，复用 SQLite journal。发行版仍提供模型、工具和单轮执行 adapter。派发前的观测校验、有效 checkpoint 选择、暂停和恢复协议见 [实验性运行时规范](spec/agent-runtime.md)；验证见 `tests/agents/` 与 E6。这是 0.7.0 起随包发布的实验性增量，不代表完整多 agent 内核已经完成。
+
+`interrupt` 的协议区分取消请求和结清：先记录请求，再通知 adapter 并取消受管命令，等待当前批次结束后保留旧 checkpoint 与已花费预算。它不强杀 JavaScript adapter，不把进程停止未确认改写成成功；完整边界见 [中断契约](spec/agent-runtime.md#interruption-contract)。
+
+`shutdown` 先关闭新工作的准入，再等待活跃 quantum、受管命令和工作区重建结清，最后释放 runtime 所有权。它不关闭 domain，也不释放结果未确定的操作租约；完整边界见 [停机契约](spec/agent-runtime.md#shutdown-contract)。
 
 ## 4. 平台驱动契约与停止确认流水线
 
@@ -943,7 +947,7 @@ domainBudget = {
 | 46 | L2 | 同 opId 不同指纹 ⇒ `OperationIdConflictError`，不改动已有 op 的任何事实 | S46 |
 | 47 | L2 | 重放命中在飞 op ⇒ 两个调用拿到同一结果，进程只启动一次 | S47 |
 | 48 | L2 | 重放命中 `indeterminate` ⇒ 原样返回，不重跑，租约保持 | S48 |
-| 49 | L2 | 有意图无身份的崩溃现场：`gatedSpawn=true` 可判未执行并执行一次；`false` ⇒ `indeterminate` | S49 |
+| 49 | L2 | 有意图无身份：持久化的 `spawnGated=true` 证明未放行；false/缺省判 `indeterminate`。同 ID 仅重放结果 | S49 |
 | 50 | L1 | service 实例 `stdinMode: 'stream'` 双向通信；stdout 直通不进内存保留；停止走标准流水线 | S50 |
 | 51 | L1 | service `on-failure` 按退避重启且不超过上限；每次重启是新实例 op 并写 journal；超限 ⇒ `failed` | S51 |
 | 52 | L2 | 宿主崩溃后 service 实例被核验并清场，恢复引擎不自动重启 | S52 |
@@ -974,7 +978,7 @@ domainBudget = {
 为防范投机性抽象与无界范围膨胀，明确保留以下设计边界：
 1. **不做安全沙箱 (Firecracker / microVM / 对抗性隔离)**：xioflow 信任由受管组件与用户授权启动的开发工具，聚焦于进程治理与失控遏制，不承担防御恶意逃逸的职责。§0.2 裁决 4 的写入限制驱动与裁决 9 的 capability 只服务于回滚正确性与授权事实的完整性约束，任何文档与 API 都不得把它们宣传为安全边界；
 2. **不做 IO 频次限制、网络访问策略与 GPU 配额**：核心痛点在于内存爆仓、孤儿进程与失控死循环，无真实业务驱动不预先引入复杂的网络与 GPU 编排器；
-3. **不做 agent 调度与组件模型**：内核只提供执行原语（§0.0），不管理 agent / turn 的优先级、抢占与编排，不提供插件生命周期（service 是受监督的长驻进程，不是插件系统）；这些属于发行版；
+3. **调度边界**：实验性 AgentRuntime 管理协作式 quantum、作用域、checkpoint 和预算；优先级、强制抢占、业务编排与插件组件模型不在当前实现内（service 是受监督的长驻进程，不是插件系统）；
 4. **不管理 LLM 调用、提示词与模型成本**：它们不是本地执行事实，属于发行版；
 5. **不做跨机分布式调度、远程执行后端与网络监听**：专注于工作区级单机执行域；daemon 只监听本机 IPC 端点；
 6. **不做 eBPF 探针注入**：常规开发机器不具备 root/CAP_SYS_ADMIN 权限，进程表与 `/proc` 采样足以满足开发期可观测性。

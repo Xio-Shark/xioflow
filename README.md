@@ -9,6 +9,9 @@
 
 A supervised execution kernel for AI agent runtimes. Zero runtime dependencies. (See [Architecture & Protocol Specification (EN)](./ARCHITECTURE.en.md) / [中文规范](./ARCHITECTURE.md)).
 
+For integration, start with the [current implementation contract](spec/current-contract.md).
+It separates implemented guarantees, experimental APIs and planned Rust/daemon work.
+
 Agent runtimes usually call `spawn()` (or `exec()`) and hope for the best. When the host crashes mid-tool-call, or a cancel cannot be confirmed, they are left with orphan processes, double-applied side effects, and no honest record of what actually happened. This kernel makes those states first-class instead of silent.
 
 [xiocode](https://github.com/Xio-Shark/xiocode), the reference distribution, runs its supervised commands on this kernel by default — the equivalence suite below is what made that switch safe to make.
@@ -16,6 +19,12 @@ Agent runtimes usually call `spawn()` (or `exec()`) and hope for the best. When 
 Besides one-shot commands, the kernel supervises long-running services (MCP stdio servers, dev servers), makes operations idempotent by `opId` for durable engines (Temporal, LangGraph), and snapshots, rolls back and forks the workspace so an agent's file changes can be undone per step.
 
 The package also includes an **experimental `AgentRuntime`**: kernel-owned agent lifecycle, cooperative scheduling, evidence-gated dispatch and persistent checkpoint/step budgets. Adapters can submit commands through a per-step context; the kernel tracks their ownership and waits for the batch before checkpointing. It accepts existing runner adapters rather than replacing their models or tools. See the [runtime contract](spec/agent-runtime.md) and [recovery experiments](audit/observation/RECOVERY.md). It is experimental: its API may change in any release.
+
+`parentId` defines a fail-fast task scope. Parent completion waits for children without occupying a dispatch slot. `await agents.interrupt(id)` cancels and joins the member's whole root task, including managed commands and reconstruction. It preserves completed checkpoints and spent budgets. Adapter cancellation is cooperative; an adapter that ignores the signal keeps the call pending. See [task scopes](spec/agent-runtime.md#task-scopes).
+
+`runBudget` limits shared steps, lifetime agent creation and outstanding commands. Defaults are 10,000 / 1,024 / 64; limits and spent steps persist across reopening. `getRunUsage(runId)` reports usage. Optional `workspaceVersion(agent)` binds validation to a host-supplied revision at dispatch, but does not lock the workspace during subsequent execution. See [Run budgets](spec/agent-runtime.md#shared-run-admission-budgets) and [version checks](spec/agent-runtime.md#validation-and-workspace-versions).
+
+For host shutdown, use `await agents.shutdown()` before closing the domain. It rejects new work immediately, pauses queued agents, interrupts active quanta, and waits for their commands and active workspace reconstruction before releasing runtime ownership. It does not close the domain or force a non-cooperative adapter to stop. See the [shutdown contract](spec/agent-runtime.md#shutdown-contract).
 
 ## Guarantees
 
@@ -30,6 +39,13 @@ The package also includes an **experimental `AgentRuntime`**: kernel-owned agent
 | No blind retry | Resubmitting an `opId` with the same input fingerprint joins the in-flight execution or replays the recorded result (`replayed: true`); an `indeterminate` result is returned as-is and never re-executed. A different fingerprint throws `OperationIdConflictError`. |
 | No out-of-scope rollback | A rollback only rewrites and deletes files inside the snapshot's declared roots, never touches ignored files unless they were captured, and is verified by fingerprint. `coverage: 'complete'` is claimed only when every operation since the snapshot ran under a confinement driver and ignored files are accounted for: they were in the snapshot, or a manifest proves they are unchanged. Otherwise the result says `non_ignored` or `declared_roots`, with the reasons in `coverageBasis`. |
 | No split brain | A domain has one active owner, held by an exclusive lock file plus a heartbeat lease. Stale owners are fenced by an epoch counter; their writes are rejected. |
+
+Recovery needs durable launch evidence: a missing process identity proves the
+command was not released only when its `intent_registered` record includes
+`spawnGated: true`. Non-gated launches and legacy records without that evidence
+remain `indeterminate` with leases retained, even if the replacement driver supports
+gating. Same-ID submission replays the recorded result; it does not execute again.
+See [recovery boundaries and migration](spec/current-contract.md#crash-recovery-and-launch-evidence).
 
 ## Requirements
 
@@ -328,7 +344,7 @@ if (res.status === 'conflict') {
 ```
 
 - **Write set**: the exact per-file diff between the base snapshot and the fork.
-- **Read set**: observed without privileges through access times. Each entry in the fork gets an atime just before its mtime, so any later read (file contents or directory listings) moves the atime past the mtime on both Linux (`relatime`) and macOS (APFS only updates an atime that is older than the mtime). On a `noatime` filesystem the result says `readTracking: 'unobserved'` and `readSet: null`.
+- **Read set**: observed without privileges through access times. Each entry in the fork gets an atime before its mtime; reads (file contents or directory listings) are detected when atime reaches or exceeds mtime, including equal timestamps within one Linux clock tick. The reset also supports macOS, where APFS only updates an atime that is older than mtime. A probe compares atime before and after an actual read; on a `noatime` filesystem the result says `readTracking: 'unobserved'` and `readSet: null`.
 - **Validation**: a commit fails with `write_write` if a transaction committed since this one began wrote the same file, and with `read_write` if it changed something this one read. A listed directory only conflicts when entries were added to it or removed from it. A write that bypassed transactions and went straight to the workspace fails with `external_write`.
 - **Apply**: only a validated transaction is applied to the workspace. `TX_COMMITTING` is journaled first, so a commit interrupted by a crash finishes when it is called again after restart.
 - **Evidence**: a committed result says what "no conflict" rests on: `validation: 'files'` (read and write sets), `'write_only'` (reads could not be observed) or `'observations'` (below).

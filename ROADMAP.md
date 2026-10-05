@@ -1,5 +1,13 @@
 # xioflow 路线图与优化流程
 
+> **当前接入入口**：[当前实现契约](spec/current-contract.md) 区分已实现保证、实验性 AgentRuntime 和未来目标。下面带日期的路线裁决是历史记录，不代表对应功能均已发布。
+
+> **2026-10-05 作用域与资源边界**：`parentId` 定义 fail-fast 任务树，父任务通过 `waiting` 等待子任务；Run 共享 step/agent 预算持久化，命令在分配排队对象前限流。可选 `workspaceVersion` 拦截校验期间变化的依据，不承诺执行期间的文件系统隔离。`scripts/agent-soak.mjs` 提供取消、排队、写盘故障与 SIGKILL 的持续负载，报告内存、journal 和事件循环延迟。全天稳定性、journal 压缩、token/费用核算尚无完成声明。
+
+> **2026-10-05 停机增量**：新增 `AgentRuntime.shutdown()`，先停止接收和派发新工作，再取消活跃 quantum、等待命令与重建收尾，最后交还 runtime 所有权。异常不伪装成功，非协作式 callback 不伪装已经停止。协议见 [shutdown contract](spec/agent-runtime.md#shutdown-contract)，仍沿用已有 journal 和进程监督器。
+
+> **2026-10-05 生命周期增量**：在现有 agent 内核上补充 `interrupt`，将请求中断、传播取消、等待工具结清和保留 checkpoint 分开处理。协议与边界见 [interruption contract](spec/agent-runtime.md#interruption-contract)。继续复用现有 runner 和进程驱动；本增量不引入 daemon、模型协议或另一套调度框架，也不宣称已经完成 Linux 同等范围的 AI 内核。
+
 > **2026-10-01 主线明确**：目标是由内核持有 agent 生命周期、任务归属和工具执行权的多 agent 运行方式。创新假设收紧为「工作区变化后的观测有效性驱动调度与局部恢复」，不将通用调度、checkpoint 或 Linux 式命名当作创新。先复用现有事务观测重放做可复现的前缀恢复实验，再接入一个现有 agent runner；不先扩展完整框架。[已有方案、实验与边界](audit/observation/RECOVERY.md)。此条优先于下面保留的历史方向说明。
 
 > 产品目标与协议以 [`ARCHITECTURE.md`](./ARCHITECTURE.md) 为准（§0.0 产品目标、§0.2 五项架构裁决、§7 契约清单）。本文件是**执行计划与「规范 ↔ 当前实现」差异的唯一来源**。

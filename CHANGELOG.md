@@ -6,6 +6,19 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 ## [Unreleased]
 
+### Fixed
+- Crash recovery now requires durable `Operation.spawnGated` evidence before treating a missing identity as an unstarted command. Process and service supervisors record the driver's launch contract with the intent. Non-gated or legacy intents without identity, and active/stopping records without identity, become `indeterminate` and retain leases. The schema migration leaves old evidence absent; existing results remain unchanged. Recovery no longer infers service membership from `#` in a process ID, preserves nested service IDs, and does not clear service-level leases while an instance remains unadjudicated. Added real SIGKILL-before-identity tests with completed side effects and no replay.
+- Agent command batches release settled promises rather than retaining the whole quantum's history. Scope reconciliation processes journal-dirtied task roots instead of repeatedly scanning historical cancelled trees.
+- Experimental validation rechecks bound workspace transaction liveness before dispatch. Optional `workspaceVersion` detects changes during asynchronous validation and journals the accepted revision; it does not provide filesystem isolation during execution.
+- Linux read tracking now includes reads whose atime equals mtime within one filesystem clock tick. Workspace transactions and command evidence share the nanosecond comparison and access-time reset; the availability probe checks actual atime advancement instead of requiring it to exceed mtime. Added equal-timestamp and no-atime regressions, and made the orphan-process and interrupted-commit fixtures independent of ESM parent directories and root permission bypass.
+
+### Added
+- Experimental structured task scopes: parents join children through a non-dispatching `waiting` state; member failure/cancellation cancels the whole root tree. Interruption durably fences descendants in one transaction and joins quanta, managed commands and reconstruction cleanup. `parentId` is no longer metadata-only.
+- Persisted shared Run budgets (`runBudget`) and `getRunUsage`: default ceilings of 10,000 quanta, 1,024 lifetime agents and 64 outstanding managed commands. Reopening/restoration cannot reset saved limits or spent steps. Overflow rejects before allocating another command waiter.
+- Configurable-duration `scripts/agent-soak.mjs` with scoped cancellation, queue floods, journal fault injection, real host SIGKILL and process/memory/journal/event-loop measurements. A current implementation contract separates the TypeScript core, experimental APIs and unimplemented Rust/daemon plans.
+- Experimental `AgentRuntime.shutdown()`: stop admission before dispatch, pause queued agents, cancel active quanta through the durable interruption protocol, and join managed commands and workspace reconstruction before releasing runtime ownership. Shutdown errors retain their causes and reject after settlement; the domain and indeterminate-operation leases stay intact. No force-timeout success or automatic replay is introduced.
+- Experimental `AgentRuntime.interrupt(id)`: persist a cancellation request, signal the task tree's validators/steps and managed commands, then await settlement without advancing active checkpoints or refunding budget. Adapters receive `execution.signal`; validators receive a second `AbortSignal` argument. Reopening after a crash during the request requires explicit checkpoint restoration. Adapter cancellation remains cooperative.
+
 ## [0.7.0] - 2026-10-05
 
 ### Fixed
