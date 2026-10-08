@@ -25,6 +25,13 @@ export interface RecomputationPlan {
   unaffected: CausalNode[];
 }
 
+export interface CausalView {
+  /** Selected results, including independent outputs that should survive repair. */
+  heads: number[];
+  /** Heads and all their ancestors, in journal/topological order. */
+  nodes: CausalNode[];
+}
+
 /** Journal-backed provenance, not a replacement for transaction commit validation. */
 export class WorkspaceCausalGraph {
   constructor(private readonly domain: ExecutionDomain) {}
@@ -78,9 +85,27 @@ export class WorkspaceCausalGraph {
     return nodes.filter((node) => needed.has(node.seq));
   }
 
-  /** Seeds are results the host has found changed; independent branches remain unaffected. */
-  public planRecomputation(changed: readonly number[], atSeq = Number.MAX_SAFE_INTEGER): RecomputationPlan {
+  /** Select an execution branch explicitly, without including sibling candidates
+   * or inferring that the most recent repair was committed.
+   */
+  public view(heads: readonly number[], atSeq = Number.MAX_SAFE_INTEGER): CausalView {
     const nodes = this.nodes(atSeq);
+    const known = new Set(nodes.map((node) => node.seq));
+    if (heads.some((seq) => !Number.isSafeInteger(seq) || !known.has(seq))) {
+      throw new Error('Causal view heads are absent from this causal history');
+    }
+    const needed = new Set(heads);
+    for (const node of [...nodes].reverse()) {
+      if (needed.has(node.seq)) for (const dependency of node.dependsOn) needed.add(dependency);
+    }
+    return { heads: [...new Set(heads)], nodes: nodes.filter((node) => needed.has(node.seq)) };
+  }
+
+  /** Seeds are results the host has found changed; independent branches remain unaffected. */
+  public planRecomputation(
+    changed: readonly number[], atSeq = Number.MAX_SAFE_INTEGER, heads?: readonly number[],
+  ): RecomputationPlan {
+    const nodes = heads === undefined ? this.nodes(atSeq) : this.view(heads, atSeq).nodes;
     const known = new Set(nodes.map((node) => node.seq));
     if (changed.some((seq) => !known.has(seq))) throw new Error('Changed evidence is absent from this causal history');
     const invalid = new Set(changed);

@@ -12,6 +12,7 @@ const history = graph.nodes();
 const repair = await prepareWorkspaceRepair(supervisor, {
   txId: 'repair-1', runId, root, forkPath: '/tmp/repair-1',
   changed: [changedObservationSeq],
+  heads: [outputSeq, independentOutputSeq], // 保留的结果节点；自动包含它们的全部上游
   atSeq: history.at(-1)!.seq,
   async validateReuse(tx, unaffected) {
     // 宿主验证独立结果、声明依赖的完整性，以及输出在新基线中的存在性。
@@ -48,9 +49,9 @@ pnpm exec vitest run tests/workspace/causal-graph.test.ts
 
 ## 生命周期与历史
 
-- `atSeq` 固定源历史，防止执行中新增节点进入当前计划。查询范围是整个 domain 在该序号前的因果图；宿主应使用独立 domain 隔离无关运行。后续多轮修复应基于选定执行分支，当前尚无自动“活跃分支”筛选。
+- `atSeq` 固定源历史，防止执行中新增节点进入当前计划。`heads` 选择结果节点及其全部上游，排除未选中的投机候选和旧版本。省略 `heads` 保持原有整个 domain 历史语义；多轮修复应显式传入。空选择或视图外的失效种子在创建事务前报错。
 - 多个失效种子合并为一个闭包，菱形汇合节点只执行一次；未受影响节点不会调用 `execute`。
-- `CAUSAL_REPAIR_PREPARED` journal 事件持久记录源节点到替代节点的映射和复用节点；原历史不被覆写。该事件表示准备完成，不表示已提交，应结合 TX 生命周期查询。
+- `CAUSAL_REPAIR_PREPARED` journal 事件持久记录源节点到替代节点的映射、复用节点、`sourceHeads` 和替代后的 `heads`；原历史不被覆写。该事件表示准备完成，不表示已提交，应结合 TX 生命周期查询。
 - 回调必须等待 fork 内的工作全部结束，不自行提交或中止事务；否则无法保证清理时没有后台写入。
 - 验证或工具失败时停止执行，abort 并回收本次基线；已经记录的部分节点保留在被中止事务的历史中。清理失败同时报告原错误和清理错误。
 - 准备成功后由调用方管理事务、提交冲突和 snapshot 回收。提交抛错可能已进入应用阶段，此时保留 fork 和基线，并按既有事务恢复协议处理，不能直接回收。
@@ -60,3 +61,26 @@ pnpm exec vitest run tests/workspace/causal-graph.test.ts
 本入口不自动发现变化、不证明宿主依赖完整、不恢复 AgentRuntime 上下文，也不自动回滚旧工具的副作用。新基线上的重算工具必须能够替换旧输出；例如追加操作不能直接当成覆盖操作重跑。外部副作用需由宿主适配器处理。
 
 这一步实现了文件世界中的局部重算与来源关联；OCC 的校验强度仍由已有读集与观测重放决定。测试证明独立分支不执行、下游使用新证据、文件隔离和冲突保持，不构成模型 token、耗时或成功率的基准结论。
+
+## 连续修复与分支比较
+
+`heads` 是要保留的结果集合，不是某个事务 ID：上游可能来自多个 agent、事务或已提交的旧版本。应包含所有要保留的独立输出；省略某个输出会将它排除在修复范围之外，不会删除它对应的文件。显式选择同时允许查看被中止的候选，不自动证明其输出已物化。
+
+```ts
+// 在上面的 OCC 提交成功后，保存修复后的结果集合。
+if (commit.status === 'committed') {
+  const nextHeads = repair.heads;
+  const currentView = graph.view(nextHeads);
+  // 当某个当前观测再次变化，使用它的新 seq，而非最初历史中的 seq。
+  const nextChanged = await adapter.findChanged(currentView.nodes, root);
+  const nextPlan = graph.planRecomputation(
+    nextChanged, graph.nodes().at(-1)!.seq, nextHeads,
+  );
+  // 下一次 prepareWorkspaceRepair 使用 heads: nextHeads、changed: nextChanged。
+  // nextPlan 只包含这个分支；其他候选和已替代节点不会混入。
+}
+const oldView = graph.view([outputSeq, independentOutputSeq]);
+const newView = graph.view(repair.heads);
+```
+
+视图是 journal 查询，不恢复文件或 agent 上下文。`repair.heads` 在准备成功时返回，只有提交成功后才能将其当作主工作区的当前分支。重启后可从对应 `CAUSAL_REPAIR_PREPARED` 事件的 `heads` 重建视图，并结合该事务的 `TX_COMMITTED` 判断提交状态；旧事件可能没有该字段。不同修复分支互不覆盖，不使用全局“最新替代节点”规则。未指定 heads 的旧调用也会返回源图末端节点替代后的 heads，便于后续切换到显式分支。

@@ -47,7 +47,8 @@ const past = graph.nodes(read.seq); // 包含 read，不包含 edit
 
 - `nodes(atSeq?)`：指定 journal 序号（含）之前的所有节点；默认完整历史。
 - `ancestors(seq)`：目标节点的传递上游依赖，不包含目标自身。
-- `planRecomputation(changed, atSeq?)`：返回包含种子节点的 `invalidated` 依赖闭包，以及 `unaffected`。两者都按拓扑顺序排列；历史切片之外的种子报错。
+- `view(heads, atSeq?)`：返回去重后的结果节点序号 `heads` 和包含全部上游的 `nodes`；nodes 按拓扑顺序排列，heads 保持传入顺序。支持跨事务依赖、历史切片和重启后查询；不会自动纳入其他后继或投机候选。空 heads 返回空视图，未知或历史切片外的 heads 报错。
+- `planRecomputation(changed, atSeq?, heads?)`：返回包含种子节点的 `invalidated` 依赖闭包，以及 `unaffected`。两者都按拓扑顺序排列；历史切片或所选视图之外的种子报错。省略 heads 时保留整个 domain 历史语义。
 - `observationLog(txId, atSeq?)`：提取原有 `ObservationEntry[]` 格式，可传给现有事务提交或 checkpoint 恢复适配器。跨事务上游不会混入单个事务的工具重放日志。
 
 重算计划不改变 journal、不执行工具、不恢复文件、不改变 AgentRuntime 状态，也不推断哪个节点的结果实际发生变化。宿主必须先用新状态上的观测校验确定种子。依赖闭包遍历为 O(V+E)，当前查询会读取 domain journal；大规模历史的索引与分页留待后续。

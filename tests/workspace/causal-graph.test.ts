@@ -234,4 +234,106 @@ describe('workspace causal history', () => {
     expect(reopened.nodes(join.seq)).toEqual([source, left, right, join]);
   });
 
+  it('selects inclusive branch ancestry across agents without admitting sibling results', () => {
+    const source = graph.record(step('a'));
+    const selected = graph.record(step('b', [source.seq]));
+    const sibling = graph.record(step('a', [source.seq]));
+    const independent = graph.record(step('b'));
+    const heads = [selected.seq, independent.seq, selected.seq];
+    const view = graph.view(heads);
+    expect(view.heads).toEqual([selected.seq, independent.seq]);
+    expect(view.nodes).toEqual([source, selected, independent]);
+    expect(graph.planRecomputation([source.seq], independent.seq, heads)).toEqual({
+      invalidated: [source, selected], unaffected: [independent],
+    });
+    expect(() => graph.planRecomputation([sibling.seq], independent.seq, heads)).toThrow('absent');
+    expect(() => graph.view(heads, selected.seq)).toThrow('absent');
+    expect(() => graph.view([1.5])).toThrow('absent');
+    expect(graph.view([])).toEqual({ heads: [], nodes: [] });
+    view.nodes[0].dependsOn.push(sibling.seq);
+    view.heads.push(sibling.seq);
+    expect(graph.view([selected.seq], selected.seq).nodes).toEqual([source, selected]);
+  });
+
+  it('repairs two committed generations without replaying old or abandoned branches', async () => {
+    const source = graph.record(step('a'));
+    fs.writeFileSync(path.join(temp, 'a', 'stable.txt'), 'stable');
+    const stable = graph.record({ ...step('a', [], 'stable'), observation: {
+      kind: 'mutate', call: { tool: 'stable', args: {} }, resultHash: 'stable',
+    }, writes: [{ path: 'stable.txt', status: 'A' }] });
+    fs.writeFileSync(path.join(temp, 'a', 'output.txt'), 'old');
+    const output = graph.record({ ...step('a', [source.seq]), observation: {
+      kind: 'mutate', call: { tool: 'write', args: {} }, resultHash: 'old',
+    }, writes: [{ path: 'output.txt', status: 'A' }] });
+    const abandoned = graph.record(step('b', [source.seq]));
+    await supervisor.abortWorkspaceTransaction('b');
+    expect((await supervisor.commitWorkspaceTransaction('a')).status).toBe('committed');
+    let heads = [output.seq, stable.seq];
+    let changed = source.seq;
+    const generations: number[][] = [];
+    for (const value of ['second', 'third']) {
+      fs.writeFileSync(path.join(root, 'input.txt'), value);
+      const previousView = graph.view(heads);
+      const calls: number[] = [];
+      const txId = `repair-${value}`;
+      const repaired = await prepareWorkspaceRepair(supervisor, {
+        txId, runId: 'run', root, forkPath: path.join(temp, txId), heads,
+        changed: [changed], atSeq: graph.nodes().at(-1)!.seq,
+        validateReuse: async (tx, nodes) => {
+          expect(nodes).toEqual([stable]);
+          expect(fs.readFileSync(path.join(tx.forkRoot, 'stable.txt'), 'utf8')).toBe('stable');
+        },
+        execute: async (node, tx, dependencies) => {
+          calls.push(node.seq);
+          const resultHash = node.observation.kind === 'observe'
+            ? fs.readFileSync(path.join(tx.forkRoot, 'input.txt'), 'utf8')
+            : dependencies[0].observation.resultHash;
+          if (node.observation.kind === 'mutate') fs.writeFileSync(path.join(tx.forkRoot, 'output.txt'), resultHash);
+          return { actorId: node.actorId, observation: { ...node.observation, resultHash }, writes: node.writes };
+        },
+      });
+      expect(calls).toEqual(previousView.nodes.filter((node) => node.seq !== stable.seq).map((node) => node.seq));
+      expect(calls).toHaveLength(2);
+      expect(calls).not.toContain(abandoned.seq);
+      expect(repaired.heads).toEqual([repaired.replacements[1].node.seq, stable.seq]);
+      expect(graph.view(repaired.heads).nodes).toHaveLength(3);
+      expect((await supervisor.commitWorkspaceTransaction(txId)).status).toBe('committed');
+      expect(fs.readFileSync(path.join(root, 'output.txt'), 'utf8')).toBe(value);
+      expect(fs.readFileSync(path.join(root, 'stable.txt'), 'utf8')).toBe('stable');
+      const event = domain.getStore().getJournalEvents(domain.domainId)
+        .find((entry) => entry.type === 'CAUSAL_REPAIR_PREPARED' && entry.payload.txId === txId)!;
+      expect(event.payload.sourceHeads).toEqual(heads);
+      expect(event.payload.heads).toEqual(repaired.heads);
+      heads = repaired.heads;
+      changed = repaired.replacements[0].node.seq;
+      generations.push([...heads]);
+    }
+    domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal');
+    graph = new WorkspaceCausalGraph(domain);
+    const event = domain.getStore().getJournalEvents(domain.domainId)
+      .find((entry) => entry.type === 'CAUSAL_REPAIR_PREPARED' && entry.payload.txId === 'repair-third')!;
+    expect(graph.view(event.payload.heads as number[]).nodes.map((node) => node.observation.resultHash))
+      .toEqual(['stable', 'third', 'third']);
+    expect(graph.view(generations[0]).nodes.map((node) => node.observation.resultHash))
+      .toEqual(['stable', 'second', 'second']);
+    expect(graph.view([output.seq, stable.seq], output.seq).nodes).toEqual([source, stable, output]);
+  });
+
+  it('rejects changed evidence outside selected heads before creating repair state', async () => {
+    const source = graph.record(step('a'));
+    const other = graph.record(step('b'));
+    for (const heads of [[], [other.seq], [999999]]) {
+      await expect(prepareWorkspaceRepair(supervisor, {
+        txId: 'repair', runId: 'run', root, forkPath: path.join(temp, 'repair'),
+        heads, changed: [source.seq], atSeq: other.seq,
+        validateReuse: async () => { throw new Error('must not validate'); },
+        execute: async () => { throw new Error('must not execute'); },
+      })).rejects.toThrow('absent');
+    }
+    expect(domain.getStore().getJournalEvents(domain.domainId)
+      .some((event) => event.payload.txId === 'repair')).toBe(false);
+    expect(fs.existsSync(path.join(temp, 'repair'))).toBe(false);
+  });
+
 });

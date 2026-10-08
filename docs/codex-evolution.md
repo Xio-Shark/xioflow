@@ -59,3 +59,14 @@
 - 验证过程：第一次修改后全量运行与独立 pnpm build 交叠，崩溃矩阵子进程读到正在重写的 dist 文件而失败（缺少 ignoredManifestPath 导出）；其余 519 项通过。停止并行构建后重新运行全量测试，最终结果见下方。
 - 下一轮：增加选定执行分支的有效节点视图，将替代关系接入多轮修复与投机候选；用相同文件扰动对比完整重跑和局部重算的正确性、工具次数与耗时，再绑定 AgentRuntime checkpoint 和真实模型 token 计量。
 - 最终验证：`pnpm typecheck`、`pnpm build`、`git diff --check` 均通过；不与构建交叠的 `pnpm test` 为 42 个文件通过、1 个跳过，520 项通过、7 项跳过、0 失败，耗时 83.58 秒。
+
+## 2026-10-08 — 显式因果分支视图与连续多轮修复
+
+- 本轮纵向切片：新增 `WorkspaceCausalGraph.view(heads, atSeq?)`，按结果节点选择包含全部上游的执行分支；允许跨 agent / 事务依赖，排除未选中的投机候选及旧版本。支持历史切片、去重和 domain 重启后查询，不修改原 journal。
+- 接入执行：`planRecomputation` 和 `prepareWorkspaceRepair` 支持可选 `heads`；失效种子必须位于所选视图，在创建事务前校验。修复返回替代后的 heads，并在 `CAUSAL_REPAIR_PREPARED` 持久记录 sourceHeads / heads；下一轮直接沿用当前分支，无需重算其他历史版本（查询仍读取 domain journal）。省略 heads 保留旧 API 的 domain 全历史行为，同时返回末端结果集合供迁移。
+- 验证：新增 3 项回归，覆盖跨 agent 分支选择、候选排除、历史边界和参数隔离；连续两次真实文件扰动各只执行当前分支的两个受影响工具，独立输出复用，两次 OCC 提交后文件正确；重启后恢复各代视图；视图外种子不创建事务或 fork。定向测试 14 项通过。
+- 文档：更新 README、VISION、因果图 API 与修复示例，说明连续修复如何使用新的节点身份和 heads，以及 prepared 分支与已提交世界的区别。
+- 环境与基线：已有 node_modules 与 cc 可用，依赖未变化，无需 pnpm install；修改前干净基线 520 项通过、7 项跳过，耗时 89.96 秒。
+- 边界：分支选择由宿主显式提供；没有自动物化旧输出、自动变化检测、AgentRuntime 上下文恢复或文件时间旅行。视图不会证明提交状态或依赖完整性；测试中的工具次数不构成模型 token 或耗时收益结论。
+- 下一轮：基于显式分支构建相同扰动任务下的完整重跑 / 局部修复基准，记录正确性、真实工具次数与耗时；随后将投机候选 OCC 冲突接入局部修复，并绑定 AgentRuntime checkpoint。
+- 最终验证：`pnpm typecheck`、`pnpm build`、`git diff --check` 均通过；构建结束后运行 `pnpm test`，42 个文件通过、1 个跳过，523 项通过、7 项跳过、0 失败，耗时 85.20 秒。
