@@ -35,14 +35,10 @@
 - 时间旅行是 checkpoint 粒度，不是任意序号回滚，不重放模型或外部系统。
 - 因果基准工具 12→3；合并基准总工具 25→16；均 3/3 正确，另计验证 / 复制。
 - 新增 pnpm benchmark:shared：逐分支独立修复 / 共享祖先修复 / 不校验复用。
-- 共享基准入口 src/testing/shared-repair-benchmark.ts；公共输入扰动，无独立节点复用。
-- 共享分发各分支输出到独立事务，逐份验证公共输入，再逐项 OCC 提交。
-- 共享基准工具 12→6，耗时略升；modelTokens 均 null，不代表模型收益。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。
 - validateWorkspaceCausalBranches：同一当前基线，逐分支独立 fork 重放，自动发现因果修复种子。
 - 返回 matched / changed / failed、首个差异 seq、去重 changed、联合 plan 与实际 replayedSteps。
 - 工具异常不进入 changed；每分支首差即停；验证 fork / 基线回收，不改 checkpoint / 不提交。
-- requires closedWorld / deterministic；依赖完整性仍由宿主保证；unaffected 不等于已验证复用。
 - CAUSAL_VALIDATION_COMPLETED 持久化报告、源分支 heads、基线 SnapshotRef 元数据。
 - listWorkspaceCausalValidations(domain, { runId?, atSeq? }) 支持重开与报告历史切片。
 - 报告 seq 与源图 atSeq 不同；快照已回收，基线身份不承诺可重新物化。
@@ -55,6 +51,10 @@
 - refreshWorkspaceCausalBranches：探测→共享修复→联合 heads 完整日志→强制重放提交。
 - 包含复用祖先；成功回收基线，冲突中止回收；提交抛错保留恢复资源并报告 txId。
 - 依已有 validationSeq→txId→TX_COMMITTED 追溯；不分发独立事务、不绑定 checkpoint。
-- 文档 docs/causal-validation.md；下一步：独立输出分发 / checkpoint 发布协调与验证成本基准。
 - 环境需 C 编译器（cc）与 libc 开发包；原生 reaper 测试必须实际构建。
-- 最新验证：pnpm typecheck 通过；pnpm test 611 通过 / 7 跳过（98.97 秒）。
+- pnpm benchmark:refresh：完整重跑 / 自动刷新 / 不校验复用，均使用真实文件工具。
+- 两种发布均强制重放；分别统计生成、探测、复用验证、提交重放和 journal 资源数。
+- 支持零 / 局部 / 全部输入变化；默认生成 8→2，总工具 16→23，耗时约 188→296 ms。
+- 基准两种验证模式均 3/3 正确；modelTokens null；文档 docs/causal-refresh-benchmark.md。
+- 下一步：基于此成本基线减少重复验证；或实现独立输出分发 / checkpoint 发布协调。
+- 最新验证：pnpm typecheck / benchmark:refresh 通过；pnpm test 620 通过 / 7 跳过（104.92 秒）。

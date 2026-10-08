@@ -125,3 +125,5 @@ if (result.status === 'committed') {
 成功返回 `committed`、验证报告、修复结果及提交结果，回收工作分叉和基线。观测失效或 OCC 冲突返回 `conflict` 并中止事务、回收资源，不自动重试。返回事务状态对应 `committed` / `aborted`，其中 fork 和快照路径仅用于追溯，已经不能访问。此入口在一个共享事务中发布所有兼容输出，不分发独立事务，也不更新 agent checkpoint。
 
 通过已有 `CAUSAL_VALIDATION_REPAIR_PREPARED.validationSeq → txId → TX_COMMITTED / TX_CONFLICTED` 查询探测与发布关系。准备成功不代表已经发布；以事务 journal 为准。提交抛错时可能已经写入 `TX_COMMITTING` 或应用文件，入口保留 fork 与基线并抛出带 txId 的错误：检查 journal，若存在 `TX_COMMITTING` 则通过原提交 API 完成恢复；若尚未开始提交则决定重新验证或中止。不要重新调用整个刷新流程来掩盖未知提交状态。已确定提交结果后的清理错误会明确携带该结果，不能据此假定发布被撤销。
+
+端到端成本可用 `pnpm benchmark:refresh` 复现；分别计入探测、重算、复用验证和提交重放，详见 [验证成本基准](causal-refresh-benchmark.md)。

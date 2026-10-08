@@ -1,0 +1,284 @@
+{
+  "schemaVersion": 1,
+  "config": {
+    "trials": 3,
+    "branches": 4,
+    "hashRounds": 1000,
+    "changedBranches": 1
+  },
+  "modelTokens": null,
+  "environment": {
+    "node": "v22.23.3",
+    "platform": "linux",
+    "arch": "arm64",
+    "git": "git version 2.47.3"
+  },
+  "samples": [
+    {
+      "mode": "full-rerun",
+      "trial": 0,
+      "changedBranches": [
+        0
+      ],
+      "status": "committed",
+      "executionToolCalls": 8,
+      "probeToolCalls": 0,
+      "reuseToolCalls": 0,
+      "commitReplayToolCalls": 8,
+      "totalToolCalls": 16,
+      "elapsedMs": 174.17005899999998,
+      "transactionsStarted": 1,
+      "snapshotsCaptured": 2,
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "a87017bd3b7545dd57f81ae58ca910b51895ebe41a551b7b76c3d5a74fec8cb6",
+        "4e34c8c1d3285ca5e22a282ed28cf9cf2722609079b484fe1337d05d395f4635",
+        "b263015246898fea5551f58b59220b9637a71f4ba1ff499119aa6793568dfbb4",
+        "bb7acd924484fe25ac5aaa674024dfee47eaa71fa3120af9d88e9e942a120618"
+      ],
+      "commitValidation": "observations",
+      "success": true
+    },
+    {
+      "mode": "causal-refresh",
+      "trial": 0,
+      "changedBranches": [
+        0
+      ],
+      "status": "committed",
+      "executionToolCalls": 2,
+      "probeToolCalls": 7,
+      "reuseToolCalls": 6,
+      "commitReplayToolCalls": 8,
+      "totalToolCalls": 23,
+      "elapsedMs": 295.588581,
+      "transactionsStarted": 5,
+      "snapshotsCaptured": 3,
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "a87017bd3b7545dd57f81ae58ca910b51895ebe41a551b7b76c3d5a74fec8cb6",
+        "4e34c8c1d3285ca5e22a282ed28cf9cf2722609079b484fe1337d05d395f4635",
+        "b263015246898fea5551f58b59220b9637a71f4ba1ff499119aa6793568dfbb4",
+        "bb7acd924484fe25ac5aaa674024dfee47eaa71fa3120af9d88e9e942a120618"
+      ],
+      "commitValidation": "observations",
+      "success": true
+    },
+    {
+      "mode": "unchecked-reuse",
+      "trial": 0,
+      "changedBranches": [
+        0
+      ],
+      "status": "reused",
+      "executionToolCalls": 0,
+      "probeToolCalls": 0,
+      "reuseToolCalls": 0,
+      "commitReplayToolCalls": 0,
+      "totalToolCalls": 0,
+      "elapsedMs": 0.0014209999999366119,
+      "transactionsStarted": 0,
+      "snapshotsCaptured": 0,
+      "correctOutputs": 3,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "3ed275b39044b1e27286925a754c51945bb768010c57898bb1b3cf904722d6ed",
+        "4e34c8c1d3285ca5e22a282ed28cf9cf2722609079b484fe1337d05d395f4635",
+        "b263015246898fea5551f58b59220b9637a71f4ba1ff499119aa6793568dfbb4",
+        "bb7acd924484fe25ac5aaa674024dfee47eaa71fa3120af9d88e9e942a120618"
+      ],
+      "commitValidation": null,
+      "success": false
+    },
+    {
+      "mode": "causal-refresh",
+      "trial": 1,
+      "changedBranches": [
+        1
+      ],
+      "status": "committed",
+      "executionToolCalls": 2,
+      "probeToolCalls": 7,
+      "reuseToolCalls": 6,
+      "commitReplayToolCalls": 8,
+      "totalToolCalls": 23,
+      "elapsedMs": 295.3426999999999,
+      "transactionsStarted": 5,
+      "snapshotsCaptured": 3,
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "3ed275b39044b1e27286925a754c51945bb768010c57898bb1b3cf904722d6ed",
+        "7517feeaf4833a04654979b18164b581f5a27035be5581e4298f2cfc55055eea",
+        "b263015246898fea5551f58b59220b9637a71f4ba1ff499119aa6793568dfbb4",
+        "bb7acd924484fe25ac5aaa674024dfee47eaa71fa3120af9d88e9e942a120618"
+      ],
+      "commitValidation": "observations",
+      "success": true
+    },
+    {
+      "mode": "unchecked-reuse",
+      "trial": 1,
+      "changedBranches": [
+        1
+      ],
+      "status": "reused",
+      "executionToolCalls": 0,
+      "probeToolCalls": 0,
+      "reuseToolCalls": 0,
+      "commitReplayToolCalls": 0,
+      "totalToolCalls": 0,
+      "elapsedMs": 0.001482999999780077,
+      "transactionsStarted": 0,
+      "snapshotsCaptured": 0,
+      "correctOutputs": 3,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "3ed275b39044b1e27286925a754c51945bb768010c57898bb1b3cf904722d6ed",
+        "4e34c8c1d3285ca5e22a282ed28cf9cf2722609079b484fe1337d05d395f4635",
+        "b263015246898fea5551f58b59220b9637a71f4ba1ff499119aa6793568dfbb4",
+        "bb7acd924484fe25ac5aaa674024dfee47eaa71fa3120af9d88e9e942a120618"
+      ],
+      "commitValidation": null,
+      "success": false
+    },
+    {
+      "mode": "full-rerun",
+      "trial": 1,
+      "changedBranches": [
+        1
+      ],
+      "status": "committed",
+      "executionToolCalls": 8,
+      "probeToolCalls": 0,
+      "reuseToolCalls": 0,
+      "commitReplayToolCalls": 8,
+      "totalToolCalls": 16,
+      "elapsedMs": 192.79149199999983,
+      "transactionsStarted": 1,
+      "snapshotsCaptured": 2,
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "3ed275b39044b1e27286925a754c51945bb768010c57898bb1b3cf904722d6ed",
+        "7517feeaf4833a04654979b18164b581f5a27035be5581e4298f2cfc55055eea",
+        "b263015246898fea5551f58b59220b9637a71f4ba1ff499119aa6793568dfbb4",
+        "bb7acd924484fe25ac5aaa674024dfee47eaa71fa3120af9d88e9e942a120618"
+      ],
+      "commitValidation": "observations",
+      "success": true
+    },
+    {
+      "mode": "unchecked-reuse",
+      "trial": 2,
+      "changedBranches": [
+        2
+      ],
+      "status": "reused",
+      "executionToolCalls": 0,
+      "probeToolCalls": 0,
+      "reuseToolCalls": 0,
+      "commitReplayToolCalls": 0,
+      "totalToolCalls": 0,
+      "elapsedMs": 0.00046900000006644404,
+      "transactionsStarted": 0,
+      "snapshotsCaptured": 0,
+      "correctOutputs": 3,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "3ed275b39044b1e27286925a754c51945bb768010c57898bb1b3cf904722d6ed",
+        "4e34c8c1d3285ca5e22a282ed28cf9cf2722609079b484fe1337d05d395f4635",
+        "b263015246898fea5551f58b59220b9637a71f4ba1ff499119aa6793568dfbb4",
+        "bb7acd924484fe25ac5aaa674024dfee47eaa71fa3120af9d88e9e942a120618"
+      ],
+      "commitValidation": null,
+      "success": false
+    },
+    {
+      "mode": "full-rerun",
+      "trial": 2,
+      "changedBranches": [
+        2
+      ],
+      "status": "committed",
+      "executionToolCalls": 8,
+      "probeToolCalls": 0,
+      "reuseToolCalls": 0,
+      "commitReplayToolCalls": 8,
+      "totalToolCalls": 16,
+      "elapsedMs": 188.3510940000001,
+      "transactionsStarted": 1,
+      "snapshotsCaptured": 2,
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "3ed275b39044b1e27286925a754c51945bb768010c57898bb1b3cf904722d6ed",
+        "4e34c8c1d3285ca5e22a282ed28cf9cf2722609079b484fe1337d05d395f4635",
+        "fa85d9ed8a3151ead283998d6ad38ba6d2e2dcdb73853573f64264da9d90e197",
+        "bb7acd924484fe25ac5aaa674024dfee47eaa71fa3120af9d88e9e942a120618"
+      ],
+      "commitValidation": "observations",
+      "success": true
+    },
+    {
+      "mode": "causal-refresh",
+      "trial": 2,
+      "changedBranches": [
+        2
+      ],
+      "status": "committed",
+      "executionToolCalls": 2,
+      "probeToolCalls": 7,
+      "reuseToolCalls": 6,
+      "commitReplayToolCalls": 8,
+      "totalToolCalls": 23,
+      "elapsedMs": 309.7472579999999,
+      "transactionsStarted": 5,
+      "snapshotsCaptured": 3,
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "3ed275b39044b1e27286925a754c51945bb768010c57898bb1b3cf904722d6ed",
+        "4e34c8c1d3285ca5e22a282ed28cf9cf2722609079b484fe1337d05d395f4635",
+        "fa85d9ed8a3151ead283998d6ad38ba6d2e2dcdb73853573f64264da9d90e197",
+        "bb7acd924484fe25ac5aaa674024dfee47eaa71fa3120af9d88e9e942a120618"
+      ],
+      "commitValidation": "observations",
+      "success": true
+    }
+  ],
+  "summary": [
+    {
+      "mode": "full-rerun",
+      "successRate": 1,
+      "meanExecutionToolCalls": 8,
+      "meanProbeToolCalls": 0,
+      "meanReuseToolCalls": 0,
+      "meanCommitReplayToolCalls": 8,
+      "meanTotalToolCalls": 16,
+      "medianElapsedMs": 188.3510940000001
+    },
+    {
+      "mode": "causal-refresh",
+      "successRate": 1,
+      "meanExecutionToolCalls": 2,
+      "meanProbeToolCalls": 7,
+      "meanReuseToolCalls": 6,
+      "meanCommitReplayToolCalls": 8,
+      "meanTotalToolCalls": 23,
+      "medianElapsedMs": 295.588581
+    },
+    {
+      "mode": "unchecked-reuse",
+      "successRate": 0,
+      "meanExecutionToolCalls": 0,
+      "meanProbeToolCalls": 0,
+      "meanReuseToolCalls": 0,
+      "meanCommitReplayToolCalls": 0,
+      "meanTotalToolCalls": 0,
+      "medianElapsedMs": 0.0014209999999366119
+    }
+  ]
+}
