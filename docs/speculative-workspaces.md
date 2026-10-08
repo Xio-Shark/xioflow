@@ -81,4 +81,27 @@ const strategy = {
 
 正常结束会回收原候选、修复 fork 和所有本轮基线。修复计划、验证、工具或证据回调抛错时终止本轮并回收尚未提交的事务，错误通过 `AggregateError` 上报；修复提交抛错时停止选择后续候选，保留该修复事务及基线供恢复。与原有异常清理一致，存在未回收事务时保守保留本轮快照。
 
-真实文件用例见 `tests/workspace/speculation.test.ts`：局部重算、独立输出复用、兄弟分支隔离、二次冲突回退、工具错误与不确定提交。当前不合并多个胜者、不恢复模型上下文，也不声称节省 token。
+真实文件用例见 `tests/workspace/speculation.test.ts`：局部重算、独立输出复用、兄弟分支隔离、二次冲突回退、工具错误与不确定提交。多胜者模式见下文；不恢复模型上下文，也不声称节省 token。
+
+## 多 agent 兼容结果合并
+
+同一任务的替代策略使用默认 `commitPolicy: 'first_valid'`；多个 agent 分工产生需要共同保留的结果时，显式设置 `commitPolicy: 'all_valid'`：
+
+```ts
+const merged = await speculateWorkspace(supervisor, {
+  speculationId: 'team-42', runId, root: '/repo', forkPath: '/work/team-42',
+  commitPolicy: 'all_valid',
+  strategies: [
+    { id: 'docs', execute: updateDocs },
+    { id: 'tests', execute: updateTests },
+    { id: 'implementation', execute: updateImplementation, repair: repairImplementation },
+  ],
+});
+console.log(merged.winners); // 实际提交成功的 agent，按提交顺序排列
+```
+
+所有回调仍基于同一快照并行执行。提交按声明顺序进行，后续候选通过已有 OCC 检查先前胜者造成的变化：不相交的写集可以合并，但读取已被改变的文件仍会冲突；原有观测重放与一次局部修复同样适用。失败或冲突不妨碍后续独立候选提交，不会尝试求最大兼容集合，也不进行文本级自动合并。读集不可观测时仍明确返回 `write_only`，不能据此宣称观测有效。
+
+`winners` 在两种模式中都返回全部胜者（无胜者为 `[]`），`winner` 保持为第一个胜者。`status: 'committed'` 表示至少一个候选成功，逐候选状态解释其余结果。`SPECULATION_STARTED` 记录策略，新增 `SPECULATION_CANDIDATE_COMMITTED` 逐次记录策略 ID、实际提交事务 ID（可能为修复事务）与累计胜者；`SPECULATION_FINISHED` 记录完整结果。
+
+**批次不是原子事务。** 后续回调、提交或清理抛错时，先前提交仍然保留；提交异常立即停止后续提交，保留不确定事务供恢复，并尝试回收其余 fork。宿主可查询 TX journal 与逐候选提交事件恢复已完成进度；TX journal 是实际提交事实的依据（进程可能在提交完成与投机事件写入之间中断）。本入口不自动回滚已提交胜者，也不自动恢复中断批次。

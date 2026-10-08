@@ -1,38 +1,37 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；受监督执行是底座。
 - 分支：codex/evolve；复用 snapshot / fork / rollback、AgentRuntime、journal。
-- 已有：WorkspaceTransactions 文件读写集与观测重放 OCC；多策略隔离投机与单胜者提交。
+- 已有：WorkspaceTransactions 文件读写集与观测重放 OCC；同基线隔离投机执行。
 - 已有：WorkspaceCausalGraph 持久因果节点、上游查询、历史切片、失效闭包。
 - 已有：prepareWorkspaceRepair 拓扑重算失效节点，复用独立结果并记录替代关系。
-- 已有：view(heads) 显式选择分支，修复返回新 heads，支持连续多轮修复。
-- 已有：speculateWorkspace repair(original, conflict) 接通 OCC 冲突后的局部重算与再提交。
-- 投机修复：每候选一次；维持优先级；再次冲突转向后备候选，回调错误终止并清理。
-- 投机生命周期：正常回收 fork / 基线；提交抛错保留不确定事务，禁止继续选择胜者。
+- view(heads) 显式选择分支，修复返回新 heads，支持连续多轮修复。
+- speculateWorkspace repair(original, conflict) 接通 OCC 冲突后的局部重算与再提交。
+- 每候选一次修复；维持优先级；再次冲突转向后备候选，回调错误终止并清理。
+- 本轮：新增 commitPolicy: first_valid（默认）/ all_valid，支持多个 agent 兼容结果合并。
+- all_valid 按声明顺序逐个普通 OCC 提交，后续候选检查前面胜者的写入，冲突仍可局部修复。
+- winners 返回所有成功策略，winner 保留第一个；status committed 仅表示至少一个成功。
+- SPECULATION_STARTED 记录策略；SPECULATION_CANDIDATE_COMMITTED 记录实际事务与累计胜者。
+- 批次非原子；错误不撤销已有提交；提交异常立即停止，保留不确定 fork / 基线供恢复。
+- 正常回收落选、失败、冲突 fork / 基线；TX journal 是提交事实依据，投机事件可能晚于实际提交。
+- 入口：src/workspace/speculation.ts；测试：tests/workspace/speculation.test.ts；文档：docs/speculative-workspaces.md。
 - 已有：AgentRuntime create / step result 的 causalHeads 与 checkpoint 原子持久化。
-- heads 引用同 domain 已有因果节点，支持跨 actor / 事务，自动去重。
-- checkpoints(id) 返回历史 workspace / heads；checkpointCausalView(id, seq) 查询当时分支。
-- null / 省略 heads 表示未跟踪，[] 是显式空分支；新步骤省略会清除旧关联。
+- heads 引用同 domain 已有因果节点，支持跨 actor / 事务；null / 省略未跟踪，[] 显式空分支。
+- checkpoints(id) 查询历史 workspace / heads；checkpointCausalView(id, seq) 查询当时分支。
 - findValidCheckpoint 使用候选自己的 heads；restore / recover 同步恢复上下文与 heads，预算不回退。
-- 已有：planCausalRecovery(changed) 跨 agent 查询当前 checkpoint 失效影响与历史恢复候选。
-- affected 包含终态输出、选中分支的 invalidatedHeads / Nodes；unaffected / untracked 分开。
-- 本轮：recoverCausalCheckpoint(id, expectedCheckpointSeq, prepare) 接通局部修复后的上下文绑定。
-- 入口拒绝过期 checkpoint / 未跟踪上下文；复用 recoverCheckpoint 的独占 recovering、清理、中断与 shutdown 生命周期。
-- 宿主 prepare 返回重建 checkpoint、显式 causalHeads、open workspace，可提供 discard；undefined 放弃。
-- causal_repaired 事件原子存上下文、heads、workspace，并以 checkpointRef 记录源上下文。
-- 新 checkpoint 可历史查询、恢复和重开 domain；清除旧 validatedWorkspaceVersion，保留预算，停在 paused。
-- 测试：实际文件变化后修复两个依赖节点、复用独立节点；持久化/恢复、过期计划、失败清理、中断、终态与未跟踪拒绝。
-- 入口：src/agents/runtime.ts、src/agents/journal.ts、tests/agents/causal-checkpoints.test.ts。
-- 示例与契约：spec/agent-runtime.md#binding-incrementally-repaired-context。
-- 基准：pnpm benchmark:causal 比较完整重跑 / 局部修复 / 不校验复用；详见 docs/causal-repair-benchmark.md。
+- planCausalRecovery(changed) 跨 agent 查询当前 checkpoint 失效影响与历史恢复候选。
+- recoverCausalCheckpoint(id, expectedCheckpointSeq, prepare) 接通宿主局部修复与上下文绑定。
+- prepare 返回重建 checkpoint、显式 causalHeads、open workspace，可提供 discard；undefined 放弃。
+- causal_repaired 原子存上下文、heads、workspace，以 checkpointRef 记录源；保留预算，成功停在 paused。
+- 恢复入口拒绝过期计划、未跟踪上下文和终态；复用独占 recovering、清理、中断与 shutdown 生命周期。
+- 上下文绑定不提交文件；宿主验证新世界与复用条件；准备回调返回前的异常清理由宿主负责。
+- 基准：pnpm benchmark:causal 比较完整重跑 / 局部修复 / 不校验复用；docs/causal-repair-benchmark.md。
 - 基准样本：3 轮×4 分支，重跑与修复均 3/3 正确，实际工具 12→3，另有验证读取。
 - 基准边界：固定确定性文件任务，无并发写入，modelTokens 为 null；不宣称稳定加速。
-- 下一步：将投机冲突修复或跨 agent 上下文重建纳入基准，对比完整重跑并计量执行成本。
-- 后续：跨 agent 宿主恢复编排、真实模型任务与 token 计量、互不冲突写集多胜者合并。
-- 边界：影响计划只解释已声明变化，不证明当前世界有效；恢复期间宿主验证新世界与复用条件。
-- 边界：上下文重建由宿主提供；绑定不提交文件，仍走正常 OCC；宿主修复成本不自动记入 agent 步数。
-- 边界：准备回调返回前的异常清理由宿主负责，返回后的绑定失败/中断调用 discard；旧工作区不会自动回收。
-- 边界：终态只报告不恢复；历史 workspace 可能已回收；多 agent 恢复非原子，依赖完整性需宿主声明。
-- 已知坑：全量测试期间不要改源码/测试或并行 build，可能混用缓存旧源码、新测试或半构建 dist。
-- 环境：已有 node_modules 和 cc，依赖未变化，无需 pnpm install。
-- 本轮基线：542 通过、7 跳过（88.09 秒）；typecheck 和定向 64 项已通过。
-- 最终验证：pnpm typecheck、pnpm build、git diff --check 通过；定向 64 通过，全量 546 通过、7 跳过（90.90 秒）。
+- 下一步：把多 agent 合并中冲突局部修复纳入基准，与全量重跑比较正确性、实际工具成本和耗时。
+- 后续：跨 agent 宿主恢复编排、真实模型任务与 token 计量、时间旅行调试与确定性适配器。
+- 边界：因果依赖需宿主完整声明；失效计划只解释已声明变化，不证明当前世界有效。
+- 边界：all_valid 不求最大兼容集合、不自动文本合并；write_only 不证明读观测有效；批次不自动恢复。
+- 已知坑：全量测试期间不要改源码/测试或并行 build，避免缓存旧源码、新测试或半构建 dist 混用。
+- 环境：已有 node_modules，无需 install；本轮新环境缺 cc，已通过 sudo apt-get 安装 build-essential。
+- 初始基线：453 通过、7 跳过，3 套件因缺 cc 加载失败；修复环境后执行最终全量验证。
+- 最终验证：pnpm typecheck、pnpm build、git diff --check 通过；pnpm test 551 通过、7 跳过（89.94 秒）。

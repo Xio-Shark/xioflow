@@ -27,6 +27,8 @@ export interface WorkspaceSpeculationOptions {
   forkPath: string;
   /** Priority order; completion timing does not change the selection order. */
   strategies: readonly WorkspaceStrategy[];
+  /** Default first_valid selects one winner; all_valid commits every OCC-valid candidate in order. */
+  commitPolicy?: 'first_valid' | 'all_valid';
 }
 
 export interface SpeculationCandidate {
@@ -41,14 +43,17 @@ export interface SpeculationCandidate {
 
 export interface WorkspaceSpeculationResult {
   status: 'committed' | 'no_winner';
+  /** First committed strategy, for compatibility with single-winner callers. */
   winner?: string;
+  /** All committed strategies in commit order. The batch is not atomic. */
+  winners: string[];
   baseSnapshotId: string;
   candidates: SpeculationCandidate[];
 }
 
 /**
  * Fork once per strategy from one immutable baseline, execute concurrently, then
- * submit in priority order through normal OCC. This is a joined tournament, not
+ * submit in priority order through normal OCC (one or all valid candidates). This is a joined tournament, not
  * a cancellation race: every callback must settle before any fork is reclaimed.
  */
 export async function speculateWorkspace(
@@ -56,6 +61,8 @@ export async function speculateWorkspace(
   options: WorkspaceSpeculationOptions,
 ): Promise<WorkspaceSpeculationResult> {
   const strategies = [...options.strategies];
+  const commitPolicy = options.commitPolicy ?? 'first_valid';
+  if (commitPolicy !== 'first_valid' && commitPolicy !== 'all_valid') throw new Error('Invalid speculation commit policy');
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(options.speculationId)) throw new Error('Invalid speculation id');
   if (!strategies.length || strategies.some((s) => !s.id.trim()) || new Set(strategies.map((s) => s.id)).size !== strategies.length) {
     throw new Error('Speculation requires nonempty, unique strategy ids');
@@ -85,14 +92,14 @@ export async function speculateWorkspace(
       baseSnapshotId = tx.baseSnapshotId;
       snapshots.add(tx.baseSnapshotId);
     }
-    record('SPECULATION_STARTED', { baseSnapshotId, candidates: transactions.map((tx, i) => ({ txId: tx.txId, strategyId: strategies[i].id })) });
+    record('SPECULATION_STARTED', { commitPolicy, baseSnapshotId, candidates: transactions.map((tx, i) => ({ txId: tx.txId, strategyId: strategies[i].id })) });
     const executions = await Promise.allSettled(strategies.map(async (strategy, index) => strategy.execute({ ...transactions[index] })));
     const candidates: SpeculationCandidate[] = executions.map((execution, index) => ({
       strategyId: strategies[index].id, txId: transactions[index].txId,
       status: execution.status === 'rejected' ? 'failed' : 'discarded',
       ...(execution.status === 'rejected' ? { error: execution.reason instanceof Error ? execution.reason.message : String(execution.reason) } : {}),
     }));
-    result = { status: 'no_winner', baseSnapshotId: baseSnapshotId!, candidates };
+    result = { status: 'no_winner', baseSnapshotId: baseSnapshotId!, winners: [], candidates };
     for (let index = 0; index < executions.length; index++) {
       const execution = executions[index];
       if (execution.status === 'rejected') continue;
@@ -130,8 +137,12 @@ export async function speculateWorkspace(
       pending.delete(commit.txId);
       candidate.status = 'committed';
       result.status = 'committed';
-      result.winner = candidate.strategyId;
-      break;
+      result.winner ??= candidate.strategyId;
+      result.winners.push(candidate.strategyId);
+      record('SPECULATION_CANDIDATE_COMMITTED', {
+        strategyId: candidate.strategyId, txId: commit.txId, winners: [...result.winners],
+      });
+      if (commitPolicy === 'first_valid') break;
     }
     record('SPECULATION_FINISHED', { ...result });
   } catch (error) {

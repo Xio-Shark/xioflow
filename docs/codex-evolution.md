@@ -118,3 +118,13 @@
 - 更新 README、VISION、运行时契约与宿主 prepareWorkspaceRepair / 上下文重建接入示例；重写交接摘要。
 - 无需 install；基线 542 通过、7 跳过；pnpm typecheck、pnpm build、git diff --check 通过，定向 64 通过，全量 546 通过、7 跳过（90.90 秒）。
 - 边界与下一步：绑定不提交文件或证明世界有效；宿主重建上下文、验证复用与计量修复成本，下一轮将投机冲突修复或跨 agent 重建纳入基准。
+
+## 2026-10-08 — 多 agent 兼容结果合并
+- speculateWorkspace 新增 commitPolicy: all_valid，按声明顺序逐个 OCC 提交；默认 first_valid 保持单胜者。
+- winners 返回全部胜者，winner 保留首个；后续候选检查先前提交，继续支持观测重放与一次因果局部修复。
+- 新增逐候选提交 journal，记录策略、实际事务及累计胜者；批次非原子，异常保留已有提交并停止不确定提交后的选择。
+- 新增 5 项测试覆盖兼容合并、写冲突、读观测失效、跨胜者局部修复、部分提交异常与原有修复复用。
+- 更新 README、VISION、投机使用说明与多 agent 示例，重写 37 行交接摘要。
+- 环境已有 node_modules；初始基线 453 通过、7 跳过，3 套件缺 cc；安装 build-essential 后恢复原生测试。
+- 验证：pnpm typecheck、pnpm build、git diff --check 通过；pnpm test 551 通过、7 跳过（89.94 秒）。
+- 下一步：将多 agent 合并冲突修复纳入可复现基准，比较完整重跑的正确性、工具成本与耗时。

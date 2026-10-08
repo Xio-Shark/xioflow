@@ -54,6 +54,7 @@ describe('workspace speculation', () => {
     ] });
     expect(result.status).toBe('committed');
     expect(result.winner).toBe('preferred');
+    expect(result.winners).toEqual(['preferred']);
     expect(new Set(bases).size).toBe(1);
     expect(result.candidates.map((c) => c.status)).toEqual(['committed', 'discarded']);
     expect(fs.readFileSync(path.join(root, 'winner.txt'), 'utf8')).toBe('preferred');
@@ -62,6 +63,112 @@ describe('workspace speculation', () => {
     expect(domain.getStore().getSnapshot(result.baseSnapshotId)).toBeNull();
     expect(graph.nodes()[0].txId).toBe('race-0');
     expect(domain.getStore().getJournalEvents(domain.domainId).some((e) => e.type === 'SPECULATION_FINISHED' && e.payload.winner === 'preferred')).toBe(true);
+  });
+
+  it('merges compatible outputs in priority order and rejects overlapping writes', async () => {
+    const result = await speculateWorkspace(supervisor, { ...options(), commitPolicy: 'all_valid', strategies: [
+      { id: 'first', execute: async (tx) => { fs.writeFileSync(path.join(tx.forkRoot, 'input.txt'), 'first'); } },
+      { id: 'overlap', execute: async (tx) => { fs.writeFileSync(path.join(tx.forkRoot, 'input.txt'), 'overlap'); } },
+      { id: 'independent', execute: async (tx) => { fs.writeFileSync(path.join(tx.forkRoot, 'other.txt'), 'other'); } },
+      { id: 'failed', execute: async () => { throw new Error('rejected'); } },
+    ] });
+    expect(result.winners).toEqual(['first', 'independent']);
+    expect(result.winner).toBe('first');
+    expect(result.candidates.map((c) => c.status)).toEqual(['committed', 'conflict', 'committed', 'failed']);
+    expect(result.candidates[1].commit).toMatchObject({ conflicts: [
+      { path: 'input.txt', kind: 'write_write', otherTxId: 'race-0' },
+    ] });
+    expect(fs.readFileSync(path.join(root, 'input.txt'), 'utf8')).toBe('first');
+    expect(fs.readFileSync(path.join(root, 'other.txt'), 'utf8')).toBe('other');
+    const events = domain.getStore().getJournalEvents(domain.domainId);
+    expect(events.filter((e) => e.type === 'SPECULATION_CANDIDATE_COMMITTED').map((e) => e.payload.txId))
+      .toEqual(['race-0', 'race-2']);
+    expect(events.find((e) => e.type === 'SPECULATION_STARTED')?.payload.commitPolicy).toBe('all_valid');
+    expect(events.find((e) => e.type === 'SPECULATION_FINISHED')?.payload.winners).toEqual(result.winners);
+    for (const i of [0, 1, 2, 3]) expect(fs.existsSync(`${options().forkPath}-${i}`)).toBe(false);
+    expect(domain.getStore().getSnapshot(result.baseSnapshotId)).toBeNull();
+  });
+
+  it('revalidates observations against earlier winners even with disjoint writes', async () => {
+    let tracked = false;
+    const result = await speculateWorkspace(supervisor, { ...options(), commitPolicy: 'all_valid', strategies: [
+      { id: 'update', execute: async (tx) => { fs.writeFileSync(path.join(tx.forkRoot, 'input.txt'), 'new'); } },
+      { id: 'derived', execute: async (tx) => {
+        tracked = tx.readTracking === 'atime';
+        const value = fs.readFileSync(path.join(tx.forkRoot, 'input.txt'), 'utf8');
+        fs.writeFileSync(path.join(tx.forkRoot, 'derived.txt'), value);
+        return { observations: { closedWorld: true, log: [
+          { kind: 'observe', call: { tool: 'read', args: {} }, resultHash: value },
+        ], replay: async (_entry, replayRoot) => fs.readFileSync(path.join(replayRoot, 'input.txt'), 'utf8') } };
+      } },
+    ] });
+    if (!tracked) {
+      expect(result.candidates[1].commit).toMatchObject({ validation: 'write_only', readSet: null });
+      return;
+    }
+    expect(result.winners).toEqual(['update']);
+    expect(result.candidates[1].commit).toMatchObject({ status: 'conflict', observation: {
+      attempted: true, reason: 'observation_changed', divergedAt: 0,
+    } });
+    expect(fs.existsSync(path.join(root, 'derived.txt'))).toBe(false);
+  });
+
+  it('repairs a later agent against the world committed by an earlier winner', async () => {
+    let head = 0;
+    const result = await speculateWorkspace(supervisor, { ...options(), commitPolicy: 'all_valid', strategies: [
+      { id: 'update', execute: async (tx) => { fs.writeFileSync(path.join(tx.forkRoot, 'input.txt'), 'new'); } },
+      { id: 'uppercase', execute: async (tx) => {
+        fs.writeFileSync(path.join(tx.forkRoot, 'input.txt'), 'OLD');
+        head = graph.record({ txId: tx.txId, actorId: 'uppercase', dependsOn: [],
+          observation: { kind: 'mutate', call: { tool: 'uppercase', args: {} }, resultHash: 'OLD' },
+          writes: [{ path: 'input.txt', status: 'M' }] }).seq;
+      }, repair: async (_original, conflict) => {
+        expect(conflict.conflicts).toContainEqual({ path: 'input.txt', kind: 'write_write', otherTxId: 'race-0' });
+        return { changed: [head], heads: [head], atSeq: head, validateReuse: async () => {},
+          execute: async (source, tx) => {
+            const value = fs.readFileSync(path.join(tx.forkRoot, 'input.txt'), 'utf8').toUpperCase();
+            fs.writeFileSync(path.join(tx.forkRoot, 'input.txt'), value);
+            return { actorId: 'uppercase', observation: { ...source.observation, resultHash: value }, writes: source.writes };
+          },
+        };
+      } },
+    ] });
+    expect(result.winners).toEqual(['update', 'uppercase']);
+    expect(fs.readFileSync(path.join(root, 'input.txt'), 'utf8')).toBe('NEW');
+    expect(result.candidates[1]).toMatchObject({ status: 'committed', commit: { status: 'conflict' },
+      repair: { txId: 'race-1-repair', commit: { status: 'committed' } } });
+    expect(graph.view(result.candidates[1].repair!.heads).nodes[0].observation.resultHash).toBe('NEW');
+    expect(domain.getStore().getJournalEvents(domain.domainId)
+      .filter((e) => e.type === 'SPECULATION_CANDIDATE_COMMITTED').map((e) => e.payload.txId))
+      .toEqual(['race-0', 'race-1-repair']);
+    for (const suffix of ['-0', '-1', '-1-repair']) expect(fs.existsSync(options().forkPath + suffix)).toBe(false);
+    expect(domain.getStore().getSnapshot('race-1-repair-base')).toBeNull();
+  });
+
+  it('preserves earlier winners and stops the batch after an uncertain later commit', async () => {
+    const originalCommit = supervisor.commitWorkspaceTransaction.bind(supervisor);
+    const commit = vi.spyOn(supervisor, 'commitWorkspaceTransaction').mockImplementation(async (txId, opts) => {
+      if (txId === 'race-1') throw new Error('I/O failure');
+      return originalCommit(txId, opts);
+    });
+    try {
+      await expect(speculateWorkspace(supervisor, { ...options(), commitPolicy: 'all_valid', strategies:
+        ['first', 'uncertain', 'later'].map((id) => ({ id, execute: async (tx) => {
+          fs.writeFileSync(path.join(tx.forkRoot, `${id}.txt`), id);
+        } })),
+      })).rejects.toThrow('race-1; retain its fork');
+      expect(commit).toHaveBeenCalledTimes(2);
+      expect(fs.readFileSync(path.join(root, 'first.txt'), 'utf8')).toBe('first');
+      expect(fs.existsSync(path.join(root, 'later.txt'))).toBe(false);
+      expect(fs.existsSync(`${options().forkPath}-1`)).toBe(true);
+      for (const i of [0, 2]) expect(fs.existsSync(`${options().forkPath}-${i}`)).toBe(false);
+      expect(domain.getStore().getSnapshot('race-0-base')).not.toBeNull();
+      expect(domain.getStore().getJournalEvents(domain.domainId)
+        .filter((e) => e.type === 'SPECULATION_CANDIDATE_COMMITTED').map((e) => e.payload.strategyId)).toEqual(['first']);
+    } finally {
+      commit.mockRestore();
+      await supervisor.abortWorkspaceTransaction('race-1');
+    }
   });
 
   it('rejects an OCC-conflicted candidate and commits an independent fallback', async () => {
@@ -82,13 +189,13 @@ describe('workspace speculation', () => {
     expect(fs.existsSync(`${options().forkPath}-0`)).toBe(false);
   });
 
-  it('repairs only the selected causal branch and commits reused candidate outputs', async () => {
+  it.each(['first_valid', 'all_valid'] as const)('repairs only the selected causal branch with %s', async (commitPolicy) => {
     let changed = 0;
     let stable = 0;
     let derived = 0;
     const executed: number[] = [];
     const repairCallback = vi.fn(async () => {});
-    const result = await speculateWorkspace(supervisor, { ...options(), strategies: [
+    const result = await speculateWorkspace(supervisor, { ...options(), commitPolicy, strategies: [
       { id: 'preferred', execute: async (tx) => {
         fs.writeFileSync(path.join(tx.forkRoot, 'input.txt'), 'OLD');
         changed = graph.record({ txId: tx.txId, actorId: 'preferred', dependsOn: [],
@@ -134,6 +241,7 @@ describe('workspace speculation', () => {
       }, repair: repairCallback },
     ] });
     expect(result.winner).toBe('preferred');
+    expect(result.winners).toEqual(commitPolicy === 'all_valid' ? ['preferred', 'sibling'] : ['preferred']);
     expect(executed).toEqual([changed, derived]);
     expect(repairCallback).not.toHaveBeenCalled();
     expect(result.candidates[0]).toMatchObject({ status: 'committed', commit: { status: 'conflict' },
@@ -208,6 +316,7 @@ describe('workspace speculation', () => {
     ] });
     expect(result.status).toBe('no_winner');
     expect(result.winner).toBeUndefined();
+    expect(result.winners).toEqual([]);
     expect(result.candidates.map((c) => c.status)).toEqual(['failed', 'conflict']);
     expect(result.candidates[0].error).toBe('strategy failed');
     expect(fs.existsSync(path.join(root, 'leak.txt'))).toBe(false);
