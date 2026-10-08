@@ -574,6 +574,8 @@ executeProcess(op) 准入与重放判定表：
 
 ### 3.10 实验性 agent 生命周期与依据感知调度
 
+工作区重建恢复 checkpoint 时，每一步（包括 mutate）都必须携带非空结果哈希；缺少证据在创建该候选 fork 前显式拒绝。编辑可执行不代表返回给 agent 的引用或诊断仍然相同。此规则属于上下文恢复契约，不改变 §3.9 事务提交的可选 mutation 哈希语义；验证见 `tests/agents/workspace-recovery.test.ts`。
+
 `AgentRuntime` 将 agent 身份、输入、父子关系、checkpoint、轮次预算和协作式调度放进执行域，复用 SQLite journal。发行版仍提供模型、工具和单轮执行 adapter。派发前的观测校验、有效 checkpoint 选择、暂停和恢复协议见 [实验性运行时规范](spec/agent-runtime.md)；验证见 `tests/agents/` 与 E6。这是 0.7.0 起随包发布的实验性增量，不代表完整多 agent 内核已经完成。
 
 `interrupt` 的协议区分取消请求和结清：先记录请求，再通知 adapter 并取消受管命令，等待当前批次结束后保留旧 checkpoint 与已花费预算。它不强杀 JavaScript adapter，不把进程停止未确认改写成成功；完整边界见 [中断契约](spec/agent-runtime.md#interruption-contract)。
