@@ -378,6 +378,17 @@ unique recovery-id prefix, repository root, fork-path prefix and an
 `observations(checkpoint)` adapter returning its complete observation log and
 replay function. Both runtime and supervisor must use the same domain.
 
+Recovery requires `closedWorld: true` and a nonempty `resultHash` for **every**
+step, including mutations. An edit that still applies can return different
+references or diagnostics; restoring the old context would then reuse invalid
+evidence. Missing or empty hashes reject before creating that candidate's fork
+or invoking replay, and leave the previous agent state intact. Adapters must
+record and replay a hash even for a constant acknowledgement or an empty result
+(hash its normalized representation). Legacy logs without mutation result hashes
+cannot establish a recoverable context; do not invent hashes from current output.
+This requirement applies to checkpoint recovery; transaction commit validation
+retains its existing optional mutation-hash contract.
+
 The helper tries checkpoints newest-first. Its first transaction captures an
 immutable baseline; later candidates reuse that snapshot through
 `beginWorkspaceTransaction({ baseSnapshotId })`. This option requires a snapshot

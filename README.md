@@ -28,6 +28,11 @@ For host shutdown, use `await agents.shutdown()` before closing the domain. It r
 
 ## Guarantees
 
+Experimental workspace checkpoint recovery requires a nonempty `resultHash` for
+every logged step, including edits: an edit that applies can still return changed
+information to the agent. Legacy logs missing mutation results are rejected.
+See the [recovery contract](spec/agent-runtime.md#recovery-of-edit-histories).
+
 | Guarantee | Mechanism |
 | --- | --- |
 | No fake running | Admission check, then the operation intent is persisted to SQLite, then the process is spawned. A spawn that fails is recorded as `failed` (exit code 127); it never appears as `running`. |

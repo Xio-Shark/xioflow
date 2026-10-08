@@ -140,6 +140,58 @@ describe('agent recovery into workspace transactions', () => {
     expect(domain.getStore().listSnapshots(domain.domainId).filter((snapshot) => snapshot.id.startsWith('poison-'))).toHaveLength(1);
   });
 
+  it.each([
+    { kind: 'mutate', resultHash: undefined },
+    { kind: 'mutate', resultHash: '' },
+    { kind: 'observe', resultHash: undefined },
+    { kind: 'observe', resultHash: '' },
+  ])('rejects $kind evidence with resultHash=$resultHash before replay or fork creation', async ({ kind, resultHash }) => {
+    const original = await prepare();
+    const before = agents.get('agent-a');
+    const snapshots = domain.getStore().listSnapshots(domain.domainId);
+    const replay = vi.fn(async (entry: ObservationEntry, target: string) => {
+      const output = execute(entry.call, target);
+      return hash(entry.kind === 'mutate' ? `${output}: references changed` : output);
+    });
+    const begin = vi.spyOn(supervisor, 'beginWorkspaceTransaction');
+    await expect(recoverAgentWorkspace(agents, supervisor, {
+      agentId: 'agent-a', recoveryId: 'missing-hash', root, forkPath: path.join(temp, 'missing-hash'),
+      observations: (checkpoint) => ({
+        closedWorld: true,
+        log: logOf(checkpoint).map((entry) => entry.kind === kind ? { ...entry, resultHash } : entry),
+        replay,
+      }),
+    })).rejects.toThrow('result hashes for every step');
+    expect(replay).not.toHaveBeenCalled();
+    expect(begin).not.toHaveBeenCalled();
+    expect(agents.get('agent-a')).toEqual(before);
+    expect(domain.getStore().listSnapshots(domain.domainId)).toEqual(snapshots);
+    expect(fs.readFileSync(path.join(original.forkRoot, 'util.mjs'), 'utf8')).toContain('function bar');
+    expect(fs.readFileSync(path.join(root, 'util.mjs'), 'utf8')).toContain('function foo');
+  });
+
+  it.each(['recheck', 'deterministic'] as const)('does not restore context after an applicable edit returns changed evidence (%s)', async (replayPolicy) => {
+    await prepare();
+    const result = await recoverAgentWorkspace(agents, supervisor, {
+      agentId: 'agent-a', recoveryId: 'edit-result', root, forkPath: path.join(temp, 'edit-result'), replayPolicy,
+      observations: (checkpoint) => ({
+        ...observations(checkpoint), replay: async (entry, target) => {
+          const output = execute(entry.call, target);
+          // The edit still applies, but its agent-visible references changed.
+          return hash(entry.kind === 'mutate' ? `${output}: references changed` : output);
+        },
+      }),
+    });
+    expect(result.status).toBe('restored');
+    if (result.status !== 'restored') return;
+    expect(result.rejections[0].replay).toMatchObject({ divergedAt: 1, reason: 'observation_changed' });
+    expect(logOf(agents.get('agent-a')!.checkpoint)).toHaveLength(1);
+    expect(agents.get('agent-a')).toMatchObject({ status: 'paused', stepsUsed: 4 });
+    // Rejected candidates already edited this file; the selected fork must be clean.
+    expect(fs.readFileSync(path.join(result.transaction.forkRoot, 'util.mjs'), 'utf8')).toContain('function foo');
+    expect(fs.readFileSync(path.join(result.transaction.forkRoot, 'caller.mjs'), 'utf8')).toContain('// B added');
+  });
+
   it('keeps context and workspace bound together after reopening the runtime', async () => {
     await prepare(); const result = await recover();
     expect(result.status).toBe('restored');

@@ -11,6 +11,7 @@ export interface AgentWorkspaceRecoveryOptions {
   forkPath: string;
   /** Opt in only when identical log prefixes on the same tree have identical behavior. */
   replayPolicy?: 'recheck' | 'deterministic';
+  /** Recovery needs a nonempty resultHash for every step, including mutations. */
   observations(checkpoint: AgentData): ObservationValidation;
 }
 
@@ -76,8 +77,10 @@ async function prepareCandidates(
   try {
     for (const saved of [...checkpoints].reverse()) {
       const observations = options.observations(saved.checkpoint);
-      if (observations.closedWorld !== true || observations.log.some((entry) => entry.kind === 'observe' && typeof entry.resultHash !== 'string')) {
-        throw new Error('Workspace recovery requires a closed observation log with result hashes');
+      // Restoring context requires evidence for everything the agent saw. An
+      // applicable edit can still return changed references or diagnostics.
+      if (observations.closedWorld !== true || observations.log.some((entry) => typeof entry.resultHash !== 'string' || entry.resultHash.length === 0)) {
+        throw new Error('Workspace recovery requires a closed observation log with nonempty result hashes for every step (including mutations)');
       }
       const originalLog = structuredClone(observations.log);
       const known = options.replayPolicy === 'deterministic' && knownFailures.find(({ prefix }) =>

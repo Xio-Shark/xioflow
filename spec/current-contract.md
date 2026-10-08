@@ -60,6 +60,9 @@ including a completed file side effect).
 - `workspaceVersion` can bind validation to a host-supplied revision at dispatch.
 - Shutdown closes admission before settlement. A non-cooperative callback can
   keep shutdown pending; an indeterminate process does not become a confirmed stop.
+- Workspace checkpoint recovery requires nonempty result hashes for every logged
+  step, including edits. Missing mutation evidence rejects rather than treating
+  an applicable edit as proof that its agent-visible result is unchanged.
 
 See [Agent runtime](agent-runtime.md) for API semantics, migration notes and tests.
 
