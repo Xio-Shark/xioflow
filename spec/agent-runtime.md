@@ -255,6 +255,17 @@ original error. Preparation receives an isolated copy of the impact entry.
 Each successful binding is independently journaled; failures do not undo earlier
 bindings or prevent later attempts. It does not stop/resume agents, commit
 transactions, deduplicate shared ancestors, or impose a causal scheduling order.
+`recoverAgentSharedCausalBatch(agents, changed, { prepare, bind })` uses the same
+frozen-plan binding loop after one shared branch repair preparation. Branch IDs
+must identify agents and source head sets must match the inspected checkpoints.
+The coordinator supplies mapped causal heads; the host rebuilds each context and
+materializes an independently owned open transaction. Active agents never share
+transaction ownership. Returning the shared repair transaction is rejected without
+calling its discard callback. Otherwise normal per-agent failure cleanup applies.
+The shared repair remains host-owned and is returned even if every binding fails;
+preparation errors propagate before any binding and must clean their own resources.
+No affected agents means no preparation. Publication and OCC remain separate;
+there is no atomic batch commit or automatic shared-resource reclamation.
 See [batch semantics and integration example](../docs/causal-recovery-batches.md).
 
 ## Task scopes

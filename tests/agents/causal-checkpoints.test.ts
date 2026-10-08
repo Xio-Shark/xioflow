@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, prepareWorkspaceBranchRepair } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -532,6 +532,112 @@ describe('agent checkpoint causal branches', () => {
     expect(runtime.planCausalRecovery([])).toEqual({ changed: [], affected: [], unaffected: ['a'], untracked: [] });
     expect(() => runtime.planCausalRecovery([999999])).toThrow('absent');
     expect(() => runtime.planCausalRecovery([NaN])).toThrow('absent');
+  });
+
+  it('shares recomputation while binding isolated contexts durably without spending budgets', async () => {
+    const source = node();
+    const derived = node([source.seq]);
+    open();
+    for (const [id, heads] of [['first', [derived.seq]], ['second', [source.seq]]] as const) {
+      runtime.create({ id, runId: 'run', input: null, checkpoint: 'old', maxSteps: 2, causalHeads: [...heads] });
+      runtime.pause(id);
+    }
+    const supervisor = new ProcessSupervisor(domain);
+    const usage = runtime.getRunUsage('run');
+    const executed: number[] = [];
+    const batch = await recoverAgentSharedCausalBatch(runtime, [source.seq], {
+      prepare: async (plan) => prepareWorkspaceBranchRepair(supervisor, {
+        txId: 'shared', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'shared'),
+        atSeq: Math.max(...plan.affected.map(({ checkpoint }) => checkpoint.seq)), changed: plan.changed,
+        branches: plan.affected.map(({ agentId, checkpoint }) => ({ id: agentId, heads: checkpoint.causalHeads! })),
+        validateReuse: async () => {}, execute: async (entry, tx) => {
+          executed.push(entry.seq);
+          fs.writeFileSync(path.join(tx.forkRoot, 'result'), 'recomputed');
+          return { actorId: entry.actorId, observation: { ...entry.observation, resultHash: 'new' } };
+        },
+      }),
+      bind: async ({ agentId }, repair) => {
+        const transaction = await supervisor.beginWorkspaceTransaction({ txId: `bound-${agentId}`,
+          runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, `bound-${agentId}`) });
+        fs.copyFileSync(path.join(repair.transaction.forkRoot, 'result'), path.join(transaction.forkRoot, 'result'));
+        repair.branches.length = 0; // Callback copies cannot corrupt later bindings.
+        return { checkpoint: fs.readFileSync(path.join(transaction.forkRoot, 'result'), 'utf8'), workspace: transaction };
+      },
+    });
+    expect(executed).toEqual([source.seq, derived.seq]);
+    expect(batch.outcomes.map(({ status }) => status)).toEqual(['repaired', 'repaired']);
+    expect(batch.repair!.branches).toHaveLength(2);
+    expect(runtime.getRunUsage('run')).toEqual(usage);
+    expect(runtime.get('first')!.workspace!.txId).toBe('bound-first');
+    expect(runtime.get('second')!.workspace!.txId).toBe('bound-second');
+    expect(runtime.planCausalRecovery([source.seq]).affected).toEqual([]);
+    const saved = runtime.checkpoints('second').at(-1);
+    runtime.close(); domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    open();
+    expect(runtime.checkpoints('second').at(-1)).toEqual(saved);
+    expect(fs.existsSync(path.join(temp, 'shared', 'result'))).toBe(true);
+  });
+
+  it('retains shared resources across failed, stale and successful context bindings', async () => {
+    const source = node();
+    open();
+    for (const id of ['bad', 'stale', 'good']) {
+      runtime.create({ id, runId: 'run', input: null, checkpoint: 'old', maxSteps: 2, causalHeads: [source.seq] });
+      runtime.pause(id);
+    }
+    const supervisor = new ProcessSupervisor(domain);
+    let discarded = 0;
+    const batch = await recoverAgentSharedCausalBatch(runtime, [source.seq], {
+      prepare: async (plan) => {
+        const repair = await prepareWorkspaceBranchRepair(supervisor, {
+          txId: 'shared', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'shared'),
+          atSeq: Math.max(...plan.affected.map(({ checkpoint }) => checkpoint.seq)), changed: plan.changed,
+          branches: plan.affected.map(({ agentId, checkpoint }) => ({ id: agentId, heads: checkpoint.causalHeads! })),
+          validateReuse: async () => {}, execute: async (entry) => ({ actorId: entry.actorId, observation: entry.observation }),
+        });
+        runtime.restoreCheckpoint('stale', runtime.checkpoints('stale')[0].seq);
+        plan.affected.length = 0;
+        return repair;
+      },
+      bind: async ({ agentId }) => ({ checkpoint: agentId === 'bad' ? NaN : 'new', workspace,
+        discard: async () => { discarded++; } }),
+    });
+    expect(batch.outcomes.map((o) => o.status === 'skipped' ? o.reason : o.status))
+      .toEqual(['failed', 'checkpoint_changed', 'repaired']);
+    expect(discarded).toBe(1);
+    expect(batch.plan.affected).toHaveLength(3);
+    expect(fs.existsSync(batch.repair!.transaction.forkRoot)).toBe(true);
+    expect(runtime.get('bad')!.checkpoint).toBe('old');
+  });
+
+  it('rejects mismatched repair mappings and prevents shared transaction ownership transfer', async () => {
+    const source = node();
+    open(); create([source.seq]); runtime.pause('a');
+    const supervisor = new ProcessSupervisor(domain);
+    let binds = 0;
+    let discarded = 0;
+    const repair = await prepareWorkspaceBranchRepair(supervisor, {
+      txId: 'shared', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'shared'),
+      atSeq: runtime.checkpoints('a').at(-1)!.seq, changed: [source.seq], branches: [{ id: 'a', heads: [source.seq] }],
+      validateReuse: async () => {}, execute: async (entry) => ({ actorId: entry.actorId, observation: entry.observation }),
+    });
+    const options = { prepare: async () => repair, bind: async () => {
+      binds++;
+      return { checkpoint: 'new', workspace: repair.transaction, discard: async () => { discarded++; } };
+    } };
+    const rejected = await recoverAgentSharedCausalBatch(runtime, [source.seq], options);
+    expect(rejected.outcomes[0]).toMatchObject({ status: 'failed', error: expect.any(Error) });
+    expect(discarded).toBe(0);
+    expect(binds).toBe(1);
+    repair.branches[0].sourceHeads = [];
+    const mismatched = await recoverAgentSharedCausalBatch(runtime, [source.seq], options);
+    expect(mismatched.outcomes[0]).toMatchObject({ status: 'failed' });
+    expect(binds).toBe(1);
+    expect(runtime.get('a')!.checkpoint).toBe('initial');
+    expect(await recoverAgentSharedCausalBatch(runtime, [], options)).toEqual({
+      plan: { changed: [], affected: [], unaffected: ['a'], untracked: [] }, outcomes: [],
+    });
   });
 
   it('repairs a batch with real causal recomputation and preserves independent agents and budgets', async () => {

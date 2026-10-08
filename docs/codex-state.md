@@ -25,18 +25,13 @@
 - prepare 拿影响条目副本；预算不回退；复用已有恢复独占与清理机制。
 - 批次非原子，失败继续，成功项不撤销；以逐项 causal_repaired journal 为准。
 - 不自动停止 / resume / OCC 提交；登记顺序不是拓扑顺序，共享祖先可能重复重算。
-- 批次汇总不持久化，崩溃后从 checkpoint 历史和重新规划恢复；旧事务由宿主管理。
 - forkAgentCheckpoint：从历史 TX_BEGUN 基线重放后创建新 agent；保留 Run 累计预算。
 - 入口 src/agents/checkpoint-fork.ts；要求 deterministic、完整 closedWorld 前缀及逐步哈希。
 - 历史源 fork 删除不影响重建；基线缺失直接失败；不调用 drain，宿主协调调度。
-- 分歧返回位置 / 原因 / 错误并清理 fork；不 prune 共享历史基线。
-- FORK_PREPARED 与实际 AGENT_STATE 间崩溃可能遗留事务，宿主核查回收。
 - compareAgentCheckpoints：跨 agent / 事务 / Run 对照历史上下文和因果分支。
 - context 是 JSON Pointer 差异；evidence 含共同 / 独有节点与结构分歧 roots。
 - compareAgentCheckpointFiles：重建历史基线并比较 Git 覆盖的实际文件 A/D/M/T。
 - 共享重建 src/agents/checkpoint-workspace.ts；不创建 agent，不增加 agent / step 预算。
-- 两侧须同原始工作区根，可跨事务 / 快照；支持子目录、二进制、符号链接。
-- 成功 / 分歧 / 异常均回收临时事务，不 prune 基线；清理失败抛 AggregateError。
 - 文档 docs/checkpoint-comparison.md；示例 pnpm build && node examples/checkpoint-debug/run.mjs。
 - 边界：无文本 patch / 空目录 / 时间戳 / 外部系统 diff；忽略文件遵循快照覆盖范围。
 - 边界：宿主保证依赖、操作前缀完整性、确定性和文件效果，哈希匹配不能证明这些声明。
@@ -51,9 +46,15 @@
 - 映射与替代关系同条 CAUSAL_REPAIR_PREPARED 持久化；不代表提交成功。
 - 任一步失败中止整体准备，回收 fork / 基线；成功后宿主统一 OCC / 回收。
 - 不合并互斥策略，不绑定 agent 上下文；跨 agent checkpoint 与文件提交非原子。
-- 下一步：连接共享修复结果与跨 agent 上下文绑定，设计共同事务所有权和部分失败恢复。
-- 后续：历史重放日志自动归档、仅观测失效的合并基准、真实模型与 token 计量。
+- 新增 recoverAgentSharedCausalBatch：一次共享重算后，逐项绑定独立事务与上下文。
+- 入口 src/agents/causal-recovery.ts；复用冻结计划、checkpoint 版本检查和独占恢复。
+- 分支 id / sourceHeads 与 checkpoint 对照，新 heads 自动绑定；回调参数给副本。
+- runtime 仍要求单事务单活跃 agent；宿主 bind 负责独立文件输出分发和上下文重建。
+- 共享 repair 始终由宿主持有，返回 batch.repair；部分失败不回收共享事务。
+- 拒绝直接绑定共享事务且不调用其 discard；其他逐项失败按独立资源 discard 处理。
+- 无影响时不准备；prepare 异常由宿主清理；成功项持久化并暂停，批次非原子。
+- 下一步：自动化共享输出分发、OCC 提交协调，并量化共享重算与复制成本。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免缓存和 dist 竞态。
-- 环境：node_modules 与 cc 已有，本轮无需安装依赖。
-- 本轮基线：577 通过、7 跳过；定向 18 通过；typecheck / build 通过。
-- 最终全量：581 通过、7 跳过（93.17 秒）；新增 4 项真实事务集成测试；diff 检查通过。
+- 本轮基线：578 通过、7 跳过、3 项僵尸进程恢复失败，测试身份缺 OS 启动时间。
+- 测试夹具现使用真实 OS 启动时间，避免墙钟 / btime 舍入差异误判 PGID 复用。
+- 验证：定向因果 36 通过；原失败 3 项通过；typecheck / build / diff 通过；全量 584 通过、7 跳过。
