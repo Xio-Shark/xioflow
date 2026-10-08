@@ -84,3 +84,7 @@ const newView = graph.view(repair.heads);
 ```
 
 视图是 journal 查询，不恢复文件或 agent 上下文。`repair.heads` 在准备成功时返回，只有提交成功后才能将其当作主工作区的当前分支。重启后可从对应 `CAUSAL_REPAIR_PREPARED` 事件的 `heads` 重建视图，并结合该事务的 `TX_COMMITTED` 判断提交状态；旧事件可能没有该字段。不同修复分支互不覆盖，不使用全局“最新替代节点”规则。未指定 heads 的旧调用也会返回源图末端节点替代后的 heads，便于后续切换到显式分支。
+
+## 可复现评测
+
+运行 `pnpm benchmark:causal` 比较相同文件扰动下的完整重跑、局部修复与不校验复用。详见 [指标口径和限制](causal-repair-benchmark.md)，包含变化检测和复用验证开销，不估算模型 token。

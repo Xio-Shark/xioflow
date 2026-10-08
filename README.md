@@ -11,6 +11,8 @@ A world-state and execution kernel for AI agents, evolving toward a causally ver
 
 The experimental `WorkspaceCausalGraph` persists tool-result provenance across agents and workspace transactions, traces dependencies, and plans which dependent steps need recomputation when evidence changes. It builds on existing snapshots, OCC and observation replay. See the [causal graph API and example](docs/causal-graph.md). The experimental [`prepareWorkspaceRepair`](docs/causal-repair.md) executes affected subgraphs in a fresh transaction, remaps causal dependencies, and returns branch heads for successive repairs. Explicit causal views select the current results and their ancestors. Hosts validate reusable evidence, provide tool adapters, and commit through OCC. The experimental [`speculateWorkspace`](docs/speculative-workspaces.md) runs strategies concurrently in forks of one snapshot, selects the first OCC-valid candidate in priority order, and reclaims the other forks.
 
+Run `pnpm benchmark:causal` for a reproducible real-file comparison of full reruns, causal repairs, and unchecked reuse. The [benchmark protocol](docs/causal-repair-benchmark.md) reports output correctness, actual tool calls, validation reads, and elapsed time; it does not estimate model tokens.
+
 For integration, start with the [current implementation contract](spec/current-contract.md).
 It separates implemented guarantees, experimental APIs and planned Rust/daemon work.
 

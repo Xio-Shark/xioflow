@@ -1,0 +1,23 @@
+# xioflow 交接摘要
+- 定位：AI agent 的因果可验证世界状态与执行操作系统；受监督执行是底座。
+- 分支：codex/evolve；复用 snapshot / fork / rollback、AgentRuntime、journal。
+- 已有：WorkspaceTransactions 文件读写集与观测重放 OCC；多策略隔离投机与单胜者提交。
+- 已有：WorkspaceCausalGraph 持久因果节点、上游查询、历史切片、失效闭包。
+- 已有：prepareWorkspaceRepair 拓扑重算失效节点，复用独立结果并记录替代关系。
+- 已有：view(heads) 显式选择分支，修复返回新 heads，支持连续多轮修复。
+- 本轮：新增 pnpm benchmark:causal，真实文件比较完整重跑 / 增量修复 / 不校验复用。
+- 基准：默认 3 轮、4 分支、1000 次哈希迭代；各策略使用相同内容与扰动，轮换运行顺序。
+- 指标：正确性、实际工具次数、变化检测读取、复用验证读取、端到端耗时与原始输出哈希。
+- 样本：重跑与修复均 3/3 正确；执行工具 12→3，但修复另需 4+6 次验证读取。
+- 样本耗时中位数：95.63→86.45 ms；仅固定确定性任务，不宣称稳定加速或模型收益。
+- 入口：docs/causal-repair-benchmark.md；原始样本 docs/benchmarks/causal-repair.sample.json。
+- 实现：src/testing/causal-repair-benchmark.ts；tests/workspace/causal-benchmark.test.ts。
+- 下一步：将投机候选 OCC 冲突接入因果子图修复，沿用显式 heads 隔离候选历史。
+- 后续：绑定 AgentRuntime checkpoint；用真实模型任务扩展基准并计量 token。
+- 边界：依赖与复用验证由宿主负责；prepared 不等于 committed；视图不恢复文件或上下文。
+- 边界：未提交候选输出不会自动物化；基准无并发写入；modelTokens 为 null。
+- 已知坑：全量测试期间不可并行 pnpm build，崩溃矩阵可能读到半构建 dist。
+- 已知坑：src 禁止同步子进程；基准使用异步 execFile；基线应在修改前完成或用独立 HEAD 副本。
+- 环境：已有 node_modules 与 cc，依赖未变化，无需 install；独立 HEAD 基线 523 通过、7 跳过。
+- 验证：typecheck、build、diff 检查通过；全量 529 通过、7 跳过（84.52 秒）。
+- 其他阅读入口：docs/VISION.md、docs/causal-repair.md、src/workspace/causal-repair.ts。
