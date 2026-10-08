@@ -2,8 +2,8 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, validateWorkspaceCausalBranches, prepareWorkspaceBranchRepair } from '../../src/index.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, validateWorkspaceCausalBranches, prepareWorkspaceBranchRepair, listWorkspaceCausalValidations, prepareWorkspaceCausalRefresh } from '../../src/index.js';
 import type { CausalStep } from '../../src/index.js';
 
 describe('workspace causal validation', () => {
@@ -151,4 +151,135 @@ describe('workspace causal validation', () => {
     await expect(validateWorkspaceCausalBranches(supervisor, { ...settings, branches: [...settings.branches, ...settings.branches] })).rejects.toThrow('unique');
     expect(domain.getStore().getJournalEvents(domain.domainId)).toHaveLength(count);
   });
+
+  it('persists baseline identity and frozen branch reports across pruning and reopening', async () => {
+    const input = graph.record(step('a'));
+    const settings = options([{ id: 'one', heads: [input.seq] }]);
+    const result = await validateWorkspaceCausalBranches(supervisor, {
+      ...settings, replay: async (_entry, dir) => {
+        settings.branches[0].heads.length = 0;
+        fs.writeFileSync(path.join(root, 'input.txt'), 'later');
+        return fs.readFileSync(path.join(dir, 'input.txt'), 'utf8');
+      },
+    });
+    expect(result.baseline.treeFingerprint).toMatch(/^[a-f0-9]+$/);
+    expect(result.baseline.coverage).toBe('worktree_non_ignored');
+    expect(domain.getStore().getSnapshot(result.baseline.id)).toBeNull();
+    expect(result.sourceBranches).toEqual([{ id: 'one', heads: [input.seq] }]);
+    expect(result.branches[0].status).toBe('matched');
+    domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal');
+    expect(listWorkspaceCausalValidations(domain)).toEqual([result]);
+    expect(listWorkspaceCausalValidations(domain, { atSeq: result.seq - 1 })).toEqual([]);
+    expect(listWorkspaceCausalValidations(domain, { atSeq: result.seq, runId: 'run' })).toEqual([result]);
+    expect(listWorkspaceCausalValidations(domain, { runId: 'other' })).toEqual([]);
+    expect(() => listWorkspaceCausalValidations(domain, { atSeq: -1 })).toThrow('sequence');
+    const queried = listWorkspaceCausalValidations(domain)[0];
+    queried.sourceBranches[0].heads.length = 0;
+    expect(listWorkspaceCausalValidations(domain)[0]).toEqual(result);
+  });
+
+  it('automatically prepares shared changes once and links the repair to its durable probe', async () => {
+    const input = graph.record(step('a'));
+    const output = (txId: string) => graph.record({ ...step(txId, [input.seq]), observation: {
+      kind: 'mutate', call: { tool: 'write', args: { path: `${txId}.txt` } }, resultHash: 'old',
+    } });
+    const left = output('a');
+    const right = output('b');
+    fs.writeFileSync(path.join(root, 'input.txt'), 'new');
+    const executed: number[] = [];
+    const result = await prepareWorkspaceCausalRefresh(supervisor, {
+      ...options([{ id: 'left', heads: [left.seq] }, { id: 'right', heads: [right.seq] }]),
+      repair: { txId: 'refresh', forkPath: path.join(temp, 'refresh'),
+        validateReuse: async (_tx, unaffected) => { expect(unaffected).toEqual([]); },
+        execute: async (source, tx, dependencies) => {
+          executed.push(source.seq);
+          const value = fs.readFileSync(path.join(tx.forkRoot, 'input.txt'), 'utf8');
+          if (source.observation.kind === 'mutate') {
+            expect(dependencies[0].observation.resultHash).toBe('new');
+            fs.writeFileSync(path.join(tx.forkRoot, String(source.observation.call.args.path)), value);
+          }
+          return { actorId: source.actorId, observation: { ...source.observation, resultHash: value } };
+        },
+      },
+    });
+    expect(result.status).toBe('prepared');
+    if (result.status !== 'prepared') throw new Error('Expected repair');
+    expect(executed).toEqual([input.seq, left.seq, right.seq]);
+    expect(fs.existsSync(path.join(root, 'a.txt'))).toBe(false);
+    expect(result.repair.transaction.baseSnapshotId).not.toBe(result.validation.baseline.id);
+    const link = domain.getStore().getJournalEvents(domain.domainId)
+      .find((event) => event.type === 'CAUSAL_VALIDATION_REPAIR_PREPARED')!;
+    expect(link.payload).toEqual({ version: 1, validationSeq: result.validation.seq, txId: 'refresh' });
+    expect((await supervisor.commitWorkspaceTransaction('refresh')).status).toBe('committed');
+    expect(fs.readFileSync(path.join(root, 'a.txt'), 'utf8')).toBe('new');
+    expect(fs.readFileSync(path.join(root, 'b.txt'), 'utf8')).toBe('new');
+  });
+
+  it.each(['unchanged', 'failed'] as const)('does not allocate a repair for %s probes', async (status) => {
+    const input = graph.record(step('a'));
+    const independent = graph.record(step('b'));
+    const execute = vi.fn();
+    const validateReuse = vi.fn();
+    let calls = 0;
+    const result = await prepareWorkspaceCausalRefresh(supervisor, {
+      ...options([{ id: 'left', heads: [input.seq] }, { id: 'right', heads: [independent.seq] }]),
+      replay: async () => {
+        if (status === 'unchanged') return 'old';
+        if (++calls === 1) return 'new';
+        throw new Error('offline');
+      },
+      repair: { txId: 'refresh', forkPath: path.join(temp, 'refresh'), execute, validateReuse },
+    });
+    expect(result.status).toBe(status);
+    expect(execute).not.toHaveBeenCalled();
+    expect(validateReuse).not.toHaveBeenCalled();
+    expect(listWorkspaceCausalValidations(domain)).toEqual([result.validation]);
+    expect(domain.getStore().getJournalEvents(domain.domainId)
+      .some((event) => event.payload.txId === 'refresh')).toBe(false);
+  });
+
+  it('preserves the probe and reclaims failed repair resources', async () => {
+    const input = graph.record(step('a'));
+    await expect(prepareWorkspaceCausalRefresh(supervisor, {
+      ...options([{ id: 'one', heads: [input.seq] }]), replay: async () => 'new',
+      repair: { txId: 'refresh', forkPath: path.join(temp, 'refresh'),
+        validateReuse: async () => { throw new Error('missing reusable output'); }, execute: vi.fn() },
+    })).rejects.toThrow('missing reusable output');
+    expect(listWorkspaceCausalValidations(domain)[0].changed).toEqual([input.seq]);
+    expect(fs.existsSync(path.join(temp, 'refresh'))).toBe(false);
+    const events = domain.getStore().getJournalEvents(domain.domainId);
+    expect(events.some((event) => event.type === 'TX_ABORTED' && event.payload.txId === 'refresh')).toBe(true);
+    expect(events.some((event) => event.type === 'CAUSAL_VALIDATION_REPAIR_PREPARED')).toBe(false);
+  });
+
+
+  it('aborts a prepared repair if its durable validation link cannot be recorded', async () => {
+    const input = graph.record(step('a'));
+    const store = domain.getStore();
+    const record = store.recordJournalEvent.bind(store);
+    const spy = vi.spyOn(store, 'recordJournalEvent').mockImplementation((event) => {
+      if (event.type === 'CAUSAL_VALIDATION_REPAIR_PREPARED') throw new Error('journal unavailable');
+      return record(event);
+    });
+    try {
+      await expect(prepareWorkspaceCausalRefresh(supervisor, {
+        ...options([{ id: 'one', heads: [input.seq] }]), replay: async () => 'new',
+        repair: { txId: 'refresh', forkPath: path.join(temp, 'refresh'),
+          validateReuse: async () => {},
+          execute: async (source) => ({ actorId: source.actorId,
+            observation: { ...source.observation, resultHash: 'new' } }),
+        },
+      })).rejects.toThrow('journal unavailable');
+      expect(listWorkspaceCausalValidations(domain)).toHaveLength(1);
+      const events = store.getJournalEvents(domain.domainId);
+      const begun = events.find((event) => event.type === 'TX_BEGUN' && event.payload.txId === 'refresh')!;
+      expect(store.getSnapshot(begun.payload.baseSnapshotId as string)).toBeNull();
+      expect(events.some((event) => event.type === 'TX_ABORTED' && event.payload.txId === 'refresh')).toBe(true);
+      expect(fs.existsSync(path.join(temp, 'refresh'))).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
 });

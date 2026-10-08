@@ -218,3 +218,13 @@
 - 补充 API 使用文档和入口链接；交接摘要 59 行；先独立提交遗留暂存的共享修复基准。
 - 验证：基线 590 通过 / 7 跳过；最终 typecheck 通过，595 测试通过 / 7 跳过（98.49 秒）。
 - 下一步：持久化验证报告与基线身份，串联自动探测和局部修复；推进通用输出分发。
+
+## 2026-10-08 — 持久验证证据驱动自动共享修复
+- CAUSAL_VALIDATION_COMPLETED 保存源分支、基线 SnapshotRef 元数据、探测状态及去重种子。
+- listWorkspaceCausalValidations 支持 domain 重开、Run 过滤与报告序号历史切片，按冻结源图重建计划。
+- prepareWorkspaceCausalRefresh 自动探测并准备一次共享修复；任一 failed 或全部 unchanged 不分配修复事务。
+- 持久关联 validationSeq / repair txId，关联失败回收修复；成功仍由宿主 OCC 提交与绑定 checkpoint。
+- 新增 6 项测试，覆盖重开 / 快照回收、历史查询、真实文件提交、失败探测及修复 / 日志故障清理。
+- 文档明确修复采用新基线、报告不是 OCC 证书，以及崩溃可能留下未关联准备记录；交接摘要 59 行。
+- 验证：基线 595 通过 / 7 跳过；最终 pnpm typecheck 通过，pnpm test 601 通过 / 7 跳过（100.40 秒）。
+- 下一步：通用共享输出分发与提交协调，接入真实模型基准。

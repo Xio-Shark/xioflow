@@ -17,18 +17,14 @@
 - causal_repaired 原子保存上下文 / heads / workspace；成功后 paused。
 - recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。
 - 入口 src/agents/causal-recovery.ts；文档 docs/causal-recovery-batches.md。
-- 不自动停止 / resume / OCC 提交；登记顺序不是拓扑顺序。
 - prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。
 - branches 为唯一 id / heads；联合视图拓扑执行，返回各分支 sourceHeads / 新 heads。
 - 复用证据统一验证；独立 / 空分支保留，排除未选兄弟；支持连续修复。
-- 映射与替代关系同条 CAUSAL_REPAIR_PREPARED 持久化；不代表提交成功。
 - 准备失败回收 fork / 基线；成功后宿主统一 OCC / 回收；不合并互斥策略。
 - recoverAgentSharedCausalBatch：一次共享重算，逐项绑定独立事务与上下文。
 - 校验分支 id / sourceHeads 与 checkpoint；新 heads 自动绑定，回调收到副本。
 - 单事务单活跃 agent；宿主 bind 负责独立输出分发和上下文重建。
-- 共享 repair 始终由宿主持有并返回；部分失败不回收共享事务。
 - 拒绝直接绑定共享事务且不调用其 discard；其他失败回收独立资源。
-- 无影响时不准备；prepare 异常由宿主清理；跨 agent 文件 / checkpoint 非原子。
 - forkAgentCheckpoint：历史 TX_BEGUN 基线重放，创建同 Run 新 agent，保留累计预算。
 - 要求 deterministic、完整 closedWorld 前缀及逐步哈希；基线缺失失败。
 - compareAgentCheckpoints：跨 agent / 事务 / Run 对比上下文 JSON Pointer 与因果分支。
@@ -46,14 +42,18 @@
 - 公共 read→derive→N 个 write，扰动公共输入；全部失效，无独立节点复用。
 - 共享分发各分支输出到独立事务，逐份验证公共输入，再逐项 OCC 提交。
 - 计入实际工具、检测、分发读写 / 字节、输入再验证、事务数与端到端耗时。
-- 3×4 实测：两种修复均 3/3 正确；工具 12→6；复制 264 字节，事务 4→5。
-- 轻量任务中位数 358.16→384.95 ms；不声称速度或模型 token 节省。
-- modelTokens 均 null；共享基准为固定文件适配器，不覆盖 AgentRuntime 调度或并发扰动。
+- 共享基准工具 12→6，耗时略升；modelTokens 均 null；不覆盖模型、调度或并发扰动。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。
 - validateWorkspaceCausalBranches：同一当前基线，逐分支独立 fork 重放，自动发现因果修复种子。
 - 返回 matched / changed / failed、首个差异 seq、去重 changed、联合 plan 与实际 replayedSteps。
 - 工具异常不进入 changed；每分支首差即停；验证 fork / 基线回收，不改 checkpoint / 不提交。
 - requires closedWorld / deterministic；依赖完整性仍由宿主保证；unaffected 不等于已验证复用。
-- 文档 docs/causal-validation.md；验证报告暂不持久化；发布仍需复用验证及 OCC。
-- 下一步：持久化验证报告与基线身份，接入自动探测→局部修复；继续通用输出分发。
-- 最新验证：pnpm typecheck 通过；pnpm test 595 通过 / 7 跳过（98.49 秒）。
+- CAUSAL_VALIDATION_COMPLETED 持久化报告、源分支 heads、基线 SnapshotRef 元数据。
+- listWorkspaceCausalValidations(domain, { runId?, atSeq? }) 支持重开与报告历史切片。
+- 报告 seq 与源图 atSeq 不同；快照已回收，基线身份不承诺可重新物化。
+- prepareWorkspaceCausalRefresh：自动探测→共享修复准备；failed / unchanged 不分配修复。
+- 任一探测失败阻断整批修复；prepared 返回开放事务，由宿主 OCC / 绑定 / 回收。
+- CAUSAL_VALIDATION_REPAIR_PREPARED 关联 validationSeq / txId；关联失败回收修复。
+- 修复使用新基线；validateReuse 必需；崩溃可能留下尚未关联的准备记录。
+- 文档 docs/causal-validation.md；下一步：通用输出分发与提交协调、真实模型基准。
+- 最新验证：pnpm typecheck 通过；pnpm test 601 通过 / 7 跳过（100.40 秒）。
