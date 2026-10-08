@@ -80,6 +80,64 @@ promises to have settled. The
 domain's existing owner/epoch mechanism protects persistent writes across host
 restart. The runtime does not introduce a daemon or a cross-host scheduler.
 
+## Causal checkpoints
+
+`create` and `AgentStepResult` accept optional `causalHeads: number[] | null`.
+The heads select the observations and tool results used to build that checkpoint.
+Each head must already be a `WorkspaceCausalGraph` node in the same domain;
+duplicates are removed. References can cross actors and transactions, so a
+checkpoint can depend on another agent's evidence. The host declares all inputs.
+
+The runtime saves heads alongside the checkpoint in the same `AGENT_STATE`
+event. `checkpoints(id)` returns each boundary's `causalHeads` and historical
+`workspace` binding. `checkpointCausalView(id, seq)` resolves only that branch
+and its ancestors at the checkpoint's journal sequence. Nodes expose transaction,
+Run and base snapshot identities; later nodes and sibling branches are excluded.
+An unknown checkpoint throws. The query does not execute tools or restore files.
+
+Omitted or null heads mean **untracked**, and the view returns `undefined`.
+An explicit `[]` selects an empty branch. A new step that omits heads clears the
+previous provenance: adapters must explicitly return the complete selected heads
+when retaining evidence. Legacy journals remain untracked. An invalid reference
+on creation rejects the request; an invalid step result interrupts the agent,
+retaining the last completed checkpoint and the spent step budget.
+
+```ts
+const graph = new WorkspaceCausalGraph(domain);
+const agents = new AgentRuntime(domain, {
+  maxConcurrentAgents: 1,
+  step: async (agent) => {
+    const result = await readInput(agent.workspace!.forkRoot);
+    const evidence = graph.record({
+      txId: agent.workspace!.txId, actorId: agent.id,
+      dependsOn: agent.causalHeads ?? [],
+      observation: {
+        kind: 'observe', call: { tool: 'readInput', args: {} },
+        resultHash: hashResult(result),
+      },
+    });
+    return { status: 'completed', checkpoint: { result }, causalHeads: [evidence.seq] };
+  },
+});
+// readInput/hashResult are host adapters; create the agent on an open transaction.
+// After drain(), inspect the saved context and its causal evidence:
+const saved = agents.checkpoints('agent-id').at(-1)!;
+const branch = agents.checkpointCausalView('agent-id', saved.seq);
+const plan = graph.planRecomputation([changedNodeSeq], saved.seq, branch!.heads);
+```
+
+`findValidCheckpoint` passes each candidate's checkpoint **and its own heads**
+to the validator, against the agent's current workspace. `restoreCheckpoint`
+and successful `recoverCheckpoint` restore the selected heads with the context;
+an explicitly supplied reconstructed workspace is bound in the same event.
+Without a replacement workspace, the current binding is retained. Restoring a
+restored checkpoint preserves these semantics across domain reopen.
+
+Heads describe the context's provenance, not a claim that its transactions
+committed or that observations remain valid on a reconstructed world. A stored
+fork path may no longer exist. Snapshot retention, reconstruction, current-world
+validation and complete dependency declarations remain the host's responsibility.
+
 ## Task scopes
 
 `parentId` defines a structured task tree within a Run. Separate roots in the same

@@ -1,4 +1,5 @@
 import type { ExecutionDomain } from '../domain.js';
+import { WorkspaceCausalGraph, type CausalView } from '../workspace/causal-graph.js';
 import { isAgentCheckpoint, projectAgentEvent, readAgentCheckpoint } from './journal.js';
 import { AgentCommandGroup, type AgentCommandOptions, type AgentCommandResult, type AgentExecution } from './execution.js';
 import { ProcessSupervisor } from '../supervisor/supervisor.js';
@@ -16,6 +17,10 @@ export interface AgentCheckpoint {
   seq: number;
   checkpoint: AgentData;
   stepsUsed: number;
+  /** Historical workspace binding; does not imply its files still exist. */
+  workspace?: AgentWorkspace | null;
+  /** Explicit evidence branch, or no provenance claim. */
+  causalHeads?: number[] | null;
 }
 
 export interface AgentState {
@@ -25,6 +30,8 @@ export interface AgentState {
   input: AgentData;
   checkpoint: AgentData;
   workspace: AgentWorkspace | null;
+  /** Evidence used to construct this checkpoint; null/absent means untracked. */
+  causalHeads?: number[] | null;
   status: AgentStatus;
   maxSteps: number;
   stepsUsed: number;
@@ -38,6 +45,8 @@ export interface AgentState {
 export interface AgentStepResult {
   status: 'ready' | 'completed';
   checkpoint: AgentData;
+  /** Omission clears provenance for the new checkpoint; [] declares an empty branch. */
+  causalHeads?: number[] | null;
 }
 
 export interface AgentRuntimeOptions {
@@ -109,7 +118,7 @@ export class AgentRuntime {
     owners.add(domain);
   }
 
-  create(input: { id: string; runId: string; parentId?: string; input: AgentData; checkpoint: AgentData; workspace?: AgentWorkspace; maxSteps: number }): AgentState {
+  create(input: { id: string; runId: string; parentId?: string; input: AgentData; checkpoint: AgentData; workspace?: AgentWorkspace; causalHeads?: number[] | null; maxSteps: number }): AgentState {
     this.assertAccepting();
     if (!input.id || this.get(input.id)) throw new Error(`Agent id is empty or already exists: "${input.id}"`);
     if (!Number.isSafeInteger(input.maxSteps) || input.maxSteps < 1) throw new Error('maxSteps must be a positive safe integer');
@@ -121,11 +130,12 @@ export class AgentRuntime {
       this.assertScopeOpen(parent);
       if (parent.status === 'waiting') throw new Error('Parent agent is already joining its children');
     }
+    const causalHeads = this.normalizeCausalHeads(input.causalHeads);
     const usage = this.ensureRunBudget(input.runId);
     if (usage.agentsCreated >= usage.budget.maxAgents) throw new Error('Run agent budget exhausted');
     return this.record({
       id: input.id, runId: input.runId, parentId: input.parentId ?? null,
-      input: data(input.input), checkpoint: data(input.checkpoint), status: 'ready',
+      input: data(input.input), checkpoint: data(input.checkpoint), causalHeads, status: 'ready',
       workspace: input.workspace ? { txId: input.workspace.txId, forkRoot: input.workspace.forkRoot } : null,
       maxSteps: input.maxSteps, stepsUsed: 0, pauseRequested: false, reason: null, error: null,
     }, 'created');
@@ -212,9 +222,24 @@ export class AgentRuntime {
     for (const event of this.domain.getStore().getJournalEvents(this.domain.domainId)) {
       if (event.type !== 'AGENT_STATE' || (event.payload.state as AgentState).id !== id) continue;
       state = projectAgentEvent(event, state, (seq, agentId) => this.readCheckpoint(seq, agentId));
-      if (isAgentCheckpoint(event.payload.transition)) checkpoints.push({ seq: event.seq, checkpoint: state.checkpoint, stepsUsed: state.stepsUsed });
+      if (isAgentCheckpoint(event.payload.transition)) checkpoints.push({ seq: event.seq, checkpoint: state.checkpoint, stepsUsed: state.stepsUsed,
+        workspace: state.workspace, causalHeads: state.causalHeads ?? null });
     }
-    return checkpoints;
+    return structuredClone(checkpoints);
+  }
+
+  /** Query the evidence branch at checkpoint time, excluding later/sibling work. */
+  checkpointCausalView(id: string, seq: number): CausalView | undefined {
+    const saved = this.checkpoints(id).find((checkpoint) => checkpoint.seq === seq);
+    if (!saved) throw new Error(`No checkpoint ${seq} for agent "${id}"`);
+    if (saved.causalHeads == null) return undefined;
+    return new WorkspaceCausalGraph(this.domain).view(saved.causalHeads, saved.seq);
+  }
+
+  private normalizeCausalHeads(heads: number[] | null | undefined): number[] | null {
+    if (heads == null) return null;
+    if (!Array.isArray(heads)) throw new Error('Agent causal heads must be an array');
+    return new WorkspaceCausalGraph(this.domain).view(heads).heads;
   }
 
   /** Select by recorded evidence, not by checkpoint age. Caller reconstructs before restore. */
@@ -228,7 +253,8 @@ export class AgentRuntime {
     const selection = Promise.resolve().then(async () => {
       for (const saved of checkpoints) {
         if (this.stopping) return undefined;
-        const verdict = await validate({ ...structuredClone(state), checkpoint: structuredClone(saved.checkpoint) }, new AbortController().signal);
+        const verdict = await validate({ ...structuredClone(state), checkpoint: structuredClone(saved.checkpoint),
+          causalHeads: structuredClone(saved.causalHeads ?? null) }, new AbortController().signal);
         if (!['valid', 'stale', 'unknown'].includes(verdict)) throw new Error('Invalid agent evidence verdict');
         if (verdict === 'valid') return saved;
       }
@@ -303,7 +329,7 @@ export class AgentRuntime {
     this.assertRun(state.runId);
     if (workspace) this.assertWorkspace(workspace, state.runId, state.id);
     return this.record({
-      ...state, checkpoint: saved.checkpoint,
+      ...state, checkpoint: saved.checkpoint, causalHeads: saved.causalHeads ?? null,
       workspace: workspace ? { txId: workspace.txId, forkRoot: workspace.forkRoot } : state.workspace,
       status: 'paused', pauseRequested: false, reason: 'restored', error: null,
     }, 'restored', seq);
@@ -461,7 +487,8 @@ export class AgentRuntime {
       if (uniqueFailures.length > 1) throw new AggregateError(uniqueFailures, `Agent step and commands failed: ${uniqueFailures.map(String).join('; ')}`);
       result = returned!;
       if (!['ready', 'completed'].includes(result.status)) throw new Error('Invalid agent step status');
-      result = { status: result.status, checkpoint: data(result.checkpoint) };
+      result = { status: result.status, checkpoint: data(result.checkpoint),
+        causalHeads: this.normalizeCausalHeads(result.causalHeads) };
     } catch (error) {
       this.record({ ...this.require(id), status: 'interrupted', pauseRequested: false,
         reason: signal.aborted ? 'interrupt_requested' : 'step_failed', error: String(error),
@@ -472,7 +499,7 @@ export class AgentRuntime {
     state = this.require(id);
     const pause = result.status !== 'completed' && (state.pauseRequested || state.stepsUsed >= state.maxSteps);
     this.record({
-      ...state, checkpoint: result.checkpoint, status: pause ? 'paused' : result.status === 'completed' && this.children(id).length > 0 ? 'waiting' : result.status, pauseRequested: false,
+      ...state, checkpoint: result.checkpoint, causalHeads: result.causalHeads, status: pause ? 'paused' : result.status === 'completed' && this.children(id).length > 0 ? 'waiting' : result.status, pauseRequested: false,
       reason: pause ? (state.pauseRequested ? 'requested' : 'budget_exhausted') : null,
     }, 'step_completed');
   }

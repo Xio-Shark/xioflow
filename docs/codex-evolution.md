@@ -90,3 +90,13 @@
 - 环境与基线：依赖未变，无需 install；首次基线因缺 cc 导致 3 套件无法启动，安装 gcc / libc6-dev 后独立 HEAD 副本 529 通过、7 跳过（90.21 秒）。
 - 验证：`pnpm typecheck`、`pnpm build`、`git diff --check` 通过；`pnpm test` 534 通过、7 跳过（96.11 秒）。
 - 边界与下一轮：变化种子、完整依赖和复用有效性由宿主负责，不自动恢复上下文或合并多个胜者；下一步绑定 AgentRuntime checkpoint 与因果 heads，再扩展投机修复基准。
+
+## 2026-10-08 — AgentRuntime 上下文与因果分支绑定
+- create / step result 新增 causalHeads，与 checkpoint 在同一 AGENT_STATE 事件持久化；验证同 domain 已有节点并去重，允许跨 actor / 事务依赖。
+- checkpoints 返回历史 workspace / heads；checkpointCausalView 按保存时序查询所选分支与祖先，排除后续节点和兄弟分支。
+- findValidCheckpoint 使用候选自己的 heads；restoreCheckpoint / recoverCheckpoint 同步恢复上下文与 heads，保留工作区重建契约及已消耗预算。
+- 未声明 / null 表示未跟踪，[] 表示空分支；新步骤不提供 heads 会清除旧关联；旧 journal 兼容，非法步骤引用保留旧 checkpoint 并中断。
+- 新增 5 项集成测试：历史分支及重开 domain、候选证据校验、空与缺失语义、异步恢复失败/成功、非法引用；同步 README、VISION 和运行时契约示例。
+- 环境与基线：已有依赖和 cc，无需 install；基线 534 通过、7 跳过（88.77 秒）。
+- 验证：pnpm typecheck、pnpm build、git diff --check 通过；全量 539 通过、7 跳过（87.47 秒）。
+- 边界与下一轮：历史绑定不恢复文件或证明提交/当前有效性；下一步按 checkpoint heads 查询受失效影响的 agent，接通因果修复与上下文重建。
