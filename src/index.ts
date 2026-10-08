@@ -39,4 +39,5 @@ export { KernelMcpServer, SUPPORTED_PROTOCOL_VERSIONS } from './mcp/server.js';
 export type { KernelMcpServerOptions } from './mcp/server.js';
 export * from './workspace/causal-graph.js';
 export * from './workspace/causal-repair.js';
+export * from './workspace/causal-validation.js';
 export * from './workspace/speculation.js';

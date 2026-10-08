@@ -49,6 +49,11 @@
 - 3×4 实测：两种修复均 3/3 正确；工具 12→6；复制 264 字节，事务 4→5。
 - 轻量任务中位数 358.16→384.95 ms；不声称速度或模型 token 节省。
 - modelTokens 均 null；共享基准为固定文件适配器，不覆盖 AgentRuntime 调度或并发扰动。
-- 下一步：通用共享输出分发与 OCC 证据迁移，优先降低额外事务 / 复制成本。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。
-- 新环境需 C 编译器；本轮基线缺 cc 导致 3 文件构建失败，已安装 build-essential。
+- validateWorkspaceCausalBranches：同一当前基线，逐分支独立 fork 重放，自动发现因果修复种子。
+- 返回 matched / changed / failed、首个差异 seq、去重 changed、联合 plan 与实际 replayedSteps。
+- 工具异常不进入 changed；每分支首差即停；验证 fork / 基线回收，不改 checkpoint / 不提交。
+- requires closedWorld / deterministic；依赖完整性仍由宿主保证；unaffected 不等于已验证复用。
+- 文档 docs/causal-validation.md；验证报告暂不持久化；发布仍需复用验证及 OCC。
+- 下一步：持久化验证报告与基线身份，接入自动探测→局部修复；继续通用输出分发。
+- 最新验证：pnpm typecheck 通过；pnpm test 595 通过 / 7 跳过（98.49 秒）。
