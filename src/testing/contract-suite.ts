@@ -470,7 +470,6 @@ export function defineContractTestSuite(
       const stopRes = await supervisor.cancelOperation('op-c9-group', 1500);
 
       expect(stopRes.stopped).toBe('confirmed_stopped');
-      expect(domain.isResourceLocked('res:c9-group')).toBe(false);
 
       // 核心真实断言：整组 kill(-pgid) 广播后，同组孙进程必须确定性死亡，绝不泄漏为 PID 1 孤儿！
       let grandchildAliveAfter = true;
@@ -483,7 +482,9 @@ export function defineContractTestSuite(
       }
       expect(grandchildAliveAfter).toBe(false);
 
+      // Stop confirmation can precede output settlement and the result commit.
       await executePromise;
+      expect(domain.isResourceLocked('res:c9-group')).toBe(false);
     });
 
     it('契约 10: 逃逸后代诚实上报：停止结论与事实一致，无法确认时如实标记 cannot_determine', async () => {

@@ -611,6 +611,9 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
 
   it('5.16 读集归一（utimes）会推进被忽略文件的 ctime：清单不把它们报成已修改，但也不再给 complete', async () => {
     const { runId, cap, repoDir } = await makeIgnoredRepo('man-atime');
+    // Isolate ctime changes: utimes' floating-point seconds can round a fresh
+    // nanosecond mtime across the manifest's one-microsecond tolerance.
+    for (const name of ['.env', 'build/out.js']) fs.utimesSync(path.join(repoDir, name), 1_700_000_000, 1_700_000_000);
     await supervisor.captureSnapshot({ runId, opId: 'snap-man-atime', capabilityId: cap.id, trackIgnored: 'manifest' });
     normalizeAccessTimes(repoDir);
     const rollback = await supervisor.rollback({ runId, opId: 'rb-man-atime', snapshotId: 'snap-man-atime', capabilityId: cap.id });
