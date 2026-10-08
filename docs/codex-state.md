@@ -37,16 +37,24 @@
 - 因果基准 3×4：完整 / 局部均 3/3 正确，实际工具 12→3，另计验证读取。
 - 合并基准 3×4：完整 / 局部均 3/3 正确，总工具 25→16、恢复 12→3。
 - 合并局部另有 4 检测读 + 6 校验读 + 3 复制写；modelTokens null，不声称总操作节省。
-- 本轮新增 compareAgentCheckpoints：跨 agent / 事务 / Run 的历史上下文与因果分支对照。
-- 入口 src/agents/checkpoint-diff.ts；契约与对照示例 docs/checkpoint-comparison.md。
-- context 返回 JSON Pointer 字段差异；对象递归、数组整体比较，区分缺失与 null。
-- evidence 返回 shared / leftOnly / rightOnly 完整节点、双方 heads 与结构分歧 roots。
-- 两侧各用自身 checkpoint 序号；节点按 journal 身份比较，相同哈希不合并。
-- 未跟踪 heads 返回 untracked，[] 可比较；结果副本隔离，不写 journal / 不执行工具。
-- 节点 writes 仅为声明的写入来源；尚不提供真实文件 diff 或上下文字段到节点的因果映射。
-- 下一步：复用历史分叉重放，补充两个 checkpoint 的实际文件差异与可运行对照调试示例。
-- 后续：跨 agent 恢复编排、仅观测失效的合并基准、真实模型与 token 计量。
+- compareAgentCheckpoints：跨 agent / 事务 / Run 的历史上下文与因果分支对照。
+- context 为 JSON Pointer 字段差异；evidence 为共同 / 独有完整节点与结构分歧 roots。
+- 双方各用自身历史序号，按 journal 节点身份比较；未跟踪返回 untracked，[] 可比较。
+- 本轮新增 compareAgentCheckpointFiles：历史基线重放后比较实际 Git 覆盖文件。
+- 入口 src/agents/checkpoint-files.ts；共享重建逻辑 src/agents/checkpoint-workspace.ts。
+- 复用原 forkAgentCheckpoint 的确定性 / closedWorld / 逐步哈希校验，不创建新 agent。
+- 返回 comparison 上下文 / 因果对照、files 的 A/D/M/T 相对路径和双方 replayedSteps。
+- 两侧须同原始工作区根，可跨事务 / 快照；子目录仅比较根内路径，支持二进制 / 符号链接。
+- 首次分歧返回 side 和 replay；成功 / 分歧 / 异常回收已创建事务，不 prune 历史基线。
+- 清理失败抛 AggregateError；崩溃可能遗留临时事务，宿主按唯一 txId 和 journal 回收。
+- 不增加 agent / step 预算，但执行宿主工具；沿用事务的活跃 Run 要求。
+- 边界：无文本 patch / 空目录 / 时间戳 / 外部系统 diff；新忽略文件遵循快照覆盖范围。
+- 边界：宿主保证前缀真实完整及文件效果，匹配工具返回哈希不构成对这些声明的证明。
+- 文档 docs/checkpoint-comparison.md；可运行示例 examples/checkpoint-debug/run.mjs。
+- 示例命令 pnpm build && node examples/checkpoint-debug/run.mjs，已验证历史 diff 与主目录隔离。
+- 下一步：跨 agent 失效恢复编排，接通 planCausalRecovery 与 recoverCausalCheckpoint 的批次结果。
+- 后续：历史重放日志自动归档、仅观测失效的合并基准、真实模型与 token 计量。
 - 已知坑：全量测试期间不要改源码/测试或并行 build，避免缓存旧源码、新测试或半构建 dist。
-- 环境：已有 node_modules 与 cc，无需 install。
-- 本轮基线：pnpm test 563 通过、7 跳过；定向 24 通过（新增 5 项并扩展重放集成测试）。
-- 最终验证：pnpm typecheck、pnpm build、git diff --check 通过；pnpm test 568 通过、7 跳过（89.89 秒）。
+- 环境：node_modules 已有；本轮初始缺 cc，已用 sudo apt-get 安装 gcc libc6-dev。
+- 本轮基线：475 通过、7 跳过，3 套件因缺 cc 无法启动；不是逻辑断言失败。
+- 最终验证：全量 573 通过、7 跳过（90.34 秒）；定向 29 通过；typecheck / build / 示例 / diff 检查通过。

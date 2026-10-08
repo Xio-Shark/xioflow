@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -39,6 +39,107 @@ describe('agent checkpoint causal branches', () => {
     runtime?.close();
     domain.close();
     fs.rmSync(temp, { recursive: true, force: true });
+  });
+
+  it('compares reconstructed files after source disposal without changing agents or live files', async () => {
+    open({ step: async () => {
+      fs.unlinkSync(path.join(workspace.forkRoot, 'input'));
+      fs.writeFileSync(path.join(workspace.forkRoot, '新文件\n.bin'), Buffer.from([0, 255, 1]));
+      runtime.pause('a');
+      return { status: 'ready', checkpoint: 'edited', causalHeads: [] };
+    } });
+    create([]);
+    const initial = runtime.checkpoints('a')[0];
+    await runtime.drain();
+    const edited = runtime.checkpoints('a').at(-1)!;
+    const supervisor = new ProcessSupervisor(domain);
+    await supervisor.abortWorkspaceTransaction('tx');
+    fs.writeFileSync(path.join(temp, 'repo', 'input'), 'future');
+    const usage = runtime.getRunUsage('run');
+    const source = runtime.get('a');
+    const result = await compareAgentCheckpointFiles(runtime, supervisor, {
+      left: { sourceAgentId: 'a', checkpointSeq: initial.seq, txId: 'compare-left',
+        forkPath: path.join(temp, 'compare-left'), replayPolicy: 'deterministic',
+        observations: () => ({ closedWorld: true, log: [], replay: async () => '' }) },
+      right: { sourceAgentId: 'a', checkpointSeq: edited.seq, txId: 'compare-right',
+        forkPath: path.join(temp, 'compare-right'), replayPolicy: 'deterministic',
+        observations: () => ({ closedWorld: true,
+          log: [{ kind: 'mutate', call: { tool: 'edit', args: {} }, resultHash: 'ok' }],
+          replay: async (_, root) => {
+            expect(fs.readFileSync(path.join(root, 'input'), 'utf8')).toBe('value');
+            fs.unlinkSync(path.join(root, 'input'));
+            fs.writeFileSync(path.join(root, '新文件\n.bin'), Buffer.from([0, 255, 1]));
+            return 'ok';
+          } }) },
+    });
+    expect(result).toMatchObject({ status: 'compared', replayedSteps: { left: 0, right: 1 },
+      files: [{ status: 'D', path: 'input' }, { status: 'A', path: '新文件\n.bin' }] });
+    expect(runtime.get('a')).toEqual(source);
+    expect(runtime.getRunUsage('run')).toEqual(usage);
+    expect(fs.readFileSync(path.join(temp, 'repo', 'input'), 'utf8')).toBe('future');
+    for (const side of ['left', 'right']) expect(fs.existsSync(path.join(temp, `compare-${side}`))).toBe(false);
+    expect(domain.getStore().getSnapshot('tx-base')).toBeDefined();
+  });
+
+  it('compares different baselines within a subdirectory and excludes outside changes', async () => {
+    open();
+    const supervisor = new ProcessSupervisor(domain);
+    const root = path.join(temp, 'repo', 'nested');
+    fs.mkdirSync(root);
+    fs.writeFileSync(path.join(root, 'data'), 'old');
+    fs.writeFileSync(path.join(root, 'link'), 'regular');
+    const refs = [];
+    for (const name of ['before', 'after']) {
+      if (name === 'after') {
+        fs.writeFileSync(path.join(root, 'data'), 'new');
+        fs.unlinkSync(path.join(root, 'link'));
+        fs.symlinkSync('data', path.join(root, 'link'));
+        fs.writeFileSync(path.join(temp, 'repo', 'input'), 'outside change');
+      }
+      const tx = await supervisor.beginWorkspaceTransaction({ txId: name, runId: 'run', root,
+        forkPath: path.join(temp, name) });
+      runtime.create({ id: name, runId: 'run', input: null, checkpoint: name,
+        workspace: tx, causalHeads: [], maxSteps: 1 });
+      refs.push({ sourceAgentId: name, checkpointSeq: runtime.checkpoints(name)[0].seq,
+        txId: `compare-${name}`, forkPath: path.join(temp, `compare-${name}`), replayPolicy: 'deterministic' as const,
+        observations: () => ({ closedWorld: true as const, log: [], replay: async () => '' }) });
+      await supervisor.abortWorkspaceTransaction(name);
+    }
+    const result = await compareAgentCheckpointFiles(runtime, supervisor, { left: refs[0], right: refs[1] });
+    expect(result).toMatchObject({ status: 'compared',
+      files: [{ status: 'M', path: 'data' }, { status: 'T', path: 'link' }] });
+  });
+
+  it.each(['left', 'right'] as const)('reports %s replay divergence and cleans every prepared fork', async (side) => {
+    open(); create([]);
+    const checkpointSeq = runtime.checkpoints('a')[0].seq;
+    const options = (name: 'left' | 'right') => ({ sourceAgentId: 'a', checkpointSeq,
+      txId: `compare-${name}`, forkPath: path.join(temp, `compare-${name}`), replayPolicy: 'deterministic' as const,
+      observations: () => ({ closedWorld: true as const,
+        log: [{ kind: 'observe' as const, call: { tool: 'read', args: {} }, resultHash: 'value' }],
+        replay: async () => name === side ? 'changed' : 'value' }) });
+    const result = await compareAgentCheckpointFiles(runtime, new ProcessSupervisor(domain), {
+      left: options('left'), right: options('right') });
+    expect(result).toMatchObject({ status: 'diverged', side, replay: { divergedAt: 0 } });
+    for (const name of ['left', 'right']) expect(fs.existsSync(path.join(temp, `compare-${name}`))).toBe(false);
+    expect(runtime.getRunUsage('run').agentsCreated).toBe(1);
+  });
+
+  it('compares identical reconstructed worlds and rejects an invalid second log with cleanup', async () => {
+    open(); create([]);
+    const checkpointSeq = runtime.checkpoints('a')[0].seq;
+    const options = (name: string) => ({ sourceAgentId: 'a', checkpointSeq, txId: name,
+      forkPath: path.join(temp, name), replayPolicy: 'deterministic' as const,
+      observations: () => ({ closedWorld: true as const, log: [], replay: async () => '' }) });
+    const supervisor = new ProcessSupervisor(domain);
+    expect(await compareAgentCheckpointFiles(runtime, supervisor, {
+      left: options('same-left'), right: options('same-right') })).toMatchObject({ status: 'compared', files: [] });
+    await expect(compareAgentCheckpointFiles(runtime, supervisor, {
+      left: options('bad-left'), right: { ...options('bad-right'), observations: () => ({ closedWorld: true,
+        log: [{ kind: 'mutate', call: { tool: 'write', args: {} } }], replay: async () => '' }) },
+    })).rejects.toThrow('result hashes');
+    expect(fs.existsSync(path.join(temp, 'bad-left'))).toBe(false);
+    expect(fs.existsSync(path.join(temp, 'bad-right'))).toBe(false);
   });
 
   it('compares cross-agent branches with shared evidence, divergence roots and declared writes', async () => {

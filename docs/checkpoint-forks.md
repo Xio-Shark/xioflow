@@ -40,4 +40,4 @@ if (result.status === 'forked') {
 
 重建后可用 [`compareAgentCheckpoints`](checkpoint-comparison.md) 对照源分支与 debug 分支的历史上下文、因果证据和工作区绑定。
 
-这是 checkpoint 粒度的历史分叉，尚不提供任意 journal 序号的完整系统回滚、实际文件内容 diff 或外部系统重放。
+这是 checkpoint 粒度的历史分叉，尚不提供任意 journal 序号的完整系统回滚、外部系统重放。实际覆盖文件的差异可通过 [`compareAgentCheckpointFiles`](checkpoint-comparison.md#重建历史文件差异) 重建两侧历史工作区后查询。

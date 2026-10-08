@@ -36,3 +36,43 @@ if (comparison.evidence.status === 'compared') {
 - 返回值与 runtime、journal、调用参数隔离；修改查询结果不会改变历史。非法 checkpoint 引用直接报错，重开 domain 后仍可查询原始序号。
 
 工作区绑定只说明当时使用哪个事务。节点 `writes` 是宿主声明的相对事务根路径，不是实际文件内容差异；跨根目录的同名路径不能直接视为同一文件。上下文字段与具体节点的因果映射、当前观测有效性、任意时刻文件 diff 仍需额外证据，本查询不推断这些结论。
+
+## 重建历史文件差异
+
+`compareAgentCheckpointFiles(agents, supervisor, { left, right })` 将两侧 checkpoint 各自从历史事务基线重放到临时 fork，再用 Git tree 比较实际覆盖的文件。返回 `comparison`（上述上下文与因果对照）、`files` 和两侧 `replayedSteps`；不创建或调度 agent，不增加 agent / step 预算，但确实执行宿主工具并写入临时事务 journal。
+
+```ts
+import { compareAgentCheckpointFiles } from '@xioflow/kernel';
+
+const side = (sourceAgentId, checkpointSeq, txId, forkPath) => ({
+  sourceAgentId, checkpointSeq, txId, forkPath,
+  replayPolicy: 'deterministic',
+  observations: (saved) => ({
+    closedWorld: true,
+    log: loadRecordedOperationPrefix(saved),
+    replay: (entry, root) => deterministicTools.execute(entry.call, root),
+  }),
+});
+const result = await compareAgentCheckpointFiles(agents, supervisor, {
+  left: side('researcher', source.seq, 'compare-left', '/tmp/compare-left'),
+  right: side('researcher-debug', debug.seq, 'compare-right', '/tmp/compare-right'),
+});
+if (result.status === 'compared') console.log(result.files, result.comparison.context);
+else console.log(result.side, result.replay.divergedAt, result.replay.error);
+```
+
+完整可运行示例（自行创建并清理临时 Git 仓库，无模型凭据需求）：
+
+```sh
+pnpm build
+node examples/checkpoint-debug/run.mjs
+```
+
+示例记录两个 agent 的不同答案，删除源 fork、改变主目录，然后输出上下文 `42 → 43`、`answer.txt` 的真实修改与仍为 `future` 的主目录内容。
+
+- 两侧需绑定同一原始工作区根，可来自不同事务、快照与活跃 Run；不跨不同根猜测路径映射。子目录事务只返回该根以内的差异。
+- `files` 路径相对工作区根；`A` / `D` / `M` / `T` 表示新增、删除、内容或模式变化、类型变化；支持二进制、符号链接和特殊文件名。重命名呈现为删除 + 新增；不返回文本 patch、空目录、时间戳或外部系统状态。
+- 比较范围沿用基线快照的 Git 覆盖契约；普通快照忽略的新文件不纳入比较。空 `files` 仅表示覆盖范围内相同。
+- 两侧均须满足历史分叉的完整前缀、显式 heads、逐步结果哈希和确定性声明。日志完整性与文件效果由宿主保证；匹配返回值不能证明宿主提供了真实完整的历史。
+- 首次重放分歧返回 `diverged` 和 `side`，不返回文件比较。无效日志、缺失基线、根不一致等错误直接抛出。
+- 成功、分歧或异常均回收已成功创建的比较事务；清理错误显式报告，保留原始异常。历史基线快照不会被 prune。进程崩溃时可能遗留临时事务，宿主可依据传入的唯一 txId 与 journal 回收。
