@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph } from '../../src/index.js';
+import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair } from '../../src/index.js';
 import type { CausalStep } from '../../src/index.js';
 import { replayObservationLog } from '../../src/workspace/observation-replay.js';
 
@@ -114,4 +114,124 @@ describe('workspace causal history', () => {
     expect(() => graph.record(step('b', [begun.seq]))).toThrow('existing nodes');
     expect(() => graph.planRecomputation([graph.nodes()[0].seq], begun.seq)).toThrow('absent');
   });
+
+  it('repairs only affected tools, remaps dependencies and commits real files through OCC', async () => {
+    const source = graph.record(step('a'));
+    const independent = graph.record(step('b', [], 'stable'));
+    fs.writeFileSync(path.join(temp, 'a', 'output.txt'), 'old');
+    const output = graph.record({ ...step('a', [source.seq, independent.seq]),
+      observation: { kind: 'mutate', call: { tool: 'write', args: {} }, resultHash: 'old' },
+      writes: [{ path: 'output.txt', status: 'A' }],
+    });
+    await supervisor.commitWorkspaceTransaction('a');
+    fs.writeFileSync(path.join(root, 'input.txt'), 'new');
+    const calls: number[] = [];
+    const repaired = await prepareWorkspaceRepair(supervisor, {
+      txId: 'repair', runId: 'run', root, forkPath: path.join(temp, 'repair'),
+      changed: [source.seq], atSeq: output.seq,
+      validateReuse: async (tx, unaffected) => {
+        expect(unaffected.map((node) => node.seq)).toEqual([independent.seq]);
+        expect(fs.readFileSync(path.join(tx.forkRoot, 'output.txt'), 'utf8')).toBe('old');
+      },
+      execute: async (node, tx, dependencies) => {
+        calls.push(node.seq);
+        const resultHash = node.seq === source.seq
+          ? fs.readFileSync(path.join(tx.forkRoot, 'input.txt'), 'utf8')
+          : dependencies[0].observation.resultHash;
+        if (node.seq === output.seq) {
+          expect(dependencies[0].seq).not.toBe(source.seq);
+          expect(dependencies[1].seq).toBe(independent.seq);
+          fs.writeFileSync(path.join(tx.forkRoot, 'output.txt'), resultHash);
+        }
+        return { actorId: node.actorId, observation: { ...node.observation, resultHash }, writes: node.writes };
+      },
+    });
+    expect(calls).toEqual([source.seq, output.seq]);
+    expect(repaired.reused).toEqual([independent]);
+    expect(fs.readFileSync(path.join(root, 'output.txt'), 'utf8')).toBe('old');
+    expect((await supervisor.commitWorkspaceTransaction('repair')).status).toBe('committed');
+    expect(fs.readFileSync(path.join(root, 'output.txt'), 'utf8')).toBe('new');
+    const event = domain.getStore().getJournalEvents(domain.domainId).find((e) => e.type === 'CAUSAL_REPAIR_PREPARED');
+    expect(event?.payload.replacements).toEqual(repaired.replacements.map(({ sourceSeq, node }) => ({ sourceSeq, replacementSeq: node.seq })));
+    expect(graph.nodes(output.seq)).toEqual([source, independent, output]);
+  });
+
+  it.each(['reuse', 'execute'])('discards fork writes when %s fails and never runs downstream nodes', async (failure) => {
+    const source = graph.record(step('a'));
+    const output = graph.record(step('a', [source.seq]));
+    const calls: number[] = [];
+    await expect(prepareWorkspaceRepair(supervisor, {
+      txId: 'repair', runId: 'run', root, forkPath: path.join(temp, 'repair'),
+      changed: [source.seq], atSeq: output.seq,
+      validateReuse: async () => { if (failure === 'reuse') throw new Error('invalid reuse'); },
+      execute: async (node, tx) => {
+        calls.push(node.seq);
+        fs.writeFileSync(path.join(tx.forkRoot, 'input.txt'), 'partial');
+        throw new Error('tool failed');
+      },
+    })).rejects.toThrow(failure === 'reuse' ? 'invalid reuse' : 'tool failed');
+    expect(calls).toEqual(failure === 'reuse' ? [] : [source.seq]);
+    expect(fs.readFileSync(path.join(root, 'input.txt'), 'utf8')).toBe('old');
+    expect(fs.existsSync(path.join(temp, 'repair'))).toBe(false);
+    expect(domain.getStore().getSnapshot('repair-base')).toBeNull();
+    expect(graph.nodes()).toEqual([source, output]);
+  });
+
+  it('rejects missing changed evidence before creating a transaction', async () => {
+    const source = graph.record(step('a'));
+    for (const changed of [[], [999999]]) {
+      await expect(prepareWorkspaceRepair(supervisor, {
+        txId: 'repair', runId: 'run', root, forkPath: path.join(temp, 'repair'), changed, atSeq: source.seq,
+        validateReuse: async () => {}, execute: async () => { throw new Error('must not execute'); },
+      })).rejects.toThrow();
+    }
+    expect(fs.existsSync(path.join(temp, 'repair'))).toBe(false);
+  });
+
+
+  it('retains OCC conflict checks after repair and preserves concurrent workspace writes', async () => {
+    const source = graph.record(step('a'));
+    const repaired = await prepareWorkspaceRepair(supervisor, {
+      txId: 'repair', runId: 'run', root, forkPath: path.join(temp, 'repair'),
+      changed: [source.seq], atSeq: source.seq, validateReuse: async () => {},
+      execute: async (_node, tx) => {
+        fs.writeFileSync(path.join(tx.forkRoot, 'output.txt'), 'repaired');
+        return { actorId: 'repair-agent', observation: {
+          kind: 'mutate', call: { tool: 'write', args: { path: 'output.txt' } }, resultHash: 'repaired',
+        }, writes: [{ path: 'output.txt', status: 'A' }] };
+      },
+    });
+    fs.writeFileSync(path.join(root, 'output.txt'), 'concurrent');
+    expect((await supervisor.commitWorkspaceTransaction(repaired.transaction.txId)).status).toBe('conflict');
+    expect(fs.readFileSync(path.join(root, 'output.txt'), 'utf8')).toBe('concurrent');
+    await supervisor.abortWorkspaceTransaction(repaired.transaction.txId);
+  });
+
+  it('recomputes diamond joins once with new upstream evidence and preserves historical lineage', async () => {
+    const source = graph.record(step('a'));
+    const left = graph.record(step('a', [source.seq]));
+    const right = graph.record(step('b', [source.seq]));
+    const join = graph.record(step('b', [left.seq, right.seq]));
+    const calls: number[] = [];
+    const repaired = await prepareWorkspaceRepair(supervisor, {
+      txId: 'repair', runId: 'run', root, forkPath: path.join(temp, 'repair'),
+      changed: [source.seq, left.seq], atSeq: join.seq, validateReuse: async () => {},
+      execute: async (node, tx, dependencies) => {
+        calls.push(node.seq);
+        expect(dependencies.every((dependency) => dependency.txId === tx.txId)).toBe(true);
+        // Callback arguments are detached from the executor's dependency mapping.
+        for (const dependency of dependencies) dependency.seq = 999999;
+        node.dependsOn.push(999999);
+        return { actorId: 'repair-agent', observation: { ...node.observation, resultHash: 'new' } };
+      },
+    });
+    expect(calls).toEqual([source.seq, left.seq, right.seq, join.seq]);
+    expect(repaired.replacements[3].node.dependsOn).toEqual(repaired.replacements.slice(1, 3).map(({ node }) => node.seq));
+    domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal');
+    const reopened = new WorkspaceCausalGraph(domain);
+    expect(reopened.ancestors(repaired.replacements[3].node.seq)).toEqual(repaired.replacements.slice(0, 3).map(({ node }) => node));
+    expect(reopened.nodes(join.seq)).toEqual([source, left, right, join]);
+  });
+
 });
