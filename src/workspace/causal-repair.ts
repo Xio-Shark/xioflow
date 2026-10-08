@@ -31,6 +31,39 @@ export interface WorkspaceRepairResult {
   heads: number[];
 }
 
+export interface WorkspaceRepairBranch {
+  /** Unique host identity, for example an agent ID. */
+  id: string;
+  heads: readonly number[];
+}
+
+export interface WorkspaceBranchRepairOptions extends Omit<WorkspaceRepairOptions, 'heads'> {
+  /** Compatible results to reconstruct together in one file world. */
+  branches: readonly WorkspaceRepairBranch[];
+}
+
+export interface WorkspaceBranchRepairResult extends WorkspaceRepairResult {
+  branches: { id: string; sourceHeads: number[]; heads: number[] }[];
+}
+
+/** Recompute the union once, then distribute heads by branch identity.
+ * All branches share one transaction and its failure/commit lifecycle.
+ * This does not bind agent contexts or merge incompatible strategies.
+ */
+export async function prepareWorkspaceBranchRepair(
+  supervisor: ProcessSupervisor,
+  options: WorkspaceBranchRepairOptions,
+): Promise<WorkspaceBranchRepairResult> {
+  const branches = options.branches.map(({ id, heads }) => ({ id, heads: [...new Set(heads)] }));
+  if (!branches.length || branches.some(({ id }) => !id.trim())
+    || new Set(branches.map(({ id }) => id)).size !== branches.length) {
+    throw new Error('Workspace repair branches require nonempty unique identities');
+  }
+  return executeWorkspaceRepair(supervisor, {
+    ...options, heads: [...new Set(branches.flatMap(({ heads }) => heads))],
+  }, branches);
+}
+
 /** Recompute a frozen invalidation closure in a fresh workspace transaction.
  * Does not restore agent contexts or infer dependency completeness. The host
  * must include reused evidence in its commit validation when it is an input.
@@ -39,6 +72,15 @@ export async function prepareWorkspaceRepair(
   supervisor: ProcessSupervisor,
   options: WorkspaceRepairOptions,
 ): Promise<WorkspaceRepairResult> {
+  const { branches: _branches, ...result } = await executeWorkspaceRepair(supervisor, options, []);
+  return result;
+}
+
+async function executeWorkspaceRepair(
+  supervisor: ProcessSupervisor,
+  options: WorkspaceRepairOptions,
+  branches: readonly WorkspaceRepairBranch[],
+): Promise<WorkspaceBranchRepairResult> {
   const domain = supervisor.getDomain();
   const graph = new WorkspaceCausalGraph(domain);
   const changed = [...options.changed];
@@ -67,14 +109,19 @@ export async function prepareWorkspaceRepair(
       replacements.push({ sourceSeq: source.seq, node });
     }
     const heads = sourceHeads.map((seq) => current.get(seq)!.seq);
+    const repairedBranches = branches.map((branch) => ({
+      id: branch.id, sourceHeads: [...branch.heads],
+      heads: branch.heads.map((seq) => current.get(seq)!.seq),
+    }));
     domain.getStore().recordJournalEvent({
       domainId: domain.domainId, runId: options.runId, type: 'CAUSAL_REPAIR_PREPARED',
       payload: { version: 1, txId: transaction.txId, atSeq, sourceHeads, heads,
         changed, reused: plan.unaffected.map((node) => node.seq),
+        ...(branches.length ? { branches: repairedBranches } : {}),
         replacements: replacements.map(({ sourceSeq, node }) => ({ sourceSeq, replacementSeq: node.seq })) },
       timestamp: new Date().toISOString(),
     });
-    return { transaction, replacements, reused: plan.unaffected, heads };
+    return { transaction, replacements, reused: plan.unaffected, heads, branches: repairedBranches };
   } catch (error) {
     // No commit has started, so a failed repair can discard its isolated writes.
     try {

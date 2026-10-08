@@ -18,7 +18,7 @@
 - recoverCausalCheckpoint 校验预期 checkpoint 序号，独占恢复并绑定宿主重建结果。
 - preparation 返回 checkpoint / 显式 heads / open workspace；discard 处理绑定失败或中断。
 - causal_repaired 原子保存上下文 / heads / workspace，checkpointRef 记录来源；成功 paused。
-- 本轮新增 recoverAgentCausalBatch：固定影响计划，逐项接通单 agent 因果恢复。
+- recoverAgentCausalBatch：固定影响计划，逐项接通单 agent 因果恢复。
 - 入口 src/agents/causal-recovery.ts；文档 docs/causal-recovery-batches.md 含集成示例。
 - 返回 plan 与逐项 outcomes：repaired / skipped / failed；异常保留原始 error。
 - 跳过 checkpoint_changed / not_stopped / not_repaired；后者含宿主放弃或中断。
@@ -45,9 +45,15 @@
 - 因果基准 3×4：完整 / 局部均 3/3 正确，实际工具 12→3，另计验证读取。
 - 合并基准 3×4：均 3/3 正确，总工具 25→16、恢复 12→3，另计检测 / 校验 / 复制。
 - modelTokens null，不声称真实模型 token 或总操作节省。
-- 下一步：跨 agent 共享失效祖先的重算去重与结果分发，明确依赖顺序和部分失败语义。
+- 本轮新增 prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。
+- branches 为唯一 id / heads；合并视图后拓扑执行，返回每分支 sourceHeads / 新 heads。
+- 复用证据统一验证；独立 / 空分支保留，排除未选兄弟；支持连续修复。
+- 映射与替代关系同条 CAUSAL_REPAIR_PREPARED 持久化；不代表提交成功。
+- 任一步失败中止整体准备，回收 fork / 基线；成功后宿主统一 OCC / 回收。
+- 不合并互斥策略，不绑定 agent 上下文；跨 agent checkpoint 与文件提交非原子。
+- 下一步：连接共享修复结果与跨 agent 上下文绑定，设计共同事务所有权和部分失败恢复。
 - 后续：历史重放日志自动归档、仅观测失效的合并基准、真实模型与 token 计量。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免缓存和 dist 竞态。
 - 环境：node_modules 与 cc 已有，本轮无需安装依赖。
-- 本轮基线：573 通过、7 跳过；定向 33 通过；typecheck 通过。
-- 最终全量：577 通过、7 跳过（90.99 秒）；新增 4 项集成测试；build / diff 检查通过。
+- 本轮基线：577 通过、7 跳过；定向 18 通过；typecheck / build 通过。
+- 最终全量：581 通过、7 跳过（93.17 秒）；新增 4 项真实事务集成测试；diff 检查通过。

@@ -88,3 +88,35 @@ const newView = graph.view(repair.heads);
 ## 可复现评测
 
 运行 `pnpm benchmark:causal` 比较相同文件扰动下的完整重跑、局部修复与不校验复用。详见 [指标口径和限制](causal-repair-benchmark.md)，包含变化检测和复用验证开销，不估算模型 token。
+
+## 多 agent 共享祖先去重
+
+`prepareWorkspaceBranchRepair` 接受带唯一 `id` 的 `branches`，在一个新事务中修复所有分支视图的并集。每个失效源节点只执行一次；分支声明顺序不影响执行顺序，下游总是拿到新上游。未选择的兄弟分支不参与，未受影响节点统一验证一次。返回 `branches: [{ id, sourceHeads, heads }]`，可按 agent ID 分发因果结果；空分支保持为空，独立分支保留原 heads。
+
+```ts
+import { prepareWorkspaceBranchRepair } from '@xioflow/kernel';
+
+const repair = await prepareWorkspaceBranchRepair(supervisor, {
+  txId: 'shared-repair', runId, root, forkPath: '/tmp/shared-repair',
+  atSeq, changed: [sharedObservationSeq],
+  branches: [
+    { id: 'agent-a', heads: [agentAOutputSeq] },
+    { id: 'agent-b', heads: [agentBOutputSeq] },
+  ],
+  validateReuse: (tx, nodes) => adapter.validateReusable(nodes, tx.forkRoot),
+  async execute(source, tx, dependencies) {
+    const result = await adapter.recompute(source, dependencies, tx.forkRoot);
+    return { actorId: source.actorId, observation: result.observation, writes: result.writes };
+  },
+});
+const byAgent = new Map(repair.branches.map(branch => [branch.id, branch.heads]));
+// 使用覆盖所有分支实际读取的证据，经普通 OCC 提交一次。
+const outcome = await supervisor.commitWorkspaceTransaction(
+  repair.transaction.txId, await adapter.commitEvidence(repair),
+);
+// byAgent 只分发证据身份；上下文重建及 checkpoint 版本校验由宿主负责。
+```
+
+所有分支必须能在同一文件世界中共同成立；互斥的投机策略应继续使用独立 fork。此 API 不自动合并互相覆盖的语义输出，也不证明依赖声明完整。去重按历史节点 seq，而非工具参数或结果哈希；来自不同历史节点的相同调用不会被误认为可共享。
+
+任一复用验证或工具失败会终止整个准备，回收共享 fork 和本次基线，不分发部分成功结果。失败前的节点仍保留在中止事务的历史中。成功时，分支映射与替代关系写入同一 `CAUSAL_REPAIR_PREPARED` 事件的 `branches` 字段，可在重启后恢复；它不是提交事实，仍需查看 TX 生命周期。准备成功后的资源由宿主统一管理，不能让每个 agent 独立提交或回收同一个事务。文件提交与多个 agent checkpoint 绑定不是一个原子操作。

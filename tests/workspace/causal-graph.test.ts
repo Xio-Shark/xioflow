@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair } from '../../src/index.js';
+import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, prepareWorkspaceBranchRepair } from '../../src/index.js';
 import type { CausalStep } from '../../src/index.js';
 import { replayObservationLog } from '../../src/workspace/observation-replay.js';
 
@@ -334,6 +334,142 @@ describe('workspace causal history', () => {
     expect(domain.getStore().getJournalEvents(domain.domainId)
       .some((event) => event.payload.txId === 'repair')).toBe(false);
     expect(fs.existsSync(path.join(temp, 'repair'))).toBe(false);
+  });
+
+  it('shares cross-agent ancestors once and durably distributes branch heads over two generations', async () => {
+    const source = graph.record(step('a'));
+    const left = graph.record({ ...step('a', [source.seq]), observation: {
+      kind: 'mutate', call: { tool: 'write', args: { path: 'left.txt' } }, resultHash: 'old',
+    }, writes: [{ path: 'left.txt', status: 'A' }] });
+    const right = graph.record({ ...step('b', [source.seq, left.seq]), observation: {
+      kind: 'mutate', call: { tool: 'write', args: { path: 'right.txt' } }, resultHash: 'old',
+    }, writes: [{ path: 'right.txt', status: 'A' }] });
+    const stable = graph.record(step('b', [], 'stable'));
+    const sibling = graph.record(step('a', [source.seq]));
+    let changed = source.seq;
+    let branches = [
+      { id: 'agent-b', heads: [right.seq] },
+      { id: 'agent-a', heads: [left.seq, left.seq] },
+      { id: 'stable', heads: [stable.seq] },
+      { id: 'empty', heads: [] as number[] },
+    ];
+    for (const value of ['new', 'newer']) {
+      fs.writeFileSync(path.join(root, 'input.txt'), value);
+      const expected = graph.planRecomputation([changed], undefined, branches.flatMap(b => b.heads));
+      const calls: number[] = [];
+      const selected = structuredClone(branches);
+      const repair = await prepareWorkspaceBranchRepair(supervisor, {
+        txId: value, runId: 'run', root, forkPath: path.join(temp, value),
+        atSeq: graph.nodes().at(-1)!.seq, changed: [changed], branches: selected,
+        validateReuse: async (_tx, nodes) => {
+          expect(nodes).toEqual([stable]);
+          // Neither callback nor caller mutation may change the frozen distribution.
+          selected[0].heads.length = 0;
+          selected[1].id = 'tampered';
+          nodes[0].seq = -1;
+        },
+        execute: async (node, tx, dependencies) => {
+          calls.push(node.seq);
+          const resultHash = dependencies.length ? dependencies[0].observation.resultHash
+            : fs.readFileSync(path.join(tx.forkRoot, 'input.txt'), 'utf8');
+          expect(dependencies.every(d => d.txId === tx.txId)).toBe(true);
+          if (node.observation.kind === 'mutate') {
+            fs.writeFileSync(path.join(tx.forkRoot, node.observation.call.args.path as string), resultHash);
+          }
+          return { actorId: node.actorId, observation: { ...node.observation, resultHash }, writes: node.writes };
+        },
+      });
+      expect(calls).toEqual(expected.invalidated.map(n => n.seq));
+      expect(calls).toHaveLength(3);
+      expect(calls).not.toContain(sibling.seq);
+      const [newSource, newLeft, newRight] = repair.replacements.map(r => r.node);
+      expect(newRight.dependsOn).toEqual([newSource.seq, newLeft.seq]);
+      expect(repair.branches).toEqual([
+        { id: 'agent-b', sourceHeads: branches[0].heads, heads: [newRight.seq] },
+        { id: 'agent-a', sourceHeads: [...new Set(branches[1].heads)], heads: [newLeft.seq] },
+        { id: 'stable', sourceHeads: [stable.seq], heads: [stable.seq] },
+        { id: 'empty', sourceHeads: [], heads: [] },
+      ]);
+      expect(fs.existsSync(path.join(root, 'right.txt'))).toBe(value === 'newer');
+      expect((await supervisor.commitWorkspaceTransaction(value)).status).toBe('committed');
+      expect(fs.readFileSync(path.join(root, 'left.txt'), 'utf8')).toBe(value);
+      expect(fs.readFileSync(path.join(root, 'right.txt'), 'utf8')).toBe(value);
+      domain.close();
+      domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal');
+      graph = new WorkspaceCausalGraph(domain);
+      supervisor = new ProcessSupervisor(domain);
+      const event = domain.getStore().getJournalEvents(domain.domainId)
+        .find(e => e.type === 'CAUSAL_REPAIR_PREPARED' && e.payload.txId === value)!;
+      expect(event.payload.branches).toEqual(repair.branches);
+      expect(graph.view(repair.branches[1].heads).nodes).toEqual([newSource, newLeft]);
+      branches = repair.branches.map(({ id, heads }) => ({ id, heads }));
+      changed = newSource.seq;
+    }
+  });
+
+  it('aborts all shared branch writes on downstream failure without publishing a distribution', async () => {
+    const source = graph.record(step('a'));
+    const left = graph.record(step('a', [source.seq]));
+    const right = graph.record(step('b', [source.seq]));
+    const calls: number[] = [];
+    await expect(prepareWorkspaceBranchRepair(supervisor, {
+      txId: 'shared-fail', runId: 'run', root, forkPath: path.join(temp, 'shared-fail'),
+      atSeq: right.seq, changed: [source.seq],
+      branches: [{ id: 'b', heads: [right.seq] }, { id: 'a', heads: [left.seq] }],
+      validateReuse: async () => {},
+      execute: async (node, tx) => {
+        calls.push(node.seq);
+        fs.writeFileSync(path.join(tx.forkRoot, 'partial.txt'), 'partial');
+        if (node.seq === right.seq) throw new Error('downstream failed');
+        return { actorId: node.actorId, observation: node.observation };
+      },
+    })).rejects.toThrow('downstream failed');
+    expect(calls).toEqual([source.seq, left.seq, right.seq]);
+    expect(fs.existsSync(path.join(root, 'partial.txt'))).toBe(false);
+    expect(fs.existsSync(path.join(temp, 'shared-fail'))).toBe(false);
+    expect(domain.getStore().getSnapshot('shared-fail-base')).toBeNull();
+    const events = domain.getStore().getJournalEvents(domain.domainId).filter(e => e.payload.txId === 'shared-fail');
+    expect(events.some(e => e.type === 'TX_ABORTED')).toBe(true);
+    expect(events.some(e => e.type === 'CAUSAL_REPAIR_PREPARED')).toBe(false);
+    expect(graph.nodes().filter(n => n.txId === 'shared-fail')).toHaveLength(2);
+  });
+
+  it('rejects malformed branch selections before opening a shared transaction', async () => {
+    const source = graph.record(step('a'));
+    for (const branches of [[], [{ id: ' ', heads: [source.seq] }],
+      [{ id: 'a', heads: [source.seq] }, { id: 'a', heads: [] }],
+      [{ id: 'a', heads: [] }], [{ id: 'a', heads: [999999] }]]) {
+      await expect(prepareWorkspaceBranchRepair(supervisor, {
+        txId: 'invalid-shared', runId: 'run', root, forkPath: path.join(temp, 'invalid-shared'),
+        atSeq: source.seq, changed: [source.seq], branches,
+        validateReuse: async () => { throw new Error('must not validate'); },
+        execute: async () => { throw new Error('must not execute'); },
+      })).rejects.toThrow(/identities|absent/);
+    }
+    expect(domain.getStore().getJournalEvents(domain.domainId)
+      .some(e => e.payload.txId === 'invalid-shared')).toBe(false);
+  });
+
+  it('keeps OCC conflicts for a prepared shared world', async () => {
+    const source = graph.record(step('a'));
+    const repair = await prepareWorkspaceBranchRepair(supervisor, {
+      txId: 'shared-conflict', runId: 'run', root, forkPath: path.join(temp, 'shared-conflict'),
+      atSeq: source.seq, changed: [source.seq],
+      branches: [{ id: 'a', heads: [source.seq] }, { id: 'b', heads: [source.seq] }],
+      validateReuse: async () => {},
+      execute: async (node, tx) => {
+        fs.writeFileSync(path.join(tx.forkRoot, 'input.txt'), 'shared');
+        return { actorId: node.actorId, observation: {
+          kind: 'mutate', call: { tool: 'write', args: {} }, resultHash: 'shared',
+        } };
+      },
+    });
+    expect(repair.replacements).toHaveLength(1);
+    expect(repair.branches[0].heads).toEqual(repair.branches[1].heads);
+    fs.writeFileSync(path.join(root, 'input.txt'), 'concurrent');
+    expect((await supervisor.commitWorkspaceTransaction(repair.transaction.txId)).status).toBe('conflict');
+    expect(fs.readFileSync(path.join(root, 'input.txt'), 'utf8')).toBe('concurrent');
+    await supervisor.abortWorkspaceTransaction(repair.transaction.txId);
   });
 
 });

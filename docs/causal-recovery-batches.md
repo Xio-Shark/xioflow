@@ -66,5 +66,8 @@ for (const outcome of batch.outcomes) {
 
 计划顺序是 agent 登记顺序，不是跨 agent 依赖拓扑。宿主必须协调共享依赖和
 外部副作用；共享失效祖先可能在多个工作区内分别重算，本接口不声称去重。
+兼容分支可先用 [`prepareWorkspaceBranchRepair`](causal-repair.md#多-agent-共享祖先去重)
+在同一事务内去重重算并取得各 agent 的新 heads；共享事务的提交、生命周期和
+多个 checkpoint 的上下文绑定仍需宿主协调，不能让逐项 discard 回收其他 agent 仍在使用的事务。
 `repaired` 表示上下文绑定成功，不证明外部世界有效或所有受影响 agent 已修复。
 批次期间新建的 agent 或新变化须再次规划；未跟踪上下文仍不能推断为有效。
