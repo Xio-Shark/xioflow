@@ -7,7 +7,9 @@
 [![Docs (EN)](https://img.shields.io/badge/spec-ARCHITECTURE.en.md-informational.svg)](./ARCHITECTURE.en.md)
 [![Docs (ZH)](https://img.shields.io/badge/spec-ARCHITECTURE.md-informational.svg)](./ARCHITECTURE.md)
 
-A supervised execution kernel for AI agent runtimes. Zero runtime dependencies. (See [Architecture & Protocol Specification (EN)](./ARCHITECTURE.en.md) / [中文规范](./ARCHITECTURE.md)).
+A world-state and execution kernel for AI agents, evolving toward a causally verifiable operating system for shared workspaces. Zero runtime dependencies. See the [vision and staged roadmap](docs/VISION.md) and [Architecture & Protocol Specification (EN)](./ARCHITECTURE.en.md) / [中文规范](./ARCHITECTURE.md).
+
+The experimental `WorkspaceCausalGraph` persists tool-result provenance across agents and workspace transactions, traces dependencies, and plans which dependent steps need recomputation when evidence changes. It builds on existing snapshots, OCC and observation replay. See the [causal graph API and example](docs/causal-graph.md). Automatic subgraph repair and speculative winner orchestration are next-stage work.
 
 For integration, start with the [current implementation contract](spec/current-contract.md).
 It separates implemented guarantees, experimental APIs and planned Rust/daemon work.
