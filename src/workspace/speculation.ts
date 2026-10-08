@@ -1,10 +1,22 @@
+import { prepareWorkspaceRepair, type WorkspaceRepairOptions, type WorkspaceRepairResult } from './causal-repair.js';
 import type { ProcessSupervisor } from '../supervisor/supervisor.js';
 import type { CommitOptions, CommitResult, WorkspaceTransaction } from './transactions.js';
+
+export interface SpeculationRepairPlan extends Pick<WorkspaceRepairOptions, 'changed' | 'atSeq' | 'validateReuse' | 'execute'> {
+  /** Explicit candidate branch, including all independent outputs to retain. */
+  heads: readonly number[];
+  /** Collect commit evidence after recomputation, including reused inputs. */
+  commitOptions?(repair: WorkspaceRepairResult): Promise<CommitOptions | void>;
+}
 
 export interface WorkspaceStrategy {
   id: string;
   /** Resolve only after all work in this fork has stopped. Throw to reject the candidate. */
   execute(transaction: WorkspaceTransaction): Promise<CommitOptions | void>;
+  /** One repair attempt after OCC conflict, before considering the next strategy.
+   * The original fork remains available for validating/materializing reused outputs.
+   */
+  repair?(transaction: WorkspaceTransaction, conflict: Extract<CommitResult, { status: 'conflict' }>): Promise<SpeculationRepairPlan | void>;
 }
 
 export interface WorkspaceSpeculationOptions {
@@ -22,7 +34,9 @@ export interface SpeculationCandidate {
   txId: string;
   status: 'failed' | 'conflict' | 'discarded' | 'committed';
   error?: string;
+  /** Original candidate commit outcome. */
   commit?: CommitResult;
+  repair?: { txId: string; heads: number[]; commit?: CommitResult };
 }
 
 export interface WorkspaceSpeculationResult {
@@ -53,6 +67,7 @@ export async function speculateWorkspace(
   });
   const transactions: WorkspaceTransaction[] = [];
   const pending = new Set<string>();
+  const snapshots = new Set<string>();
   let baseSnapshotId: string | undefined;
   let uncertainCommit: string | undefined;
   let result: WorkspaceSpeculationResult | undefined;
@@ -68,6 +83,7 @@ export async function speculateWorkspace(
       transactions.push(tx);
       pending.add(tx.txId);
       baseSnapshotId = tx.baseSnapshotId;
+      snapshots.add(tx.baseSnapshotId);
     }
     record('SPECULATION_STARTED', { baseSnapshotId, candidates: transactions.map((tx, i) => ({ txId: tx.txId, strategyId: strategies[i].id })) });
     const executions = await Promise.allSettled(strategies.map(async (strategy, index) => strategy.execute({ ...transactions[index] })));
@@ -84,14 +100,34 @@ export async function speculateWorkspace(
       // A thrown commit may already have started applying files. Retain its
       // redo fork and baseline; never select a second winner after that error.
       uncertainCommit = candidate.txId;
-      const commit = await supervisor.commitWorkspaceTransaction(candidate.txId, execution.value || undefined);
+      let commit = await supervisor.commitWorkspaceTransaction(candidate.txId, execution.value || undefined);
       uncertainCommit = undefined;
       candidate.commit = commit;
       if (commit.status === 'conflict') {
         candidate.status = 'conflict';
-        continue;
+        const plan = await strategies[index].repair?.({ ...transactions[index], status: 'conflicted' }, structuredClone(commit));
+        if (!plan) continue;
+        if (!Array.isArray(plan.heads)) throw new Error('Speculation repair requires explicit heads');
+        // No unbounded retries: a second conflict advances to the next candidate.
+        const repair = await prepareWorkspaceRepair(supervisor, {
+          ...plan, txId: `${candidate.txId}-repair`, runId: options.runId,
+          root: options.root, forkPath: `${options.forkPath}-${index}-repair`,
+        });
+        pending.add(repair.transaction.txId);
+        snapshots.add(repair.transaction.baseSnapshotId);
+        candidate.repair = { txId: repair.transaction.txId, heads: repair.heads };
+        record('SPECULATION_REPAIR_PREPARED', {
+          strategyId: candidate.strategyId, sourceTxId: candidate.txId,
+          txId: repair.transaction.txId, heads: repair.heads,
+        });
+        const commitOptions = await plan.commitOptions?.(repair);
+        uncertainCommit = repair.transaction.txId;
+        commit = await supervisor.commitWorkspaceTransaction(repair.transaction.txId, commitOptions || undefined);
+        uncertainCommit = undefined;
+        candidate.repair.commit = commit;
+        if (commit.status === 'conflict') continue;
       }
-      pending.delete(candidate.txId);
+      pending.delete(commit.txId);
       candidate.status = 'committed';
       result.status = 'committed';
       result.winner = candidate.strategyId;
@@ -109,7 +145,7 @@ export async function speculateWorkspace(
     } catch (error) { errors.push(error); }
   }
   if (baseSnapshotId && pending.size === 0) {
-    try { await supervisor.pruneSnapshots([baseSnapshotId], { runId: options.runId }); }
+    try { await supervisor.pruneSnapshots([...snapshots], { runId: options.runId }); }
     catch (error) { errors.push(error); }
   }
   if (errors.length) {

@@ -44,4 +44,41 @@ console.log(result.status, result.winner, result.candidates);
 - 正常完成时回收失败、冲突和落选 fork，并释放共享基线快照。journal 中的 `SPECULATION_STARTED`、`SPECULATION_FINISHED` 和既有 TX 事件保留策略与事务映射；回调记录的因果节点也保留。
 - 提交抛出异常时，可能已经开始应用文件。入口停止选择其他候选，保留该事务的 fork 与基线，抛出包含事务 ID 的 `AggregateError`。宿主按已有事务恢复协议处理并重试提交；其他候选仍尝试回收。清理错误也会显式抛出。`SPECULATION_FINISHED` 记录选择结果，不代表后续清理已经完成。
 
-这是投机执行的第一步：当前不自动重算冲突子图、不合并多个胜者、不恢复模型上下文，也不声称节省 token。下一步可将候选因果图接入观测失效驱动的局部修复，并比较整轮重跑与局部修复的实际工具调用次数。
+## OCC 冲突后的局部修复
+
+策略可提供 `repair(original, conflict)`。它仅在原候选 OCC 冲突时调用一次，返回修复计划或 `undefined`（直接尝试下一个候选）。修复保持该策略的优先级，从当前主工作区创建新事务，调用 `prepareWorkspaceRepair`，随后再次走普通 OCC；第二次冲突则转向下一个候选。
+
+```ts
+const strategy = {
+  id: 'incremental',
+  execute: executeCandidate,
+  async repair(original, conflict) {
+    // adapter 是宿主实现；路径冲突不自动等价于某个因果节点失效。
+    const changed = await adapter.findChanged(candidateHeads, conflict, root);
+    return {
+      changed,
+      heads: candidateHeads, // 必填，包含本候选所有要保留的独立输出
+      atSeq: graph.nodes().at(-1)!.seq,
+      async validateReuse(tx, unaffected) {
+        // 原候选 fork 尚未回收；验证依赖后，将缺失的独立输出物化到新 fork。
+        await adapter.validateAndMaterialize(unaffected, original.forkRoot, tx.forkRoot);
+      },
+      async execute(source, tx, dependencies) {
+        return adapter.recompute(source, dependencies, tx.forkRoot);
+      },
+      async commitOptions(prepared) {
+        // 重算完成后收集提交证据；必须覆盖复用输入。
+        return adapter.commitEvidence(prepared);
+      },
+    };
+  },
+};
+```
+
+修复事务 ID 为 `${原候选 txId}-repair`，fork 路径为 `${forkPath}-${index}-repair`，由入口管理创建、提交和回收；回调不能自行提交或中止事务。`heads` 和 `changed` 仍由宿主声明，不自动推断依赖或复制整个旧 fork。复用验证不通过应抛错；缺失的独立输出也可列入失效种子重算。
+
+`candidate.commit` 保留原提交冲突；`candidate.repair` 记录新事务 ID、替代后的 heads 和第二次提交结果。`candidate.status` 表示最终候选状态，只有修复提交成功后才能把新 heads 当作当前工作区分支。`SPECULATION_REPAIR_PREPARED` 将策略、原事务、新事务和 heads 关联；节点替代关系继续由 `CAUSAL_REPAIR_PREPARED` 记录。
+
+正常结束会回收原候选、修复 fork 和所有本轮基线。修复计划、验证、工具或证据回调抛错时终止本轮并回收尚未提交的事务，错误通过 `AggregateError` 上报；修复提交抛错时停止选择后续候选，保留该修复事务及基线供恢复。与原有异常清理一致，存在未回收事务时保守保留本轮快照。
+
+真实文件用例见 `tests/workspace/speculation.test.ts`：局部重算、独立输出复用、兄弟分支隔离、二次冲突回退、工具错误与不确定提交。当前不合并多个胜者、不恢复模型上下文，也不声称节省 token。

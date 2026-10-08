@@ -5,19 +5,23 @@
 - 已有：WorkspaceCausalGraph 持久因果节点、上游查询、历史切片、失效闭包。
 - 已有：prepareWorkspaceRepair 拓扑重算失效节点，复用独立结果并记录替代关系。
 - 已有：view(heads) 显式选择分支，修复返回新 heads，支持连续多轮修复。
-- 本轮：新增 pnpm benchmark:causal，真实文件比较完整重跑 / 增量修复 / 不校验复用。
-- 基准：默认 3 轮、4 分支、1000 次哈希迭代；各策略使用相同内容与扰动，轮换运行顺序。
-- 指标：正确性、实际工具次数、变化检测读取、复用验证读取、端到端耗时与原始输出哈希。
-- 样本：重跑与修复均 3/3 正确；执行工具 12→3，但修复另需 4+6 次验证读取。
-- 样本耗时中位数：95.63→86.45 ms；仅固定确定性任务，不宣称稳定加速或模型收益。
-- 入口：docs/causal-repair-benchmark.md；原始样本 docs/benchmarks/causal-repair.sample.json。
-- 实现：src/testing/causal-repair-benchmark.ts；tests/workspace/causal-benchmark.test.ts。
-- 下一步：将投机候选 OCC 冲突接入因果子图修复，沿用显式 heads 隔离候选历史。
-- 后续：绑定 AgentRuntime checkpoint；用真实模型任务扩展基准并计量 token。
-- 边界：依赖与复用验证由宿主负责；prepared 不等于 committed；视图不恢复文件或上下文。
-- 边界：未提交候选输出不会自动物化；基准无并发写入；modelTokens 为 null。
-- 已知坑：全量测试期间不可并行 pnpm build，崩溃矩阵可能读到半构建 dist。
-- 已知坑：src 禁止同步子进程；基准使用异步 execFile；基线应在修改前完成或用独立 HEAD 副本。
-- 环境：已有 node_modules 与 cc，依赖未变化，无需 install；独立 HEAD 基线 523 通过、7 跳过。
-- 验证：typecheck、build、diff 检查通过；全量 529 通过、7 跳过（84.52 秒）。
-- 其他阅读入口：docs/VISION.md、docs/causal-repair.md、src/workspace/causal-repair.ts。
+- 本轮：speculateWorkspace 策略新增 repair(original, conflict)，接通 OCC 冲突后的局部重算与再提交。
+- 本轮：修复必须显式提供 heads / changed / atSeq，复用验证与 execute 沿用 prepareWorkspaceRepair。
+- 本轮：保留原候选 fork 供宿主验证、物化独立输出；commitOptions 在重算后收集提交证据。
+- 本轮：每候选只修复一次，维持优先级；再次冲突转向后备候选，修复回调抛错终止本轮。
+- 本轮：candidate.commit 保留原冲突，candidate.repair 记录新 txId / heads / commit。
+- 本轮：SPECULATION_REPAIR_PREPARED 关联策略及前后事务；原有修复日志保留节点替代映射。
+- 生命周期：正常回收全部 fork / 基线；提交抛错保留不确定事务，禁止继续选择胜者。
+- 入口：src/workspace/speculation.ts、tests/workspace/speculation.test.ts、docs/speculative-workspaces.md。
+- 基准：pnpm benchmark:causal 比较完整重跑 / 局部修复 / 不校验复用；详见 docs/causal-repair-benchmark.md。
+- 基准样本：3 轮×4 分支，重跑与修复均 3/3 正确，实际工具 12→3，另有验证读取。
+- 基准边界：固定确定性文件任务，无并发写入，modelTokens 为 null；不宣称稳定加速。
+- 下一步：绑定 AgentRuntime checkpoint 与因果 heads，支持可查询的上下文/世界版本对应关系。
+- 后续：将投机冲突修复纳入基准，比较整轮重跑；扩展真实模型任务并计量 token。
+- 边界：依赖、变化种子、复用有效性由宿主声明与验证；未提交输出不会自动物化。
+- 边界：prepared 不等于 committed；视图不恢复文件或上下文；尚不支持多个胜者合并。
+- 已知坑：全量测试期间不可并行在同一目录 pnpm build，崩溃矩阵可能读到半构建 dist。
+- 已知坑：src 禁止同步子进程；原生测试需要 cc，本轮环境缺失，已安装 gcc / libc6-dev。
+- 环境：已有 node_modules，依赖未变化，无需 pnpm install；每轮仍需核实编译器是否存在。
+- 基线：补齐 cc 后独立 HEAD 副本 529 通过、7 跳过（90.21 秒）。
+- 验证：pnpm typecheck、pnpm build、git diff --check 通过；全量 534 通过、7 跳过（96.11 秒）。

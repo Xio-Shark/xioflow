@@ -80,3 +80,13 @@
 - 基线：已有依赖和 cc，无需 install；首次基线与新增文件交叠触发同步子进程门禁，已使用异步 execFile；独立 HEAD 副本干净基线 523 通过、7 跳过。
 - 最终验证：`pnpm typecheck`、`pnpm build`、`git diff --check` 通过；`pnpm test` 为 43 文件通过、1 跳过，529 项通过、7 跳过，耗时 84.52 秒；实测采样未与测试/构建交叠。
 - 边界与下一轮：当前固定依赖、确定性文件任务、无并发写入，`modelTokens: null`；下一轮将投机候选 OCC 冲突接入显式分支的局部修复，再绑定 AgentRuntime checkpoint 与真实模型计量。
+
+## 2026-10-08 — 投机候选冲突后的因果局部修复
+- 新增策略 `repair(original, conflict)`：原候选 OCC 冲突后，在当前世界新建事务，按显式 heads 局部重算，再走普通 OCC；每候选一次修复，保留优先级，再次冲突转向后备候选。
+- 复用 `prepareWorkspaceRepair`，原 fork 保留供宿主验证及物化独立输出；重算后通过 `commitOptions` 收集包含复用输入的提交证据。
+- `candidate.commit` 保留原冲突，`candidate.repair` 保存新事务、heads 与提交结果；新增 `SPECULATION_REPAIR_PREPARED` 关联策略及前后事务。
+- 生命周期：正常回收原候选、修复 fork 和全部基线；修复回调错误终止并清理；提交抛错保留不确定事务及基线，不再选择其他胜者。
+- 新增 5 项集成测试：选中子图及下游重算、独立结果物化与兄弟分支隔离、再次冲突回退、工具/证据错误清理、不确定提交保留；更新 README、VISION 和 API 示例。
+- 环境与基线：依赖未变，无需 install；首次基线因缺 cc 导致 3 套件无法启动，安装 gcc / libc6-dev 后独立 HEAD 副本 529 通过、7 跳过（90.21 秒）。
+- 验证：`pnpm typecheck`、`pnpm build`、`git diff --check` 通过；`pnpm test` 534 通过、7 跳过（96.11 秒）。
+- 边界与下一轮：变化种子、完整依赖和复用有效性由宿主负责，不自动恢复上下文或合并多个胜者；下一步绑定 AgentRuntime checkpoint 与因果 heads，再扩展投机修复基准。
