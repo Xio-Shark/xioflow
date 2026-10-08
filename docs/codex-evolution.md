@@ -109,3 +109,12 @@
 - 无需 install；初次全量与编辑重叠，原有 539 项通过、新增 3 项因缓存旧实现失败；稳定代码后重新完成全量验证。
 - 验证：pnpm typecheck、pnpm build、git diff --check 通过；定向 8 通过；pnpm test 542 通过、7 跳过（85.91 秒）。
 - 边界与下一步：恢复候选不证明当前有效，不自动重建模型上下文；下一轮编排影响计划、文件子图修复与上下文重建并绑定新 heads。
+
+## 2026-10-08 — 因果修复与 agent 上下文原子绑定
+- 新增 recoverCausalCheckpoint(id, expectedCheckpointSeq, prepare)，拒绝过期计划和未跟踪上下文，在独占恢复期接收宿主重建结果。
+- causal_repaired checkpoint 原子绑定新上下文、工作区与显式 heads，记录源 checkpointRef；保留预算，清除旧验证版本，成功后停在 paused。
+- 抽取并复用既有恢复生命周期：准备失败保留原上下文，绑定失败/中断调用 discard，shutdown 等待恢复结束。
+- 新增 4 项集成测试，覆盖实际文件变化后的局部修复/独立节点复用、重开与恢复、过期计划、失败清理、中断及未跟踪/终态拒绝。
+- 更新 README、VISION、运行时契约与宿主 prepareWorkspaceRepair / 上下文重建接入示例；重写交接摘要。
+- 无需 install；基线 542 通过、7 跳过；pnpm typecheck、pnpm build、git diff --check 通过，定向 64 通过，全量 546 通过、7 跳过（90.90 秒）。
+- 边界与下一步：绑定不提交文件或证明世界有效；宿主重建上下文、验证复用与计量修复成本，下一轮将投机冲突修复或跨 agent 重建纳入基准。

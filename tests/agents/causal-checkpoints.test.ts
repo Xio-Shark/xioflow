@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -206,4 +206,112 @@ describe('agent checkpoint causal branches', () => {
     expect(() => runtime.planCausalRecovery([999999])).toThrow('absent');
     expect(() => runtime.planCausalRecovery([NaN])).toThrow('absent');
   });
+
+  it('binds an actual incremental repair with rebuilt context and reopens its history', async () => {
+    const source = node();
+    const stable = node();
+    const derived = node([source.seq]);
+    open({ step: async () => {
+      runtime.pause('a');
+      return { status: 'ready', checkpoint: 'old context', causalHeads: [derived.seq, stable.seq] };
+    } });
+    create([]);
+    await runtime.drain();
+    fs.writeFileSync(path.join(temp, 'repo', 'input'), 'updated');
+    const impact = runtime.planCausalRecovery([source.seq]).affected[0];
+    const executed: number[] = [];
+    const repaired = await runtime.recoverCausalCheckpoint('a', impact.checkpoint.seq, async (saved) => {
+      expect(runtime.get('a')?.status).toBe('recovering');
+      expect(() => runtime.resume('a')).toThrow();
+      const result = await prepareWorkspaceRepair(new ProcessSupervisor(domain), {
+        txId: 'repair', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'repair'),
+        atSeq: saved.seq, heads: saved.causalHeads!, changed: [source.seq],
+        validateReuse: async (tx, unaffected) => {
+          expect(unaffected.map((entry) => entry.seq)).toEqual([stable.seq]);
+          expect(fs.readFileSync(path.join(tx.forkRoot, 'input'), 'utf8')).toBe('updated');
+        },
+        execute: async (entry, tx) => {
+          executed.push(entry.seq);
+          const value = fs.readFileSync(path.join(tx.forkRoot, 'input'), 'utf8');
+          return { actorId: 'a', observation: { ...entry.observation, resultHash: value } };
+        },
+      });
+      return { checkpoint: { results: result.replacements.map(({ node }) => node.observation.resultHash) },
+        causalHeads: result.heads, workspace: result.transaction };
+    });
+    expect(executed).toEqual([source.seq, derived.seq]);
+    expect(repaired).toMatchObject({ checkpoint: { results: ['updated', 'updated'] }, stepsUsed: 1,
+      status: 'paused', workspace: { txId: 'repair' }, validatedWorkspaceVersion: null });
+    const saved = runtime.checkpoints('a').at(-1)!;
+    expect(saved.causalHeads).toContain(stable.seq);
+    expect(saved.causalHeads).not.toContain(derived.seq);
+    expect(runtime.planCausalRecovery([source.seq]).affected).toEqual([]);
+    expect(runtime.planCausalRecovery([saved.causalHeads![0]]).affected[0].checkpoint.seq).toBe(saved.seq);
+    expect(runtime.checkpointCausalView('a', impact.checkpoint.seq)?.heads).toEqual([derived.seq, stable.seq]);
+    const event = domain.getStore().getJournalEvent(domain.domainId, saved.seq)!;
+    expect(event.payload).toMatchObject({ transition: 'causal_repaired', checkpointRef: impact.checkpoint.seq });
+    runtime.close(); domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    open();
+    expect(runtime.checkpoints('a').at(-1)).toEqual(saved);
+    expect(runtime.get('a')).toEqual(repaired);
+    runtime.restoreCheckpoint('a', saved.seq);
+    expect(runtime.get('a')?.checkpoint).toEqual(saved.checkpoint);
+  });
+
+  it('rejects stale plans before preparation and preserves context on invalid binding', async () => {
+    open(); create([node().seq]); runtime.pause('a');
+    const saved = runtime.checkpoints('a')[0];
+    let called = false;
+    await expect(runtime.recoverCausalCheckpoint('a', saved.seq + 1, async () => {
+      called = true; return undefined;
+    })).rejects.toThrow('replan');
+    expect(called).toBe(false);
+    let discarded = 0;
+    await expect(runtime.recoverCausalCheckpoint('a', saved.seq, async () => ({
+      checkpoint: 'bad', causalHeads: [999999], workspace,
+      discard: async () => { discarded++; },
+    }))).rejects.toThrow('absent');
+    expect(discarded).toBe(1);
+    expect(runtime.get('a')).toMatchObject({ status: 'paused', checkpoint: saved.checkpoint, causalHeads: saved.causalHeads });
+    expect(runtime.checkpoints('a')).toEqual([saved]);
+    await expect(runtime.recoverCausalCheckpoint('a', saved.seq, async () => { throw new Error('rebuild failed'); }))
+      .rejects.toThrow('rebuild failed');
+    expect(await runtime.recoverCausalCheckpoint('a', saved.seq, async () => undefined)).toBeUndefined();
+    expect(runtime.checkpoints('a')).toEqual([saved]);
+  });
+
+  it('joins interruption and discards a prepared causal context without publishing it', async () => {
+    open(); create([node().seq]); runtime.pause('a');
+    const saved = runtime.checkpoints('a')[0];
+    let entered!: () => void; let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let discarded = 0;
+    const pending = runtime.recoverCausalCheckpoint('a', saved.seq, async () => {
+      entered(); await gate;
+      return { checkpoint: 'new', causalHeads: [], workspace, discard: async () => { discarded++; } };
+    });
+    await started;
+    const stopping = runtime.interrupt('a');
+    release();
+    expect(await pending).toBeUndefined();
+    await stopping;
+    expect(discarded).toBe(1);
+    expect(runtime.get('a')).toMatchObject({ status: 'interrupted', checkpoint: saved.checkpoint, causalHeads: saved.causalHeads });
+    expect(runtime.checkpoints('a')).toEqual([saved]);
+  });
+
+  it('rejects untracked contexts and terminal agents before preparation', async () => {
+    open({ step: async () => ({ status: 'completed', checkpoint: 'done', causalHeads: [] }) });
+    create(); runtime.pause('a');
+    let called = false;
+    const prepare = async () => { called = true; return undefined; };
+    await expect(runtime.recoverCausalCheckpoint('a', runtime.checkpoints('a')[0].seq, prepare)).rejects.toThrow('tracked');
+    runtime.create({ id: 'done', runId: 'run', input: null, checkpoint: null, causalHeads: [], maxSteps: 1 });
+    await runtime.drain();
+    await expect(runtime.recoverCausalCheckpoint('done', runtime.checkpoints('done').at(-1)!.seq, prepare)).rejects.toThrow('Cannot recover');
+    expect(called).toBe(false);
+  });
+
 });

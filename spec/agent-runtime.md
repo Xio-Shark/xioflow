@@ -21,6 +21,8 @@ Version 2 keeps status/budget/workspace metadata in `payload.state`. Creation
 stores `payload.input` and `payload.checkpoint` once. A completed step stores its
 new checkpoint; control-only transitions carry neither data body. Restoration
 stores a backward `checkpointRef` to a checkpoint event for the same agent.
+A `causal_repaired` event stores the rebuilt checkpoint plus `checkpointRef`
+identifying the source context, with its new workspace and heads in metadata.
 The runtime reconstructs complete public `AgentState`/`AgentCheckpoint` values;
 callers of those APIs do not need to understand the encoding. Raw journal readers
 must check the version. Missing, forward or cross-agent references fail visibly,
@@ -186,6 +188,61 @@ current-world validity, or infer how model context should be rebuilt. The host
 must recheck world revisions during reconstruction. `prepareWorkspaceRepair`
 can separately recompute the affected file subgraph; its new heads cannot be
 substituted into an old model checkpoint without rebuilding that context.
+
+### Binding incrementally repaired context
+
+`recoverCausalCheckpoint(id, expectedCheckpointSeq, prepare)` connects an impact
+plan to asynchronous workspace repair and host context reconstruction. It rejects
+an outdated checkpoint sequence or untracked context before calling `prepare`.
+The agent must be paused or interrupted, with an open scope and nonterminal Run.
+It reserves the agent as `recovering`, preventing concurrent dispatch or restore.
+
+`prepare(saved)` receives a detached copy of the inspected checkpoint. Return
+`{ checkpoint, causalHeads, workspace, discard? }` after rebuilding the context
+from repaired results and validating the new world. Heads must be explicit
+(`[]` is allowed) and exist in this domain; the workspace must be an open
+transaction of this Run, not bound to another active agent. A successful bind
+writes context, heads and workspace in one `causal_repaired` checkpoint event,
+records the source checkpoint reference, clears the prior validation version,
+and leaves the agent paused. Agent and Run budgets are never rewound or charged
+by the binding operation; host repair work is accounted for by its own adapters.
+The new checkpoint participates in history, causal queries and later restoration,
+including after domain reopen.
+
+```ts
+const impact = agents.planCausalRecovery([changedNodeSeq]).affected[0];
+if (impact) {
+  await agents.recoverCausalCheckpoint(impact.agentId, impact.checkpoint.seq, async (saved) => {
+    const repaired = await prepareWorkspaceRepair(supervisor, {
+      ...repairOptions, // txId, runId, root, forkPath, validateReuse, execute
+      changed: [changedNodeSeq], atSeq: saved.seq, heads: saved.causalHeads!,
+    });
+    const discard = async () => {
+      await supervisor.abortWorkspaceTransaction(repaired.transaction.txId);
+      await supervisor.pruneSnapshots([repaired.transaction.baseSnapshotId], { runId });
+    };
+    try {
+      // Host adapter rebuilds model/tool context using the fresh results and
+      // independently verifies world revisions and all reused evidence.
+      const checkpoint = await rebuildAndValidateContext(saved.checkpoint, repaired);
+      return { checkpoint, causalHeads: repaired.heads, workspace: repaired.transaction, discard };
+    } catch (error) {
+      try { await discard(); }
+      catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Context rebuild and cleanup failed'); }
+      throw error;
+    }
+  });
+}
+```
+
+Returning `undefined` abandons preparation. A thrown error preserves the previous
+context and branch. Once preparation returns resources, failed binding or an
+interrupt calls `discard` and does not publish the new checkpoint; cleanup
+failures are surfaced. Before returning, the host owns cleanup on its own errors.
+Shutdown joins preparation through the existing recovery lifecycle. Binding does
+not commit files, prove world validity, infer complete dependencies, or transform
+old model context automatically. Continue execution on the prepared fork and use
+the normal OCC commit path; cross-agent recovery remains host-orchestrated.
 
 ## Task scopes
 

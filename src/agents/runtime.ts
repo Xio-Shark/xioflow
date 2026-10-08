@@ -23,6 +23,15 @@ export interface AgentCheckpoint {
   causalHeads?: number[] | null;
 }
 
+/** Host-rebuilt context and its evidence on a prepared, open workspace. */
+export interface AgentCausalCheckpointPreparation {
+  checkpoint: AgentData;
+  causalHeads: number[];
+  workspace: AgentWorkspace;
+  /** Release prepared resources if binding fails or recovery is interrupted. */
+  discard?: () => Promise<void>;
+}
+
 export interface AgentCausalRecoveryPlan {
   /** Host-confirmed changed evidence, with duplicates removed. */
   changed: number[];
@@ -332,6 +341,39 @@ export class AgentRuntime {
       discard?: () => Promise<void>;
     } | undefined>
   ): Promise<AgentState | undefined> {
+    return this.recoverPrepared(id, prepare,
+      (state, prepared) => this.commitRestore(state, prepared.seq, prepared.workspace));
+  }
+
+  /** Rebuild context after causal repair; reject an outdated impact plan before host work. */
+  async recoverCausalCheckpoint(
+    id: string,
+    expectedCheckpointSeq: number,
+    prepare: (checkpoint: AgentCheckpoint) => Promise<AgentCausalCheckpointPreparation | undefined>,
+  ): Promise<AgentState | undefined> {
+    this.assertAccepting();
+    const saved = this.checkpoints(id).at(-1)!;
+    if (saved.seq !== expectedCheckpointSeq) throw new Error('Agent checkpoint changed; replan causal recovery');
+    if (saved.causalHeads == null) throw new Error('Causal recovery requires a tracked checkpoint');
+    return this.recoverPrepared(id, () => prepare(saved), (state, prepared) => {
+      this.assertRun(state.runId);
+      if (!prepared.workspace) throw new Error('Causal recovery requires a prepared workspace');
+      this.assertWorkspace(prepared.workspace, state.runId, id);
+      if (!Array.isArray(prepared.causalHeads)) throw new Error('Causal recovery requires explicit heads');
+      return this.record({ ...state, checkpoint: data(prepared.checkpoint),
+        causalHeads: this.normalizeCausalHeads(prepared.causalHeads),
+        workspace: { txId: prepared.workspace.txId, forkRoot: prepared.workspace.forkRoot },
+        status: 'paused', pauseRequested: false, reason: 'causal_repaired', error: null,
+        validatedWorkspaceVersion: null,
+      }, 'causal_repaired', expectedCheckpointSeq);
+    });
+  }
+
+  private async recoverPrepared<T extends { discard?: () => Promise<void> }>(
+    id: string,
+    prepare: (checkpoints: readonly AgentCheckpoint[]) => Promise<T | undefined>,
+    bind: (state: AgentState, prepared: T) => AgentState,
+  ): Promise<AgentState | undefined> {
     this.assertAccepting();
     const previous = this.require(id);
     if (previous.status !== 'paused' && previous.status !== 'interrupted') throw new Error(`Cannot recover ${previous.status} agent`);
@@ -341,7 +383,7 @@ export class AgentRuntime {
     this.record({ ...previous, status: 'recovering', reason: 'reconstruction', pauseRequested: false }, 'recovery_started');
     // Register the join before invoking host code, which may request shutdown.
     const recovery = Promise.resolve().then(async () => {
-      let prepared: Awaited<ReturnType<typeof prepare>>;
+      let prepared: T | undefined;
       try {
         prepared = await prepare(checkpoints);
         if (this.require(id).reason === 'interrupt_requested') {
@@ -355,7 +397,7 @@ export class AgentRuntime {
           this.record(previous, 'recovery_abandoned');
           return undefined;
         }
-        return this.commitRestore(this.require(id), prepared.seq, prepared.workspace);
+        return bind(this.require(id), prepared);
       } catch (error) {
         let failure = error;
         if (prepared?.discard) {
@@ -690,6 +732,7 @@ export class AgentRuntime {
     const { input, checkpoint, ...metadata } = state;
     const contents = transition === 'created' ? { input, checkpoint }
       : transition === 'step_completed' ? { checkpoint }
+      : transition === 'causal_repaired' ? { checkpoint, checkpointRef }
       : transition === 'restored' ? { checkpointRef }
       : {};
     this.domain.getStore().recordJournalEvent({

@@ -2,7 +2,7 @@ import type { JournalEvent } from '../types.js';
 import type { AgentData, AgentState } from './runtime.js';
 
 export const isAgentCheckpoint = (transition: unknown): boolean =>
-  transition === 'created' || transition === 'step_completed' || transition === 'restored';
+  transition === 'created' || transition === 'step_completed' || transition === 'restored' || transition === 'causal_repaired';
 
 /** v1 stored complete states; v2 stores data once and projects control-only events. */
 export function projectAgentEvent(
@@ -17,7 +17,7 @@ export function projectAgentEvent(
   const hasInput = Object.hasOwn(payload, 'input');
   const hasCheckpoint = Object.hasOwn(payload, 'checkpoint');
   if (payload.transition === 'created' && (!hasInput || !hasCheckpoint)) throw new Error('Agent creation data is missing');
-  if (payload.transition === 'step_completed' && !hasCheckpoint) throw new Error('Agent checkpoint data is missing');
+  if (['step_completed', 'causal_repaired'].includes(String(payload.transition)) && !hasCheckpoint) throw new Error('Agent checkpoint data is missing');
   if (!hasInput && !previous) throw new Error('Agent control event has no prior state');
   let checkpoint: AgentData;
   if (payload.transition === 'restored') {

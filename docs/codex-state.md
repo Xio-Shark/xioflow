@@ -13,22 +13,26 @@
 - checkpoints(id) 返回历史 workspace / heads；checkpointCausalView(id, seq) 查询当时分支。
 - null / 省略 heads 表示未跟踪，[] 是显式空分支；新步骤省略会清除旧关联。
 - findValidCheckpoint 使用候选自己的 heads；restore / recover 同步恢复上下文与 heads，预算不回退。
-- 本轮：planCausalRecovery(changed) 查询 domain 内所有 agent 的当前 checkpoint 失效影响。
-- 本轮：affected 返回 checkpoint、invalidatedHeads / Nodes，排除兄弟分支；包含终态输出。
-- 本轮：restartFrom 选最近且未受这些种子影响的历史 checkpoint；无候选时省略。
-- 本轮：unaffected / untracked 分开，未知种子拒绝，种子去重；纯查询，不执行工具或写 journal。
-- 本轮：测试覆盖跨 agent 传递依赖、独立分支、候选恢复、重开 domain、未跟踪和终态输出。
-- 入口：src/agents/runtime.ts、tests/agents/causal-checkpoints.test.ts、spec/agent-runtime.md#cross-agent-causal-recovery-plans。
+- 已有：planCausalRecovery(changed) 跨 agent 查询当前 checkpoint 失效影响与历史恢复候选。
+- affected 包含终态输出、选中分支的 invalidatedHeads / Nodes；unaffected / untracked 分开。
+- 本轮：recoverCausalCheckpoint(id, expectedCheckpointSeq, prepare) 接通局部修复后的上下文绑定。
+- 入口拒绝过期 checkpoint / 未跟踪上下文；复用 recoverCheckpoint 的独占 recovering、清理、中断与 shutdown 生命周期。
+- 宿主 prepare 返回重建 checkpoint、显式 causalHeads、open workspace，可提供 discard；undefined 放弃。
+- causal_repaired 事件原子存上下文、heads、workspace，并以 checkpointRef 记录源上下文。
+- 新 checkpoint 可历史查询、恢复和重开 domain；清除旧 validatedWorkspaceVersion，保留预算，停在 paused。
+- 测试：实际文件变化后修复两个依赖节点、复用独立节点；持久化/恢复、过期计划、失败清理、中断、终态与未跟踪拒绝。
+- 入口：src/agents/runtime.ts、src/agents/journal.ts、tests/agents/causal-checkpoints.test.ts。
+- 示例与契约：spec/agent-runtime.md#binding-incrementally-repaired-context。
 - 基准：pnpm benchmark:causal 比较完整重跑 / 局部修复 / 不校验复用；详见 docs/causal-repair-benchmark.md。
 - 基准样本：3 轮×4 分支，重跑与修复均 3/3 正确，实际工具 12→3，另有验证读取。
 - 基准边界：固定确定性文件任务，无并发写入，modelTokens 为 null；不宣称稳定加速。
-- 下一步：宿主编排影响计划、prepareWorkspaceRepair 与上下文重建，在新 checkpoint 绑定修复 heads。
-- 后续：将投机冲突修复纳入基准，比较整轮重跑；扩展真实模型任务并计量 token。
-- 边界：影响计划只解释已声明变化，不证明当前世界有效；使用前检查 checkpoint 是否推进并验证新世界。
-- 边界：终态出现在影响报告中，不改变现有恢复状态限制；新 heads 不能直接替换旧模型上下文。
-- 边界：依赖、变化种子、复用有效性由宿主声明与验证；未提交输出不会自动物化。
-- 边界：历史 workspace 可能已回收，查询不恢复文件；prepared 不等于 committed，不支持多个胜者合并。
+- 下一步：将投机冲突修复或跨 agent 上下文重建纳入基准，对比完整重跑并计量执行成本。
+- 后续：跨 agent 宿主恢复编排、真实模型任务与 token 计量、互不冲突写集多胜者合并。
+- 边界：影响计划只解释已声明变化，不证明当前世界有效；恢复期间宿主验证新世界与复用条件。
+- 边界：上下文重建由宿主提供；绑定不提交文件，仍走正常 OCC；宿主修复成本不自动记入 agent 步数。
+- 边界：准备回调返回前的异常清理由宿主负责，返回后的绑定失败/中断调用 discard；旧工作区不会自动回收。
+- 边界：终态只报告不恢复；历史 workspace 可能已回收；多 agent 恢复非原子，依赖完整性需宿主声明。
 - 已知坑：全量测试期间不要改源码/测试或并行 build，可能混用缓存旧源码、新测试或半构建 dist。
 - 环境：已有 node_modules 和 cc，依赖未变化，无需 pnpm install。
-- 验证：typecheck、build、diff --check 通过；定向 8 项通过；全量 542 通过、7 跳过（85.91 秒）。
-- 初次全量与编辑重叠：原有 539 项通过，新增 3 项读到旧实现而失败；稳定代码后的全量已通过。
+- 本轮基线：542 通过、7 跳过（88.09 秒）；typecheck 和定向 64 项已通过。
+- 最终验证：pnpm typecheck、pnpm build、git diff --check 通过；定向 64 通过，全量 546 通过、7 跳过（90.90 秒）。
