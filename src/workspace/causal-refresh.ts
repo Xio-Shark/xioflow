@@ -1,4 +1,6 @@
 import type { ProcessSupervisor } from '../supervisor/supervisor.js';
+import { WorkspaceCausalGraph } from './causal-graph.js';
+import type { CommitResult } from './transactions.js';
 import { prepareWorkspaceBranchRepair, type WorkspaceBranchRepairOptions,
   type WorkspaceBranchRepairResult } from './causal-repair.js';
 import { validateWorkspaceCausalBranches, type CausalValidationOptions,
@@ -11,6 +13,56 @@ export interface WorkspaceCausalRefreshOptions extends CausalValidationOptions {
 export type WorkspaceCausalRefreshResult =
   | { status: 'failed' | 'unchanged'; validation: CausalValidationResult }
   | { status: 'prepared'; validation: CausalValidationResult; repair: WorkspaceBranchRepairResult };
+
+export type WorkspaceCausalRefreshCommitResult =
+  | { status: 'failed' | 'unchanged'; validation: CausalValidationResult }
+  | { status: 'committed' | 'conflict'; validation: CausalValidationResult;
+      repair: WorkspaceBranchRepairResult; commit: CommitResult };
+
+/** Refresh compatible branches and publish their union with mandatory observation replay.
+ * The selected union must be a complete deterministic operation log, including reused nodes.
+ * Does not bind agent checkpoints. A thrown commit retains recovery resources.
+ */
+export async function refreshWorkspaceCausalBranches(
+  supervisor: ProcessSupervisor, options: WorkspaceCausalRefreshOptions,
+): Promise<WorkspaceCausalRefreshCommitResult> {
+  options = { ...options, repair: { ...options.repair } };
+  const prepared = await prepareWorkspaceCausalRefresh(supervisor, options);
+  if (prepared.status !== 'prepared') return prepared;
+  const { validation, repair } = prepared;
+  const tx = repair.transaction;
+  let commitStarted = false;
+  let commit: CommitResult;
+  try {
+    const log = new WorkspaceCausalGraph(supervisor.getDomain()).view(repair.heads)
+      .nodes.map((node) => node.observation);
+    commitStarted = true;
+    commit = await supervisor.commitWorkspaceTransaction(tx.txId, {
+      observationPolicy: 'always', observations: { closedWorld: true, log, replay: options.replay },
+    });
+  } catch (error) {
+    if (commitStarted) {
+      // TX_COMMITTING may already exist or files may already have been applied.
+      throw new Error(`Causal refresh commit failed for ${tx.txId}; retain its fork and baseline, inspect the journal before recovery`, { cause: error });
+    }
+    try {
+      await supervisor.abortWorkspaceTransaction(tx.txId, 'causal refresh evidence failed');
+      await supervisor.pruneSnapshots([tx.baseSnapshotId], { runId: validation.runId });
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Causal refresh evidence failed; cleanup incomplete');
+    }
+    throw error;
+  }
+  try {
+    if (commit.status === 'conflict') await supervisor.abortWorkspaceTransaction(tx.txId, 'causal refresh conflict');
+    await supervisor.pruneSnapshots([tx.baseSnapshotId], { runId: validation.runId });
+  } catch (error) {
+    throw new Error(`Causal refresh ${tx.txId} ${commit.status}; cleanup incomplete`, { cause: error });
+  }
+  return { status: commit.status, validation, repair: {
+    ...repair, transaction: { ...tx, status: commit.status === 'committed' ? 'committed' : 'aborted' },
+  }, commit };
+}
 
 /** Detect changes and prepare one shared repair for compatible branches.
  * Failed probes block repair. Nothing is committed or bound to agent checkpoints.

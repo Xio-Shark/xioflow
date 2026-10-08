@@ -20,7 +20,6 @@
 - prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。
 - branches 为唯一 id / heads；联合视图拓扑执行，返回各分支 sourceHeads / 新 heads。
 - 复用证据统一验证；独立 / 空分支保留，排除未选兄弟；支持连续修复。
-- 准备失败回收 fork / 基线；成功后宿主统一 OCC / 回收；不合并互斥策略。
 - recoverAgentSharedCausalBatch：一次共享重算，逐项绑定独立事务与上下文。
 - 校验分支 id / sourceHeads 与 checkpoint；新 heads 自动绑定，回调收到副本。
 - 单事务单活跃 agent；宿主 bind 负责独立输出分发和上下文重建。
@@ -34,12 +33,11 @@
 - 无文本 patch / 空目录 / 时间戳 / 外部系统 diff；快照覆盖遵循 Git 忽略规则。
 - 宿主保证依赖完整性、确定性和文件效果，哈希匹配不能证明这些声明。
 - 时间旅行是 checkpoint 粒度，不是任意序号回滚，不重放模型或外部系统。
-- 基准 pnpm benchmark:causal / benchmark:merge；协议 docs/*benchmark.md。
 - 因果基准工具 12→3；合并基准总工具 25→16；均 3/3 正确，另计验证 / 复制。
 - 新增 pnpm benchmark:shared：逐分支独立修复 / 共享祖先修复 / 不校验复用。
 - 共享基准入口 src/testing/shared-repair-benchmark.ts；公共输入扰动，无独立节点复用。
 - 共享分发各分支输出到独立事务，逐份验证公共输入，再逐项 OCC 提交。
-- 共享基准工具 12→6，耗时略升；modelTokens 均 null；不覆盖模型、调度或并发扰动。
+- 共享基准工具 12→6，耗时略升；modelTokens 均 null，不代表模型收益。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。
 - validateWorkspaceCausalBranches：同一当前基线，逐分支独立 fork 重放，自动发现因果修复种子。
 - 返回 matched / changed / failed、首个差异 seq、去重 changed、联合 plan 与实际 replayedSteps。
@@ -54,6 +52,9 @@
 - 修复使用新基线；validateReuse 必需；崩溃可能留下尚未关联的准备记录。
 - commitWorkspaceTransaction 支持 observationPolicy: 'always'，无文件冲突也重放。
 - 要求 closedWorld / observe 哈希；无读追踪不降级，成功 validation 为 observations。
-- conflicts 可为空而 status 为 conflict；检查 observation；复用 TX_COMMITTING 恢复。
-- 文档 docs/causal-validation.md；下一步：输出分发与提交协调、强制验证成本基准。
-- 最新验证：pnpm typecheck 通过；pnpm test 608 通过 / 7 跳过（101.00 秒）。
+- refreshWorkspaceCausalBranches：探测→共享修复→联合 heads 完整日志→强制重放提交。
+- 包含复用祖先；成功回收基线，冲突中止回收；提交抛错保留恢复资源并报告 txId。
+- 依已有 validationSeq→txId→TX_COMMITTED 追溯；不分发独立事务、不绑定 checkpoint。
+- 文档 docs/causal-validation.md；下一步：独立输出分发 / checkpoint 发布协调与验证成本基准。
+- 环境需 C 编译器（cc）与 libc 开发包；原生 reaper 测试必须实际构建。
+- 最新验证：pnpm typecheck 通过；pnpm test 611 通过 / 7 跳过（98.97 秒）。

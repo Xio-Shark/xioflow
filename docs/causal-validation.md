@@ -96,3 +96,32 @@ if (result.status === 'prepared') {
 强制模式要求 `observations`、`closedWorld: true` 及每条 observe 的非空结果哈希；配置无效时抛错，事务仍可修正后提交。运行过不在日志内的受监督进程则返回 `not_closed_world` 冲突；写写冲突仍不允许重放放行。成功始终返回 `validation: 'observations'`。没有文件冲突时也可能发现观测失效，此时 `conflicts` 为空，应检查 `status` 和 `observation`，不能只检查冲突数组长度。
 
 重放期间主工作区变化会返回 `workspace_changed`，不发布修复输出。现有 `TX_COMMITTING` 保存已经验证的提交计划，重启后继续应用该计划，无需再次提交工具日志；它不是一次新的验证。成功或冲突均回收临时重放资源，原事务的基线仍按既有宿主生命周期管理。
+
+
+## 自动刷新并提交兼容分支
+
+`refreshWorkspaceCausalBranches(supervisor, options)` 接受与 `prepareWorkspaceCausalRefresh` 相同的参数，将探测、共享重算、完整证据重放与发布连成一次调用：
+
+```ts
+import { refreshWorkspaceCausalBranches } from '@xioflow/kernel';
+
+const result = await refreshWorkspaceCausalBranches(supervisor, {
+  txId: 'probe-44', runId, root, forkPath: '/tmp/xio-probe-44',
+  atSeq, branches, closedWorld: true, replayPolicy: 'deterministic',
+  replay: adapter.replay,
+  repair: {
+    txId: 'publish-44', forkPath: '/tmp/xio-publish-44',
+    validateReuse: adapter.validateReuse, execute: adapter.execute,
+  },
+});
+if (result.status === 'committed') {
+  // result.repair.branches contains the published causal heads for each branch.
+  // result.commit.validation === 'observations'
+}
+```
+
+无变化或探测失败分别返回 `unchanged` / `failed`，不创建修复。准备成功后，从修复 heads 的联合因果视图按拓扑顺序提取日志，包含复用祖先，共享节点只重放一次；固定使用 `observationPolicy: 'always'`。适配器必须保证**联合视图**也是完整、可确定性重放的操作序列，分支应兼容；该前提比各分支单独可重放更强。
+
+成功返回 `committed`、验证报告、修复结果及提交结果，回收工作分叉和基线。观测失效或 OCC 冲突返回 `conflict` 并中止事务、回收资源，不自动重试。返回事务状态对应 `committed` / `aborted`，其中 fork 和快照路径仅用于追溯，已经不能访问。此入口在一个共享事务中发布所有兼容输出，不分发独立事务，也不更新 agent checkpoint。
+
+通过已有 `CAUSAL_VALIDATION_REPAIR_PREPARED.validationSeq → txId → TX_COMMITTED / TX_CONFLICTED` 查询探测与发布关系。准备成功不代表已经发布；以事务 journal 为准。提交抛错时可能已经写入 `TX_COMMITTING` 或应用文件，入口保留 fork 与基线并抛出带 txId 的错误：检查 journal，若存在 `TX_COMMITTING` 则通过原提交 API 完成恢复；若尚未开始提交则决定重新验证或中止。不要重新调用整个刷新流程来掩盖未知提交状态。已确定提交结果后的清理错误会明确携带该结果，不能据此假定发布被撤销。
