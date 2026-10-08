@@ -995,11 +995,15 @@ export function defineContractTestSuite(
       );
       const descendantPid = descendant.pid!;
       descendant.unref();
+      // Use OS time just like a real driver spawn; wall-clock/btime rounding can differ.
+      const startTimeMs = (await driver.getGroupEvidence?.(descendantPid))
+        ?.find((member) => member.pid === descendantPid)?.startTimeMs;
 
       domain.getStore().updateOperationStatus(opId, 'active', {
         pid: descendantPid,
         pgid: descendantPid,
         spawnTime: new Date().toISOString(),
+        ...(startTimeMs != null ? { osStartTime: new Date(startTimeMs).toISOString() } : {}),
         commandFingerprint: `${process.execPath}:-e`,
       });
       domain.getStore().updateOperationStatus(opId, 'stopping');

@@ -683,11 +683,15 @@ setTimeout(() => {
     );
     const descendantPid = descendant.pid!;
     descendant.unref();
+    // Use OS time just like a real driver spawn; wall-clock/btime rounding can differ.
+    const startTimeMs = (await driver.getGroupEvidence?.(descendantPid))
+      ?.find((member) => member.pid === descendantPid)?.startTimeMs;
 
     domain.getStore().updateOperationStatus(opId, 'active', {
       pid: descendantPid,
       pgid: descendantPid,
       spawnTime: new Date().toISOString(),
+      ...(startTimeMs != null ? { osStartTime: new Date(startTimeMs).toISOString() } : {}),
       commandFingerprint: `${process.execPath}:-e`,
     });
     // 模拟"leader 已被 SIGKILL"：进程身份里的 leader 不存在，但组里还有后代。
