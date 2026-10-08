@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -39,6 +39,90 @@ describe('agent checkpoint causal branches', () => {
     runtime?.close();
     domain.close();
     fs.rmSync(temp, { recursive: true, force: true });
+  });
+
+  it('compares cross-agent branches with shared evidence, divergence roots and declared writes', async () => {
+    const shared = node();
+    const left = node([shared.seq]);
+    const right = node([shared.seq]); // Identical hashes are still different executions.
+    const output = graph.record({ txId: 'tx', actorId: 'b', dependsOn: [right.seq],
+      observation: { kind: 'mutate', call: { tool: 'write', args: {} }, resultHash: 'output' },
+      writes: [{ status: 'M', path: 'input' }] });
+    const sibling = node();
+    open(); create([left.seq]);
+    const branchWorkspace = await new ProcessSupervisor(domain).beginWorkspaceTransaction({ txId: 'branch',
+      runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'branch') });
+    runtime.create({ id: 'b', runId: 'run', input: null, checkpoint: 'alternative',
+      workspace: branchWorkspace, causalHeads: [output.seq], maxSteps: 1 });
+    const refs = { left: { agentId: 'a', checkpointSeq: runtime.checkpoints('a')[0].seq },
+      right: { agentId: 'b', checkpointSeq: runtime.checkpoints('b')[0].seq } };
+    const count = domain.getStore().getJournalEvents(domain.domainId).length;
+    const result = compareAgentCheckpoints(runtime, refs.left, refs.right);
+    expect(result.context).toEqual([{ kind: 'changed', path: '', before: 'initial', after: 'alternative' }]);
+    expect(result.evidence).toEqual({ status: 'compared', leftHeads: [left.seq], rightHeads: [output.seq],
+      shared: [shared], leftOnly: [left], rightOnly: [right, output], leftRoots: [left.seq], rightRoots: [right.seq] });
+    expect(JSON.stringify(result.evidence)).not.toContain(`"seq":${sibling.seq}`);
+    expect(domain.getStore().getJournalEvents(domain.domainId)).toHaveLength(count);
+    result.left.saved.checkpoint = 'tampered';
+    if (result.evidence.status === 'compared') result.evidence.shared[0].observation.resultHash = 'tampered';
+    expect(runtime.checkpoints('a')[0].checkpoint).toBe('initial');
+    expect(graph.nodes()[0].observation.resultHash).toBe('value');
+    runtime.close(); domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    open();
+    expect(compareAgentCheckpoints(runtime, refs.left, refs.right).evidence).toMatchObject({
+      shared: [shared], rightOnly: [right, output] });
+  });
+
+  it('compares selected historical context with stable JSON pointers and atomic arrays', () => {
+    open();
+    const before = JSON.parse('{"nested":{"a/b~c":1},"removed":null,"array":[1],"same":{"a":1,"b":2},"__proto__":1}');
+    const after = JSON.parse('{"nested":{"a/b~c":2},"added":null,"array":[1,2],"same":{"b":2,"a":1},"__proto__":2}');
+    runtime.create({ id: 'a', runId: 'run', input: null, checkpoint: before, causalHeads: [], maxSteps: 1 });
+    runtime.create({ id: 'b', runId: 'run', input: null, checkpoint: after, causalHeads: [], maxSteps: 1 });
+    const left = { agentId: 'a', checkpointSeq: runtime.checkpoints('a')[0].seq };
+    const right = { agentId: 'b', checkpointSeq: runtime.checkpoints('b')[0].seq };
+    expect(compareAgentCheckpoints(runtime, left, right).context).toEqual([
+      { kind: 'changed', path: '/__proto__', before: 1, after: 2 },
+      { kind: 'added', path: '/added', after: null },
+      { kind: 'changed', path: '/array', before: [1], after: [1, 2] },
+      { kind: 'changed', path: '/nested/a~1b~0c', before: 1, after: 2 },
+      { kind: 'removed', path: '/removed', before: null },
+    ]);
+    expect(compareAgentCheckpoints(runtime, left, left)).toMatchObject({ context: [], evidence: {
+      status: 'compared', shared: [], leftOnly: [], rightOnly: [], leftRoots: [], rightRoots: [] } });
+    expect(() => compareAgentCheckpoints(runtime, left, { ...right, checkpointSeq: left.checkpointSeq })).toThrow('No checkpoint');
+  });
+
+  it.each([undefined, null])('keeps missing provenance distinct from an explicitly empty branch (%s)', (heads) => {
+    open(); create(heads);
+    runtime.create({ id: 'b', runId: 'run', input: null, checkpoint: 'initial', causalHeads: [], maxSteps: 1 });
+    const result = compareAgentCheckpoints(runtime,
+      { agentId: 'a', checkpointSeq: runtime.checkpoints('a')[0].seq },
+      { agentId: 'b', checkpointSeq: runtime.checkpoints('b')[0].seq });
+    expect(result.context).toEqual([]);
+    expect(result.evidence).toEqual({ status: 'untracked', left: null, right: { heads: [], nodes: [] } });
+  });
+
+  it('compares an ancestor checkpoint without including later or sibling observations', async () => {
+    const source = node();
+    let output = 0;
+    open({ step: async () => {
+      output = node([source.seq]).seq;
+      runtime.pause('a');
+      return { status: 'ready', checkpoint: 'derived', causalHeads: [output] };
+    } });
+    create([source.seq]);
+    const first = runtime.checkpoints('a')[0];
+    await runtime.drain();
+    const last = runtime.checkpoints('a').at(-1)!;
+    node([output]);
+    const result = compareAgentCheckpoints(runtime, { agentId: 'a', checkpointSeq: first.seq },
+      { agentId: 'a', checkpointSeq: last.seq });
+    expect(result.evidence).toMatchObject({ status: 'compared', shared: [source], leftOnly: [],
+      rightOnly: [{ seq: output }], leftRoots: [], rightRoots: [output] });
+    expect(result.left.saved.stepsUsed).toBe(0);
+    expect(result.right.saved.stepsUsed).toBe(1);
   });
 
   it('forks an old checkpoint from its historical baseline after live changes and source disposal', async () => {
@@ -86,6 +170,11 @@ describe('agent checkpoint causal branches', () => {
     open();
     expect(runtime.get('debug')).toMatchObject({ status: 'paused', checkpoint: saved.checkpoint, causalHeads: saved.causalHeads });
     expect(runtime.checkpointCausalView('debug', runtime.checkpoints('debug')[0].seq)?.heads).toEqual([output.seq]);
+    const comparison = compareAgentCheckpoints(runtime, { agentId: 'a', checkpointSeq: saved.seq },
+      { agentId: 'debug', checkpointSeq: runtime.checkpoints('debug')[0].seq });
+    expect(comparison).toMatchObject({ context: [], evidence: { status: 'compared', leftOnly: [], rightOnly: [] } });
+    expect(comparison.left.saved.workspace?.txId).toBe('tx');
+    expect(comparison.right.saved.workspace?.txId).toBe('debug-tx');
   });
 
   it.each(['hash', 'throw'])('discards a divergent historical replay (%s) and retains the source baseline', async (failure) => {

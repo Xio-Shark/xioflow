@@ -13,6 +13,8 @@ The experimental `WorkspaceCausalGraph` persists tool-result provenance across a
 
 The experimental [`forkAgentCheckpoint`](docs/checkpoint-forks.md) reconstructs a historical checkpoint on its recorded baseline, verifies deterministic tool replay, and creates a new agent branch with the historical context and causal heads. Forks share the original Run budget; divergent replays are discarded.
 
+[`compareAgentCheckpoints`](docs/checkpoint-comparison.md) compares historical contexts and causal branches across agents, exposing shared evidence, branch-exclusive tool results, and structural divergence roots. It works after reopening a domain or disposing the original workspace; recorded write provenance is not a file-content diff.
+
 Run `pnpm benchmark:causal` for a reproducible real-file comparison of full reruns, causal repairs, and unchecked reuse. The [benchmark protocol](docs/causal-repair-benchmark.md) reports output correctness, actual tool calls, validation reads, and elapsed time; it does not estimate model tokens. Run `pnpm benchmark:merge` for [speculative merge recovery](docs/speculative-merge-benchmark.md), including failed candidate execution, reuse validation, and output materialization costs.
 
 For integration, start with the [current implementation contract](spec/current-contract.md).

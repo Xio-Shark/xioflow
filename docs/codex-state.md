@@ -20,7 +20,7 @@
 - prepare 返回重建 checkpoint、显式 heads、open workspace，可提供 discard；undefined 放弃。
 - causal_repaired 原子保存上下文 / heads / workspace，以 checkpointRef 记录源；预算保留，成功 paused。
 - 恢复拒绝过期计划、未跟踪上下文和终态，复用独占 recovering / 中断 / shutdown 生命周期。
-- 本轮新增 forkAgentCheckpoint：从指定历史 checkpoint 的 TX_BEGUN 基线重放，再创建新 agent。
+- 已有 forkAgentCheckpoint：从指定历史 checkpoint 的 TX_BEGUN 基线重放，再创建新 agent。
 - 入口：src/agents/checkpoint-fork.ts；测试：tests/agents/causal-checkpoints.test.ts。
 - 文档和示例：docs/checkpoint-forks.md；README / VISION 已接入。
 - 要求历史 workspace、显式 heads、deterministic 声明，以及从该基线开始的完整 closedWorld 操作前缀。
@@ -37,9 +37,16 @@
 - 因果基准 3×4：完整 / 局部均 3/3 正确，实际工具 12→3，另计验证读取。
 - 合并基准 3×4：完整 / 局部均 3/3 正确，总工具 25→16、恢复 12→3。
 - 合并局部另有 4 检测读 + 6 校验读 + 3 复制写；modelTokens null，不声称总操作节省。
-- 下一步：历史分支上下文 / 因果 / 文件差异查询，将时间旅行分叉接入对照调试示例。
+- 本轮新增 compareAgentCheckpoints：跨 agent / 事务 / Run 的历史上下文与因果分支对照。
+- 入口 src/agents/checkpoint-diff.ts；契约与对照示例 docs/checkpoint-comparison.md。
+- context 返回 JSON Pointer 字段差异；对象递归、数组整体比较，区分缺失与 null。
+- evidence 返回 shared / leftOnly / rightOnly 完整节点、双方 heads 与结构分歧 roots。
+- 两侧各用自身 checkpoint 序号；节点按 journal 身份比较，相同哈希不合并。
+- 未跟踪 heads 返回 untracked，[] 可比较；结果副本隔离，不写 journal / 不执行工具。
+- 节点 writes 仅为声明的写入来源；尚不提供真实文件 diff 或上下文字段到节点的因果映射。
+- 下一步：复用历史分叉重放，补充两个 checkpoint 的实际文件差异与可运行对照调试示例。
 - 后续：跨 agent 恢复编排、仅观测失效的合并基准、真实模型与 token 计量。
 - 已知坑：全量测试期间不要改源码/测试或并行 build，避免缓存旧源码、新测试或半构建 dist。
 - 环境：已有 node_modules 与 cc，无需 install。
-- 本轮基线：pnpm test 556 通过、7 跳过；定向 19 通过（新增 7 项）。
-- 最终验证：pnpm typecheck、pnpm build、git diff --check 通过；pnpm test 563 通过、7 跳过（88.94 秒）。
+- 本轮基线：pnpm test 563 通过、7 跳过；定向 24 通过（新增 5 项并扩展重放集成测试）。
+- 最终验证：pnpm typecheck、pnpm build、git diff --check 通过；pnpm test 568 通过、7 跳过（89.89 秒）。

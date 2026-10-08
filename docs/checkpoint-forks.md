@@ -38,4 +38,6 @@ if (result.status === 'forked') {
 - 成功事务保持 open，后续提交仍走普通 OCC。重放匹配只说明指定历史前缀可复现，不代表结果可直接提交到今天的主工作区。
 - `AGENT_CHECKPOINT_FORK_PREPARED` 持久记录来源 agent、checkpoint、目标 agent / 事务、基线与重放步数。它表示重建已匹配；实际绑定以随后 `AGENT_STATE` 的 `created` 事件为准。进程在两事件之间崩溃时可能只留下准备好的事务，宿主需检查 journal 后回收。
 
-这是 checkpoint 粒度的历史分叉，尚不提供任意 journal 序号的完整系统回滚、自动分支 diff 或外部系统重放。
+重建后可用 [`compareAgentCheckpoints`](checkpoint-comparison.md) 对照源分支与 debug 分支的历史上下文、因果证据和工作区绑定。
+
+这是 checkpoint 粒度的历史分叉，尚不提供任意 journal 序号的完整系统回滚、实际文件内容 diff 或外部系统重放。
