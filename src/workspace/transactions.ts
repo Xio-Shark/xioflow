@@ -91,6 +91,10 @@ export type CommitResult =
 
 export interface CommitOptions {
   observations?: ObservationValidation;
+  /** Always replay on the current world, even without file conflicts or read tracking.
+   * Requires a complete observation log. Default: 'on_conflict'.
+   */
+  observationPolicy?: 'on_conflict' | 'always';
 }
 
 /** 已通过校验、等待应用的提交：写集、从哪个目录拷贝、凭什么证据、要回收的重放分叉。 */
@@ -226,10 +230,16 @@ export class WorkspaceTransactions {
         throw new Error(`Workspace transaction "${txId}" cannot finish committing: ${plan.sourceRoot} is gone`);
       }
     } else {
+      const alwaysReplay = options?.observationPolicy === 'always';
+      if (alwaysReplay && (!options.observations || options.observations.closedWorld !== true
+        || options.observations.log.some((entry) => entry.kind === 'observe'
+          && (typeof entry.resultHash !== 'string' || !entry.resultHash.trim())))) {
+        throw new Error('Always observation validation requires a closed-world log with hashes for every observation');
+      }
       const effects = await this.effects(tx);
       const conflicts = await this.validate(tx, effects);
       plan = { effects, sourceRoot: tx.forkRoot, validation: effects.readSet === null ? 'write_only' : 'files' };
-      if (conflicts.length > 0) {
+      if (conflicts.length > 0 || alwaysReplay) {
         const byObservation = options?.observations
           ? await this.validateByObservations(tx, effects, conflicts, options.observations)
           : undefined;

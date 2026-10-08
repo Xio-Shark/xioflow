@@ -8,6 +8,7 @@ import path from 'node:path';
 import { ExecutionDomain } from '../../src/domain.js';
 import { ProcessSupervisor } from '../../src/supervisor/supervisor.js';
 import type { ObservationEntry, ObservationValidation } from '../../src/workspace/transactions.js';
+import * as readTracking from '../../src/workspace/read-tracking.js';
 
 /**
  * E1: three ways to decide whether agent A's work still stands after agent B committed first.
@@ -259,6 +260,134 @@ describe('commit with observation validation', () => {
   }
   const events = (type: string) => domain.getStore().getJournalEvents(domain.domainId).filter((e) => e.type === type);
   const leftovers = () => fs.readdirSync(tempDir).filter((name) => name.startsWith('fork-'));
+
+  async function unobserved(name: string) {
+    const repo = makeRepo(name);
+    // Exercise noatime semantics on every CI filesystem.
+    const probe = vi.spyOn(readTracking, 'probeReadTracking').mockReturnValue('unobserved');
+    try {
+      const tx = await supervisor.beginWorkspaceTransaction({
+        txId: name, runId: 'run', root: repo, forkPath: path.join(tempDir, `fork-${name}`),
+      });
+      return { repo, tx, log: run(A, tx.forkRoot) };
+    } finally {
+      probe.mockRestore();
+    }
+  }
+
+  it('always replays without file conflicts and commits from the verified fork on noatime', async () => {
+    const { repo, tx, log } = await unobserved('always-valid');
+    const validation = observations(log);
+    const replay = vi.fn(validation.replay);
+    const result = await supervisor.commitWorkspaceTransaction(tx.txId, {
+      observationPolicy: 'always', observations: { ...validation, replay },
+    });
+    expect(result).toMatchObject({ status: 'committed', validation: 'observations', readSet: null });
+    expect(replay).toHaveBeenCalledTimes(A.length);
+    expect(fs.readFileSync(path.join(repo, 'src/util.mjs'), 'utf8')).toContain('function bar()');
+    expect(events('TX_COMMITTING').at(-1)?.payload).toMatchObject({ validation: 'observations' });
+    expect(leftovers()).toEqual([]);
+    expect(domain.getStore().listSnapshots(domain.domainId).filter((s) => s.id.includes('replay'))).toEqual([]);
+  });
+
+  it('detects a changed phantom observation even when file OCC has no read evidence', async () => {
+    const { repo, tx, log } = await unobserved('always-stale');
+    run(B_NEW_CALLER, repo);
+    const result = await supervisor.commitWorkspaceTransaction(tx.txId, {
+      observationPolicy: 'always', observations: observations(log),
+    });
+    expect(result).toMatchObject({ status: 'conflict', conflicts: [], readSet: null,
+      observation: { attempted: true, divergedAt: 0, reason: 'observation_changed' } });
+    expect(fs.readFileSync(path.join(repo, 'src/util.mjs'), 'utf8')).toContain('function foo()');
+    expect(events('TX_COMMITTING')).toEqual([]);
+    await supervisor.abortWorkspaceTransaction(tx.txId);
+    expect(leftovers()).toEqual([]);
+  });
+
+  it('rejects a world change during mandatory replay without any initial file conflict', async () => {
+    const { repo, tx, log } = await unobserved('always-race');
+    const validation = observations(log);
+    const result = await supervisor.commitWorkspaceTransaction(tx.txId, {
+      observationPolicy: 'always', observations: { ...validation, replay: async (entry, root) => {
+        fs.writeFileSync(path.join(repo, 'src/c2.mjs'), 'changed during replay');
+        return validation.replay(entry, root);
+      } },
+    });
+    expect(result).toMatchObject({ status: 'conflict', conflicts: [],
+      observation: { attempted: true, reason: 'workspace_changed' } });
+    expect(fs.readFileSync(path.join(repo, 'src/util.mjs'), 'utf8')).toContain('function foo()');
+    await supervisor.abortWorkspaceTransaction(tx.txId);
+    expect(leftovers()).toEqual([]);
+  });
+
+  it('requires complete evidence before allocating a replay and leaves invalid requests retryable', async () => {
+    const { tx, log } = await unobserved('always-invalid');
+    const validation = observations(log);
+    const missingHash = structuredClone(validation.log);
+    delete missingHash[0].resultHash;
+    for (const evidence of [undefined, { ...validation, closedWorld: false as never },
+      { ...validation, log: missingHash }]) {
+      await expect(supervisor.commitWorkspaceTransaction(tx.txId, {
+        observationPolicy: 'always', observations: evidence,
+      })).rejects.toThrow('closed-world log with hashes');
+    }
+    expect(events('TX_REPLAY_STARTED')).toEqual([]);
+    expect((await supervisor.commitWorkspaceTransaction(tx.txId, {
+      observationPolicy: 'always', observations: validation,
+    })).status).toBe('committed');
+  });
+
+  it('never downgrades mandatory validation when a process escaped the observation log', async () => {
+    const { tx, log } = await unobserved('always-process');
+    await supervisor.executeProcess({
+      runId: 'run', opId: 'always-proc', name: 'agent-shell',
+      command: { execPath: process.execPath, args: ['-e', '0'], cwd: tx.forkRoot },
+      requiredResources: [`workspace:write:${tx.forkRoot}`],
+    });
+    const result = await supervisor.commitWorkspaceTransaction(tx.txId, {
+      observationPolicy: 'always', observations: observations(log),
+    });
+    expect(result).toMatchObject({ status: 'conflict', conflicts: [],
+      observation: { attempted: false, reason: 'not_closed_world' } });
+    expect(events('TX_REPLAY_STARTED')).toEqual([]);
+    await supervisor.abortWorkspaceTransaction(tx.txId);
+  });
+
+  it('keeps write conflicts even with mandatory observation validation', async () => {
+    const { txA, log } = await race('always-ww', B_COMMENT_ABOVE);
+    const replay = vi.fn(observations(log).replay);
+    const result = await supervisor.commitWorkspaceTransaction(txA.txId, {
+      observationPolicy: 'always', observations: { ...observations(log), replay },
+    });
+    expect(result).toMatchObject({ status: 'conflict',
+      observation: { attempted: false, reason: 'write_conflict' } });
+    expect(replay).not.toHaveBeenCalled();
+    await supervisor.abortWorkspaceTransaction(txA.txId);
+  });
+
+  it('recovers a mandatory replay commit after restart without replaying the tools again', async () => {
+    const { repo, tx, log } = await unobserved('always-crash');
+    const rmSync = fs.rmSync;
+    const failure = vi.spyOn(fs, 'rmSync').mockImplementation((file, options) => {
+      if (file === path.join(repo, 'src/c1.mjs')) throw new Error('injected apply failure');
+      return rmSync(file, options);
+    });
+    try {
+      await expect(supervisor.commitWorkspaceTransaction(tx.txId, {
+        observationPolicy: 'always', observations: observations(log),
+      })).rejects.toThrow('injected apply failure');
+    } finally {
+      failure.mockRestore();
+    }
+    domain.close();
+    open();
+    expect(await supervisor.commitWorkspaceTransaction(tx.txId)).toMatchObject({
+      status: 'committed', validation: 'observations',
+    });
+    expect(fs.readFileSync(path.join(repo, 'src/util.mjs'), 'utf8')).toContain('function bar()');
+    expect(events('TX_REPLAY_STARTED')).toHaveLength(1);
+    expect(leftovers()).toEqual([]);
+  });
 
   it('commits when every observation is unchanged, although a file the transaction read was changed', async () => {
     const { repo, txA, log } = await race('same', B_UNRELATED_EDIT);

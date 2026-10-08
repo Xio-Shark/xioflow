@@ -211,7 +211,17 @@ describe('workspace causal validation', () => {
     const link = domain.getStore().getJournalEvents(domain.domainId)
       .find((event) => event.type === 'CAUSAL_VALIDATION_REPAIR_PREPARED')!;
     expect(link.payload).toEqual({ version: 1, validationSeq: result.validation.seq, txId: 'refresh' });
-    expect((await supervisor.commitWorkspaceTransaction('refresh')).status).toBe('committed');
+    expect(await supervisor.commitWorkspaceTransaction('refresh', {
+      observationPolicy: 'always',
+      observations: { closedWorld: true,
+        log: graph.view(result.repair.heads).nodes.map((node) => node.observation),
+        replay: async (entry, dir) => {
+          const value = fs.readFileSync(path.join(dir, 'input.txt'), 'utf8');
+          if (entry.kind === 'mutate') fs.writeFileSync(path.join(dir, String(entry.call.args.path)), value);
+          return value;
+        },
+      },
+    })).toMatchObject({ status: 'committed', validation: 'observations' });
     expect(fs.readFileSync(path.join(root, 'a.txt'), 'utf8')).toBe('new');
     expect(fs.readFileSync(path.join(root, 'b.txt'), 'utf8')).toBe('new');
   });

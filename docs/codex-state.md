@@ -35,13 +35,10 @@
 - 宿主保证依赖完整性、确定性和文件效果，哈希匹配不能证明这些声明。
 - 时间旅行是 checkpoint 粒度，不是任意序号回滚，不重放模型或外部系统。
 - 基准 pnpm benchmark:causal / benchmark:merge；协议 docs/*benchmark.md。
-- 因果基准 3×4：完整 / 局部均 3/3 正确，工具 12→3，另计验证读取。
-- 合并基准 3×4：均 3/3 正确，总工具 25→16、恢复 12→3，另计检测 / 复制。
+- 因果基准工具 12→3；合并基准总工具 25→16；均 3/3 正确，另计验证 / 复制。
 - 新增 pnpm benchmark:shared：逐分支独立修复 / 共享祖先修复 / 不校验复用。
-- 入口 src/testing/shared-repair-benchmark.ts；协议 docs/shared-repair-benchmark.md。
-- 公共 read→derive→N 个 write，扰动公共输入；全部失效，无独立节点复用。
+- 共享基准入口 src/testing/shared-repair-benchmark.ts；公共输入扰动，无独立节点复用。
 - 共享分发各分支输出到独立事务，逐份验证公共输入，再逐项 OCC 提交。
-- 计入实际工具、检测、分发读写 / 字节、输入再验证、事务数与端到端耗时。
 - 共享基准工具 12→6，耗时略升；modelTokens 均 null；不覆盖模型、调度或并发扰动。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。
 - validateWorkspaceCausalBranches：同一当前基线，逐分支独立 fork 重放，自动发现因果修复种子。
@@ -55,5 +52,8 @@
 - 任一探测失败阻断整批修复；prepared 返回开放事务，由宿主 OCC / 绑定 / 回收。
 - CAUSAL_VALIDATION_REPAIR_PREPARED 关联 validationSeq / txId；关联失败回收修复。
 - 修复使用新基线；validateReuse 必需；崩溃可能留下尚未关联的准备记录。
-- 文档 docs/causal-validation.md；下一步：通用输出分发与提交协调、真实模型基准。
-- 最新验证：pnpm typecheck 通过；pnpm test 601 通过 / 7 跳过（100.40 秒）。
+- commitWorkspaceTransaction 支持 observationPolicy: 'always'，无文件冲突也重放。
+- 要求 closedWorld / observe 哈希；无读追踪不降级，成功 validation 为 observations。
+- conflicts 可为空而 status 为 conflict；检查 observation；复用 TX_COMMITTING 恢复。
+- 文档 docs/causal-validation.md；下一步：输出分发与提交协调、强制验证成本基准。
+- 最新验证：pnpm typecheck 通过；pnpm test 608 通过 / 7 跳过（101.00 秒）。

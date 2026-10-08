@@ -65,3 +65,34 @@ if (result.status === 'prepared') {
 结果为 `unchanged`、`failed` 或 `prepared`，均附持久 `validation`。任一分支工具失败就返回 `failed`，即使其他分支发现了变化也不分配修复事务；无变化返回 `unchanged`。其余情况自动按报告中的分支与种子准备共享修复，通过 `CAUSAL_VALIDATION_REPAIR_PREPARED` 将 `validationSeq` 关联到修复 `txId`，再由原有 `CAUSAL_REPAIR_PREPARED` 追溯替代节点。修复或关联持久化失败会抛出异常并回收修复资源，验证报告保留。进程崩溃可能留下已准备但尚未关联的修复，不能将缺少关联理解成从未执行。
 
 修复使用新拍摄的当前基线，可能与探测基线不同；`validateReuse` 仍必需，`unchanged` 也不代表之后的世界未改变。这个入口不自动提交、不绑定 agent checkpoint，不把验证报告当成 OCC 证书，也不合并互斥策略。
+
+
+## 提交时强制验证观测
+
+`commitWorkspaceTransaction` 支持 `observationPolicy: 'always'`：即使文件 OCC 没有发现冲突，也在当前工作区的临时分叉中重放完整日志，并从验证通过的分叉提交实际文件差异。适用于无 atime 读取证据的文件系统，以及要求每次提交都重新验证工具结果的共享修复流程。默认值 `on_conflict` 保留原有行为。
+
+```ts
+// Continuing the prepared refresh above; graph is a WorkspaceCausalGraph.
+if (result.status === 'prepared') {
+  const { transaction, heads } = result.repair;
+  const committed = await supervisor.commitWorkspaceTransaction(transaction.txId, {
+    observationPolicy: 'always',
+    observations: {
+      closedWorld: true,
+      // Include reused ancestors too, not just this repair transaction's new nodes.
+      log: graph.view(heads).nodes.map(node => node.observation),
+      replay: adapter.replay,
+    },
+  });
+  if (committed.status === 'conflict') {
+    // Inspect committed.observation, then abort and plan another refresh.
+    await supervisor.abortWorkspaceTransaction(transaction.txId);
+  }
+}
+```
+
+使用这个示例的前提是所选因果视图确实构成可重放的完整操作序列，覆盖所有观测、变更及复用祖先；依赖图本身不能证明该前提。宿主负责确定性工具适配和完整性声明，重放会再次执行工具，但无需再次调用模型。
+
+强制模式要求 `observations`、`closedWorld: true` 及每条 observe 的非空结果哈希；配置无效时抛错，事务仍可修正后提交。运行过不在日志内的受监督进程则返回 `not_closed_world` 冲突；写写冲突仍不允许重放放行。成功始终返回 `validation: 'observations'`。没有文件冲突时也可能发现观测失效，此时 `conflicts` 为空，应检查 `status` 和 `observation`，不能只检查冲突数组长度。
+
+重放期间主工作区变化会返回 `workspace_changed`，不发布修复输出。现有 `TX_COMMITTING` 保存已经验证的提交计划，重启后继续应用该计划，无需再次提交工具日志；它不是一次新的验证。成功或冲突均回收临时重放资源，原事务的基线仍按既有宿主生命周期管理。
