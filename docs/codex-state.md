@@ -7,7 +7,7 @@
 - view(heads) 显式选择分支，修复返回新 heads，支持连续多轮修复。
 - speculateWorkspace repair(original, conflict) 接通 OCC 冲突后的局部重算与再提交。
 - 每候选一次修复；维持优先级；再次冲突转向后备候选，回调错误终止并清理。
-- 本轮：新增 commitPolicy: first_valid（默认）/ all_valid，支持多个 agent 兼容结果合并。
+- 已有：commitPolicy: first_valid（默认）/ all_valid，支持多个 agent 兼容结果合并。
 - all_valid 按声明顺序逐个普通 OCC 提交，后续候选检查前面胜者的写入，冲突仍可局部修复。
 - winners 返回所有成功策略，winner 保留第一个；status committed 仅表示至少一个成功。
 - SPECULATION_STARTED 记录策略；SPECULATION_CANDIDATE_COMMITTED 记录实际事务与累计胜者。
@@ -27,11 +27,18 @@
 - 基准：pnpm benchmark:causal 比较完整重跑 / 局部修复 / 不校验复用；docs/causal-repair-benchmark.md。
 - 基准样本：3 轮×4 分支，重跑与修复均 3/3 正确，实际工具 12→3，另有验证读取。
 - 基准边界：固定确定性文件任务，无并发写入，modelTokens 为 null；不宣称稳定加速。
-- 下一步：把多 agent 合并中冲突局部修复纳入基准，与全量重跑比较正确性、实际工具成本和耗时。
+- 本轮：pnpm benchmark:merge 接通双策略同快照并行执行、all_valid 冲突与全量/局部恢复对照。
+- 任务：update 一个输入；transform 对全部输入 read→derive→原位写回，确保真实写写冲突。
+- 全量恢复以全部源读取为种子；局部恢复发现变化、校验独立输入与原 fork 输出、复制复用输出。
+- 首次失败投机也计费；分别记录恢复工具、变化检测、复用校验、复制写入与端到端耗时。
+- 实测 3×4 分支：两模式均 3/3 正确，首次工具 13，恢复 12→3，总工具 25→16。
+- 局部模式另有 4 检测读 + 6 校验读 + 3 复制写；modelTokens null，不声称总操作节省。
+- 入口：src/testing/speculative-merge-benchmark.ts；协议及 JSON：docs/speculative-merge-benchmark.md。
+- 下一步：扩展仅观测失效的合并冲突基准，或接入跨 agent 宿主恢复编排与真实模型计量。
 - 后续：跨 agent 宿主恢复编排、真实模型任务与 token 计量、时间旅行调试与确定性适配器。
 - 边界：因果依赖需宿主完整声明；失效计划只解释已声明变化，不证明当前世界有效。
 - 边界：all_valid 不求最大兼容集合、不自动文本合并；write_only 不证明读观测有效；批次不自动恢复。
 - 已知坑：全量测试期间不要改源码/测试或并行 build，避免缓存旧源码、新测试或半构建 dist 混用。
-- 环境：已有 node_modules，无需 install；本轮新环境缺 cc，已通过 sudo apt-get 安装 build-essential。
-- 初始基线：453 通过、7 跳过，3 套件因缺 cc 加载失败；修复环境后执行最终全量验证。
-- 最终验证：pnpm typecheck、pnpm build、git diff --check 通过；pnpm test 551 通过、7 跳过（89.94 秒）。
+- 环境：已有 node_modules 与 cc，无需 install。
+- 本轮基线：pnpm test 551 通过、7 跳过；定向基准测试 5 通过。
+- 最终验证：pnpm typecheck、pnpm build、git diff --check 通过；pnpm test 556 通过、7 跳过（88.72 秒）。

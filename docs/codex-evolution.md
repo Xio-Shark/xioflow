@@ -128,3 +128,13 @@
 - 环境已有 node_modules；初始基线 453 通过、7 跳过，3 套件缺 cc；安装 build-essential 后恢复原生测试。
 - 验证：pnpm typecheck、pnpm build、git diff --check 通过；pnpm test 551 通过、7 跳过（89.94 秒）。
 - 下一步：将多 agent 合并冲突修复纳入可复现基准，比较完整重跑的正确性、工具成本与耗时。
+
+## 2026-10-08 — 投机合并冲突恢复基准
+- 新增 pnpm benchmark:merge：真实 Git / SQLite / 同快照双策略执行，all_valid 发生写冲突后对照全量重跑与因果局部修复。
+- 复用 speculateWorkspace / prepareWorkspaceRepair；局部恢复验证独立输入与原 fork 输出，再物化可复用结果。
+- 指标计入首次失败投机，分别报告恢复工具、检测读取、复用校验、复制写入、全部输出正确性与端到端耗时。
+- 实测 3×4 分支均 3/3 正确；总工具 25→16、恢复工具 12→3；局部额外 4 读+6 校验读+3 写，modelTokens null。
+- 新增 5 项测试覆盖轮换扰动、逐文件独立 oracle、全失效无复用及参数校验；更新协议、JSON 样本、README / VISION 与 44 行交接。
+- 基线 551 通过、7 跳过；全量发现 src 同步子进程门禁，已改用现有异步 execFile 方式并重新生成样本。
+- 最终验证：pnpm typecheck、pnpm build、git diff --check 通过；pnpm test 556 通过、7 跳过（88.72 秒）。
+- 下一步：仅观测失效的合并冲突基准，或跨 agent 恢复编排与真实模型计量。

@@ -1,0 +1,207 @@
+{
+  "schemaVersion": 1,
+  "config": {
+    "trials": 3,
+    "branches": 4,
+    "hashRounds": 1000
+  },
+  "modelTokens": null,
+  "environment": {
+    "node": "v22.23.3",
+    "platform": "linux",
+    "arch": "arm64",
+    "git": "git version 2.47.3"
+  },
+  "samples": [
+    {
+      "mode": "full-rerun",
+      "trial": 0,
+      "changedBranch": 0,
+      "initialToolCalls": 13,
+      "recoveryToolCalls": 12,
+      "changeDetectionReads": 0,
+      "reuseValidationReads": 0,
+      "materializationWrites": 0,
+      "reusedNodes": 0,
+      "executionToolCalls": 25,
+      "elapsedMs": 278.94424000000004,
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "86181ce3060c779ab1a28d8f7e5a1c64b3e8282a7ae720e781fbe86fa5f6b7e8",
+        "f97da7c39edf0df54d4e94f8b3ff0ccd14ca757e0f91ceef863d86450548af92",
+        "b576940054f4f97a2abdf985f3bfd7a0ff363d603a5212d775039aed230332ca",
+        "625621e951df961e24cb53a12a2c0f5546225ce14073429d9b3ea4c640374819"
+      ],
+      "success": true,
+      "winners": [
+        "update",
+        "transform"
+      ],
+      "conflictDetected": true,
+      "commitValidation": "files"
+    },
+    {
+      "mode": "incremental-repair",
+      "trial": 0,
+      "changedBranch": 0,
+      "initialToolCalls": 13,
+      "recoveryToolCalls": 3,
+      "changeDetectionReads": 4,
+      "reuseValidationReads": 6,
+      "materializationWrites": 3,
+      "reusedNodes": 9,
+      "executionToolCalls": 16,
+      "elapsedMs": 216.206147,
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "86181ce3060c779ab1a28d8f7e5a1c64b3e8282a7ae720e781fbe86fa5f6b7e8",
+        "f97da7c39edf0df54d4e94f8b3ff0ccd14ca757e0f91ceef863d86450548af92",
+        "b576940054f4f97a2abdf985f3bfd7a0ff363d603a5212d775039aed230332ca",
+        "625621e951df961e24cb53a12a2c0f5546225ce14073429d9b3ea4c640374819"
+      ],
+      "success": true,
+      "winners": [
+        "update",
+        "transform"
+      ],
+      "conflictDetected": true,
+      "commitValidation": "files"
+    },
+    {
+      "mode": "incremental-repair",
+      "trial": 1,
+      "changedBranch": 1,
+      "initialToolCalls": 13,
+      "recoveryToolCalls": 3,
+      "changeDetectionReads": 4,
+      "reuseValidationReads": 6,
+      "materializationWrites": 3,
+      "reusedNodes": 9,
+      "executionToolCalls": 16,
+      "elapsedMs": 209.28023500000006,
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "a6e354bc7f3d879d6d6a198e91cb07f599a01347e5e9abddaeea04db5bea0785",
+        "2861ec8e777aaa9f51966a9f4093820ec74d3e7b74349059ad89d2013198786f",
+        "b576940054f4f97a2abdf985f3bfd7a0ff363d603a5212d775039aed230332ca",
+        "625621e951df961e24cb53a12a2c0f5546225ce14073429d9b3ea4c640374819"
+      ],
+      "success": true,
+      "winners": [
+        "update",
+        "transform"
+      ],
+      "conflictDetected": true,
+      "commitValidation": "files"
+    },
+    {
+      "mode": "full-rerun",
+      "trial": 1,
+      "changedBranch": 1,
+      "initialToolCalls": 13,
+      "recoveryToolCalls": 12,
+      "changeDetectionReads": 0,
+      "reuseValidationReads": 0,
+      "materializationWrites": 0,
+      "reusedNodes": 0,
+      "executionToolCalls": 25,
+      "elapsedMs": 219.46301700000004,
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "a6e354bc7f3d879d6d6a198e91cb07f599a01347e5e9abddaeea04db5bea0785",
+        "2861ec8e777aaa9f51966a9f4093820ec74d3e7b74349059ad89d2013198786f",
+        "b576940054f4f97a2abdf985f3bfd7a0ff363d603a5212d775039aed230332ca",
+        "625621e951df961e24cb53a12a2c0f5546225ce14073429d9b3ea4c640374819"
+      ],
+      "success": true,
+      "winners": [
+        "update",
+        "transform"
+      ],
+      "conflictDetected": true,
+      "commitValidation": "files"
+    },
+    {
+      "mode": "full-rerun",
+      "trial": 2,
+      "changedBranch": 2,
+      "initialToolCalls": 13,
+      "recoveryToolCalls": 12,
+      "changeDetectionReads": 0,
+      "reuseValidationReads": 0,
+      "materializationWrites": 0,
+      "reusedNodes": 0,
+      "executionToolCalls": 25,
+      "elapsedMs": 241.28252799999996,
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "a6e354bc7f3d879d6d6a198e91cb07f599a01347e5e9abddaeea04db5bea0785",
+        "f97da7c39edf0df54d4e94f8b3ff0ccd14ca757e0f91ceef863d86450548af92",
+        "d438cbd2f19dcb4235618aa2fc6b2872c5d279819f8a68a395574a3ed452aa96",
+        "625621e951df961e24cb53a12a2c0f5546225ce14073429d9b3ea4c640374819"
+      ],
+      "success": true,
+      "winners": [
+        "update",
+        "transform"
+      ],
+      "conflictDetected": true,
+      "commitValidation": "files"
+    },
+    {
+      "mode": "incremental-repair",
+      "trial": 2,
+      "changedBranch": 2,
+      "initialToolCalls": 13,
+      "recoveryToolCalls": 3,
+      "changeDetectionReads": 4,
+      "reuseValidationReads": 6,
+      "materializationWrites": 3,
+      "reusedNodes": 9,
+      "executionToolCalls": 16,
+      "elapsedMs": 233.7015490000001,
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "outputHashes": [
+        "a6e354bc7f3d879d6d6a198e91cb07f599a01347e5e9abddaeea04db5bea0785",
+        "f97da7c39edf0df54d4e94f8b3ff0ccd14ca757e0f91ceef863d86450548af92",
+        "d438cbd2f19dcb4235618aa2fc6b2872c5d279819f8a68a395574a3ed452aa96",
+        "625621e951df961e24cb53a12a2c0f5546225ce14073429d9b3ea4c640374819"
+      ],
+      "success": true,
+      "winners": [
+        "update",
+        "transform"
+      ],
+      "conflictDetected": true,
+      "commitValidation": "files"
+    }
+  ],
+  "summary": [
+    {
+      "mode": "full-rerun",
+      "successRate": 1,
+      "meanExecutionToolCalls": 25,
+      "meanRecoveryToolCalls": 12,
+      "meanChangeDetectionReads": 0,
+      "meanReuseValidationReads": 0,
+      "meanMaterializationWrites": 0,
+      "medianElapsedMs": 241.28252799999996
+    },
+    {
+      "mode": "incremental-repair",
+      "successRate": 1,
+      "meanExecutionToolCalls": 16,
+      "meanRecoveryToolCalls": 3,
+      "meanChangeDetectionReads": 4,
+      "meanReuseValidationReads": 6,
+      "meanMaterializationWrites": 3,
+      "medianElapsedMs": 216.206147
+    }
+  ]
+}
