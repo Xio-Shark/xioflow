@@ -138,6 +138,55 @@ committed or that observations remain valid on a reconstructed world. A stored
 fork path may no longer exist. Snapshot retention, reconstruction, current-world
 validation and complete dependency declarations remain the host's responsibility.
 
+### Cross-agent causal recovery plans
+
+`agents.planCausalRecovery(changedNodeSeqs)` maps host-confirmed changed evidence
+to the latest checkpoint of every agent in the domain, across Runs and actors.
+It follows transitive causal dependencies rather than task parentage or actor
+names. Unknown seeds throw; duplicate seeds are removed.
+
+- `affected` contains the agent ID, inspected checkpoint, invalidated heads and
+  invalidated node sequences within that checkpoint's selected branch. Sibling
+  speculative branches are excluded from each agent's explanation.
+- `restartFrom`, when present on an affected entry, is its most recent tracked
+  historical checkpoint with no dependency on the changed evidence. An explicit
+  empty branch qualifies; missing/null provenance does not. Absence means the
+  host has no recorded candidate and may need to rebuild context from scratch.
+- `unaffected` lists tracked agents outside this invalidation closure;
+  `untracked` lists agents whose latest checkpoint has no provenance claim.
+
+The query does not write journal events, execute tools, stop agents or alter
+budgets. Completed/failed agents are included so stale final outputs are visible;
+their presence does not make them restorable under existing lifecycle rules.
+Returned checkpoints are detached copies. Empty seeds still report untracked
+agents. Restored branches are used on subsequent queries, including after reopen.
+
+```ts
+// Host has detected a changed observation and stopped this agent's work.
+const plan = agents.planCausalRecovery([changedNodeSeq]);
+const impact = plan.affected.find((entry) => entry.agentId === 'agent-id');
+if (impact?.restartFrom) {
+  const candidate = impact.restartFrom;
+  await agents.recoverCheckpoint(impact.agentId, async (history) => {
+    // The plan is a point-in-time query: reject if the agent advanced meanwhile.
+    if (history.at(-1)?.seq !== impact.checkpoint.seq) {
+      throw new Error('Agent checkpoint changed; replan recovery');
+    }
+    // Host adapter reconstructs files/tools, validates evidence on the new world,
+    // and provides discard() for cleanup if runtime binding fails.
+    const prepared = await reconstructAndValidate(candidate);
+    return { seq: candidate.seq, workspace: prepared.workspace, discard: prepared.discard };
+  });
+}
+```
+
+An unaffected branch is only unaffected **by these declared changes**. This API
+does not detect changes, prove dependency completeness, certify OCC commit or
+current-world validity, or infer how model context should be rebuilt. The host
+must recheck world revisions during reconstruction. `prepareWorkspaceRepair`
+can separately recompute the affected file subgraph; its new heads cannot be
+substituted into an old model checkpoint without rebuilding that context.
+
 ## Task scopes
 
 `parentId` defines a structured task tree within a Run. Separate roots in the same

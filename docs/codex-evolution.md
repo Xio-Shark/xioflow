@@ -100,3 +100,12 @@
 - 环境与基线：已有依赖和 cc，无需 install；基线 534 通过、7 跳过（88.77 秒）。
 - 验证：pnpm typecheck、pnpm build、git diff --check 通过；全量 539 通过、7 跳过（87.47 秒）。
 - 边界与下一轮：历史绑定不恢复文件或证明提交/当前有效性；下一步按 checkpoint heads 查询受失效影响的 agent，接通因果修复与上下文重建。
+
+## 2026-10-08 — 跨 agent 因果失效与恢复计划
+- 新增 AgentRuntime.planCausalRecovery(changed)，从已确认变化的观测追踪跨 agent 依赖，返回受影响上下文、失效 heads 和选中分支内的失效节点。
+- 为受影响 agent 选择最近未受这些种子影响的历史 checkpoint；区分 unaffected / untracked，包含终态输出，不写 journal 或执行工具。
+- 新增 3 项集成测试，覆盖依赖传播、兄弟分支隔离、候选恢复、最近候选、重开 domain、未跟踪历史、终态输出与非法种子。
+- 更新 README、VISION、运行时契约与 recoverCheckpoint 接入示例；示例检查 checkpoint 推进，由宿主重建和验证世界状态。
+- 无需 install；初次全量与编辑重叠，原有 539 项通过、新增 3 项因缓存旧实现失败；稳定代码后重新完成全量验证。
+- 验证：pnpm typecheck、pnpm build、git diff --check 通过；定向 8 通过；pnpm test 542 通过、7 跳过（85.91 秒）。
+- 边界与下一步：恢复候选不证明当前有效，不自动重建模型上下文；下一轮编排影响计划、文件子图修复与上下文重建并绑定新 heads。

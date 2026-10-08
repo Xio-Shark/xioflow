@@ -8,23 +8,27 @@
 - 已有：speculateWorkspace repair(original, conflict) 接通 OCC 冲突后的局部重算与再提交。
 - 投机修复：每候选一次；维持优先级；再次冲突转向后备候选，回调错误终止并清理。
 - 投机生命周期：正常回收 fork / 基线；提交抛错保留不确定事务，禁止继续选择胜者。
-- 本轮：AgentRuntime create / step result 接受 causalHeads，与 checkpoint 在同一事件持久化。
-- 本轮：heads 必须引用同 domain 已有因果节点，支持跨 actor / 事务引用，自动去重。
-- 本轮：checkpoints(id) 返回历史 workspace / heads；checkpointCausalView(id, seq) 查询当时分支。
-- 本轮：null / 省略 heads 表示未跟踪，[] 是显式空分支；新步骤省略会清除旧关联。
-- 本轮：findValidCheckpoint 使用每个候选自己的 heads，在当前 workspace 上验证。
-- 本轮：restoreCheckpoint / recoverCheckpoint 随上下文恢复 heads，保持已花费预算。
-- 本轮：旧 journal 无 heads 仍可读取；恢复链、重开 domain、历史工作区绑定均保留。
-- 入口：src/agents/runtime.ts、tests/agents/causal-checkpoints.test.ts、spec/agent-runtime.md#causal-checkpoints。
+- 已有：AgentRuntime create / step result 的 causalHeads 与 checkpoint 原子持久化。
+- heads 引用同 domain 已有因果节点，支持跨 actor / 事务，自动去重。
+- checkpoints(id) 返回历史 workspace / heads；checkpointCausalView(id, seq) 查询当时分支。
+- null / 省略 heads 表示未跟踪，[] 是显式空分支；新步骤省略会清除旧关联。
+- findValidCheckpoint 使用候选自己的 heads；restore / recover 同步恢复上下文与 heads，预算不回退。
+- 本轮：planCausalRecovery(changed) 查询 domain 内所有 agent 的当前 checkpoint 失效影响。
+- 本轮：affected 返回 checkpoint、invalidatedHeads / Nodes，排除兄弟分支；包含终态输出。
+- 本轮：restartFrom 选最近且未受这些种子影响的历史 checkpoint；无候选时省略。
+- 本轮：unaffected / untracked 分开，未知种子拒绝，种子去重；纯查询，不执行工具或写 journal。
+- 本轮：测试覆盖跨 agent 传递依赖、独立分支、候选恢复、重开 domain、未跟踪和终态输出。
+- 入口：src/agents/runtime.ts、tests/agents/causal-checkpoints.test.ts、spec/agent-runtime.md#cross-agent-causal-recovery-plans。
 - 基准：pnpm benchmark:causal 比较完整重跑 / 局部修复 / 不校验复用；详见 docs/causal-repair-benchmark.md。
 - 基准样本：3 轮×4 分支，重跑与修复均 3/3 正确，实际工具 12→3，另有验证读取。
 - 基准边界：固定确定性文件任务，无并发写入，modelTokens 为 null；不宣称稳定加速。
-- 下一步：基于 checkpoint heads 查询受观测失效影响的 agent，把因果修复与上下文重建接通。
+- 下一步：宿主编排影响计划、prepareWorkspaceRepair 与上下文重建，在新 checkpoint 绑定修复 heads。
 - 后续：将投机冲突修复纳入基准，比较整轮重跑；扩展真实模型任务并计量 token。
+- 边界：影响计划只解释已声明变化，不证明当前世界有效；使用前检查 checkpoint 是否推进并验证新世界。
+- 边界：终态出现在影响报告中，不改变现有恢复状态限制；新 heads 不能直接替换旧模型上下文。
 - 边界：依赖、变化种子、复用有效性由宿主声明与验证；未提交输出不会自动物化。
-- 边界：历史 workspace 路径可能已回收；查询不恢复文件，heads 不证明当前有效或事务已提交。
-- 边界：恢复不传新 workspace 时保留当前绑定；prepared 不等于 committed；不支持多个胜者合并。
-- 已知坑：全量测试期间不可并行在同一目录 pnpm build，崩溃矩阵可能读到半构建 dist。
+- 边界：历史 workspace 可能已回收，查询不恢复文件；prepared 不等于 committed，不支持多个胜者合并。
+- 已知坑：全量测试期间不要改源码/测试或并行 build，可能混用缓存旧源码、新测试或半构建 dist。
 - 环境：已有 node_modules 和 cc，依赖未变化，无需 pnpm install。
-- 本轮基线：534 通过、7 跳过（88.77 秒）；定向测试首轮 25 通过。
-- 最终验证：pnpm typecheck、pnpm build、git diff --check 通过；全量 539 通过、7 跳过（87.47 秒）。
+- 验证：typecheck、build、diff --check 通过；定向 8 项通过；全量 542 通过、7 跳过（85.91 秒）。
+- 初次全量与编辑重叠：原有 539 项通过，新增 3 项读到旧实现而失败；稳定代码后的全量已通过。

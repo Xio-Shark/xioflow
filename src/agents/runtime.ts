@@ -23,6 +23,24 @@ export interface AgentCheckpoint {
   causalHeads?: number[] | null;
 }
 
+export interface AgentCausalRecoveryPlan {
+  /** Host-confirmed changed evidence, with duplicates removed. */
+  changed: number[];
+  affected: {
+    agentId: string;
+    /** Context that was inspected; compare its sequence before acting later. */
+    checkpoint: AgentCheckpoint;
+    invalidatedHeads: number[];
+    /** Only invalidated nodes in this checkpoint's selected branch. */
+    invalidatedNodes: number[];
+    /** Latest tracked checkpoint unaffected by these seeds, not a validity claim. */
+    restartFrom?: AgentCheckpoint;
+  }[];
+  unaffected: string[];
+  /** Missing provenance is never classified as unaffected. */
+  untracked: string[];
+}
+
 export interface AgentState {
   id: string;
   runId: string;
@@ -234,6 +252,37 @@ export class AgentRuntime {
     if (!saved) throw new Error(`No checkpoint ${seq} for agent "${id}"`);
     if (saved.causalHeads == null) return undefined;
     return new WorkspaceCausalGraph(this.domain).view(saved.causalHeads, saved.seq);
+  }
+
+  /** Read-only cross-agent impact and rollback candidates, including terminal agents.
+   * Does not cancel work, replay observations, or certify workspace validity.
+   */
+  planCausalRecovery(changed: readonly number[]): AgentCausalRecoveryPlan {
+    const agents = this.list();
+    const graph = new WorkspaceCausalGraph(this.domain);
+    const invalid = new Set(graph.planRecomputation(changed).invalidated.map((node) => node.seq));
+    const plan: AgentCausalRecoveryPlan = { changed: [...new Set(changed)], affected: [], unaffected: [], untracked: [] };
+    for (const agent of agents) {
+      const history = this.checkpoints(agent.id);
+      const checkpoint = history.at(-1)!;
+      if (checkpoint.causalHeads == null) {
+        plan.untracked.push(agent.id);
+        continue;
+      }
+      const invalidatedHeads = checkpoint.causalHeads.filter((seq) => invalid.has(seq));
+      if (!invalidatedHeads.length) {
+        plan.unaffected.push(agent.id);
+        continue;
+      }
+      const restartFrom = [...history].reverse().find((saved) => saved.causalHeads != null
+        && saved.causalHeads.every((seq) => !invalid.has(seq)));
+      plan.affected.push({ agentId: agent.id, checkpoint, invalidatedHeads,
+        invalidatedNodes: graph.view(checkpoint.causalHeads, checkpoint.seq).nodes
+          .filter((node) => invalid.has(node.seq)).map((node) => node.seq),
+        ...(restartFrom ? { restartFrom } : {}),
+      });
+    }
+    return plan;
   }
 
   private normalizeCausalHeads(heads: number[] | null | undefined): number[] | null {

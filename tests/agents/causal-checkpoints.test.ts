@@ -134,4 +134,76 @@ describe('agent checkpoint causal branches', () => {
     expect(runtime.checkpoints('a')).toHaveLength(1);
     expect(() => runtime.checkpointCausalView('a', 999999)).toThrow('No checkpoint');
   });
+
+  it('routes transitive cross-agent impact while excluding independent and sibling branches', async () => {
+    const source = node();
+    const independent = node();
+    const derived = graph.record({ txId: 'tx', actorId: 'producer', dependsOn: [source.seq],
+      observation: { kind: 'observe', call: { tool: 'derive', args: {} }, resultHash: 'derived' } });
+    const sibling = node([source.seq]);
+    open({ step: async (agent) => {
+      runtime.pause(agent.id);
+      return { status: 'ready', checkpoint: 'derived', causalHeads: [derived.seq, independent.seq] };
+    } });
+    create([independent.seq]);
+    const initial = runtime.checkpoints('a')[0];
+    await runtime.drain();
+    for (const [id, heads] of [['consumer', [derived.seq]], ['independent', [independent.seq]],
+      ['empty', []], ['untracked', null]] as const) {
+      runtime.create({ id, runId: 'run', input: null, checkpoint: id,
+        causalHeads: heads === null ? null : [...heads], maxSteps: 1 });
+    }
+    const before = domain.getStore().getJournalEvents(domain.domainId).length;
+    const plan = runtime.planCausalRecovery([source.seq, source.seq]);
+    expect(plan.changed).toEqual([source.seq]);
+    expect(plan.affected.map((entry) => entry.agentId)).toEqual(['a', 'consumer']);
+    expect(plan.affected[0]).toMatchObject({ invalidatedHeads: [derived.seq],
+      invalidatedNodes: [source.seq, derived.seq], restartFrom: initial });
+    expect(plan.affected[0].invalidatedNodes).not.toContain(sibling.seq);
+    expect(plan.affected[1].restartFrom).toBeUndefined();
+    expect(plan.unaffected).toEqual(['independent', 'empty']);
+    expect(plan.untracked).toEqual(['untracked']);
+    expect(domain.getStore().getJournalEvents(domain.domainId)).toHaveLength(before);
+    plan.affected[0].restartFrom!.causalHeads!.push(source.seq);
+    expect(runtime.checkpoints('a')[0]).toEqual(initial);
+    const recovered = await runtime.recoverCheckpoint('a', async () => ({ seq: initial.seq }));
+    expect(recovered).toMatchObject({ causalHeads: [independent.seq], stepsUsed: 1 });
+    expect(runtime.planCausalRecovery([source.seq]).affected.map((entry) => entry.agentId)).toEqual(['consumer']);
+  });
+
+  it('selects the nearest unaffected tracked checkpoint and survives domain reopen', async () => {
+    const changed = node();
+    const stable = node();
+    let steps = 0;
+    open({ step: async () => {
+      runtime.pause('a');
+      return { status: 'ready', checkpoint: ++steps, causalHeads: steps === 1 ? [stable.seq] : [changed.seq] };
+    } });
+    create([]);
+    await runtime.drain();
+    const nearest = runtime.checkpoints('a').at(-1)!;
+    runtime.resume('a');
+    await runtime.drain();
+    const before = runtime.planCausalRecovery([changed.seq]);
+    expect(before.affected[0].restartFrom).toEqual(nearest);
+    runtime.close();
+    domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    open();
+    expect(runtime.planCausalRecovery([changed.seq])).toEqual(before);
+  });
+
+  it('does not use untracked history as a restart candidate and includes completed outputs', async () => {
+    const changed = node();
+    open({ step: async () => ({ status: 'completed', checkpoint: 'output', causalHeads: [changed.seq] }) });
+    create();
+    await runtime.drain();
+    const plan = runtime.planCausalRecovery([changed.seq]);
+    expect(plan.affected[0].agentId).toBe('a');
+    expect(plan.affected[0].restartFrom).toBeUndefined();
+    expect(runtime.get('a')?.status).toBe('completed');
+    expect(runtime.planCausalRecovery([])).toEqual({ changed: [], affected: [], unaffected: ['a'], untracked: [] });
+    expect(() => runtime.planCausalRecovery([999999])).toThrow('absent');
+    expect(() => runtime.planCausalRecovery([NaN])).toThrow('absent');
+  });
 });
