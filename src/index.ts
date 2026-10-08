@@ -13,6 +13,7 @@ export * from './agents/runtime.js';
 export * from './agents/run-budget.js';
 export type { AgentExecution, AgentCommandOptions, AgentCommandResult } from './agents/execution.js';
 export * from './agents/workspace-recovery.js';
+export * from './agents/checkpoint-fork.js';
 export * from './snapshot/git-shadow.js';
 export type {
   CommitOptions,

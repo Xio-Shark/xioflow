@@ -3,42 +3,43 @@
 - 分支：codex/evolve；复用 snapshot / fork / rollback、AgentRuntime、journal。
 - 已有：WorkspaceTransactions 文件读写集与观测重放 OCC；同基线隔离投机执行。
 - 已有：WorkspaceCausalGraph 持久因果节点、上游查询、历史切片、失效闭包。
-- 已有：prepareWorkspaceRepair 拓扑重算失效节点，复用独立结果并记录替代关系。
-- view(heads) 显式选择分支，修复返回新 heads，支持连续多轮修复。
-- speculateWorkspace repair(original, conflict) 接通 OCC 冲突后的局部重算与再提交。
-- 每候选一次修复；维持优先级；再次冲突转向后备候选，回调错误终止并清理。
-- 已有：commitPolicy: first_valid（默认）/ all_valid，支持多个 agent 兼容结果合并。
-- all_valid 按声明顺序逐个普通 OCC 提交，后续候选检查前面胜者的写入，冲突仍可局部修复。
-- winners 返回所有成功策略，winner 保留第一个；status committed 仅表示至少一个成功。
-- SPECULATION_STARTED 记录策略；SPECULATION_CANDIDATE_COMMITTED 记录实际事务与累计胜者。
-- 批次非原子；错误不撤销已有提交；提交异常立即停止，保留不确定 fork / 基线供恢复。
-- 正常回收落选、失败、冲突 fork / 基线；TX journal 是提交事实依据，投机事件可能晚于实际提交。
-- 入口：src/workspace/speculation.ts；测试：tests/workspace/speculation.test.ts；文档：docs/speculative-workspaces.md。
-- 已有：AgentRuntime create / step result 的 causalHeads 与 checkpoint 原子持久化。
-- heads 引用同 domain 已有因果节点，支持跨 actor / 事务；null / 省略未跟踪，[] 显式空分支。
+- prepareWorkspaceRepair 拓扑重算失效节点，复用独立结果并记录替代关系。
+- view(heads) 显式选择分支；修复返回替代后的 heads，支持连续多轮修复。
+- speculateWorkspace 接通 OCC 冲突后的 repair 与再提交，每候选最多一次修复。
+- commitPolicy: first_valid（默认）/ all_valid；后者依声明顺序合并所有 OCC 有效结果。
+- winners 返回全部胜者，winner 为首个；status committed 只表示至少一个成功。
+- 批次非原子；错误不撤销已有提交；提交异常保留不确定 fork / 基线供恢复。
+- TX journal 是提交事实依据，投机事件可能晚于实际提交；正常回收落选资源。
+- 投机入口：src/workspace/speculation.ts；文档：docs/speculative-workspaces.md。
+- AgentRuntime create / step 的 causalHeads 与 checkpoint 原子持久化。
+- heads 引用同 domain 已有节点，支持跨 actor / 事务；null / 省略未跟踪，[] 显式空分支。
 - checkpoints(id) 查询历史 workspace / heads；checkpointCausalView(id, seq) 查询当时分支。
 - findValidCheckpoint 使用候选自己的 heads；restore / recover 同步恢复上下文与 heads，预算不回退。
-- planCausalRecovery(changed) 跨 agent 查询当前 checkpoint 失效影响与历史恢复候选。
+- planCausalRecovery(changed) 跨 agent 查询失效影响与历史恢复候选，不证明当前世界有效。
 - recoverCausalCheckpoint(id, expectedCheckpointSeq, prepare) 接通宿主局部修复与上下文绑定。
-- prepare 返回重建 checkpoint、显式 causalHeads、open workspace，可提供 discard；undefined 放弃。
-- causal_repaired 原子存上下文、heads、workspace，以 checkpointRef 记录源；保留预算，成功停在 paused。
-- 恢复入口拒绝过期计划、未跟踪上下文和终态；复用独占 recovering、清理、中断与 shutdown 生命周期。
-- 上下文绑定不提交文件；宿主验证新世界与复用条件；准备回调返回前的异常清理由宿主负责。
-- 基准：pnpm benchmark:causal 比较完整重跑 / 局部修复 / 不校验复用；docs/causal-repair-benchmark.md。
-- 基准样本：3 轮×4 分支，重跑与修复均 3/3 正确，实际工具 12→3，另有验证读取。
-- 基准边界：固定确定性文件任务，无并发写入，modelTokens 为 null；不宣称稳定加速。
-- 本轮：pnpm benchmark:merge 接通双策略同快照并行执行、all_valid 冲突与全量/局部恢复对照。
-- 任务：update 一个输入；transform 对全部输入 read→derive→原位写回，确保真实写写冲突。
-- 全量恢复以全部源读取为种子；局部恢复发现变化、校验独立输入与原 fork 输出、复制复用输出。
-- 首次失败投机也计费；分别记录恢复工具、变化检测、复用校验、复制写入与端到端耗时。
-- 实测 3×4 分支：两模式均 3/3 正确，首次工具 13，恢复 12→3，总工具 25→16。
-- 局部模式另有 4 检测读 + 6 校验读 + 3 复制写；modelTokens null，不声称总操作节省。
-- 入口：src/testing/speculative-merge-benchmark.ts；协议及 JSON：docs/speculative-merge-benchmark.md。
-- 下一步：扩展仅观测失效的合并冲突基准，或接入跨 agent 宿主恢复编排与真实模型计量。
-- 后续：跨 agent 宿主恢复编排、真实模型任务与 token 计量、时间旅行调试与确定性适配器。
-- 边界：因果依赖需宿主完整声明；失效计划只解释已声明变化，不证明当前世界有效。
-- 边界：all_valid 不求最大兼容集合、不自动文本合并；write_only 不证明读观测有效；批次不自动恢复。
-- 已知坑：全量测试期间不要改源码/测试或并行 build，避免缓存旧源码、新测试或半构建 dist 混用。
+- prepare 返回重建 checkpoint、显式 heads、open workspace，可提供 discard；undefined 放弃。
+- causal_repaired 原子保存上下文 / heads / workspace，以 checkpointRef 记录源；预算保留，成功 paused。
+- 恢复拒绝过期计划、未跟踪上下文和终态，复用独占 recovering / 中断 / shutdown 生命周期。
+- 本轮新增 forkAgentCheckpoint：从指定历史 checkpoint 的 TX_BEGUN 基线重放，再创建新 agent。
+- 入口：src/agents/checkpoint-fork.ts；测试：tests/agents/causal-checkpoints.test.ts。
+- 文档和示例：docs/checkpoint-forks.md；README / VISION 已接入。
+- 要求历史 workspace、显式 heads、deterministic 声明，以及从该基线开始的完整 closedWorld 操作前缀。
+- 每步包括 mutation 都需结果哈希；适配器拿副本，不能改写用于校验的历史哈希。
+- 主工作区变化、源 fork 删除不影响重建；历史快照缺失直接失败，不退回当前世界。
+- 成功返回 ready agent 与 open transaction；同 Run 累计预算不回退，创建计入 agent 限额。
+- helper 不调用 drain；宿主需协调已有调度；源 agent、主工作区保持原状。
+- 分歧返回位置 / 原因 / 适配器错误；失败清理 fork，不 prune 共享历史基线。
+- AGENT_CHECKPOINT_FORK_PREPARED 记录来源 checkpoint 与目标；实际创建以 AGENT_STATE 为准。
+- 两事件间崩溃可能遗留已准备事务，宿主检查 journal 后回收；后续提交仍需普通 OCC。
+- 边界：操作前缀完整性与确定性由宿主保证，跨事务因果祖先不能直接当作工作区重放日志。
+- 边界：当前是 checkpoint 粒度分叉，不是任意序号系统回滚，不重放模型或外部系统。
+- 基准：pnpm benchmark:causal 与 benchmark:merge；协议见对应 docs/*benchmark.md。
+- 因果基准 3×4：完整 / 局部均 3/3 正确，实际工具 12→3，另计验证读取。
+- 合并基准 3×4：完整 / 局部均 3/3 正确，总工具 25→16、恢复 12→3。
+- 合并局部另有 4 检测读 + 6 校验读 + 3 复制写；modelTokens null，不声称总操作节省。
+- 下一步：历史分支上下文 / 因果 / 文件差异查询，将时间旅行分叉接入对照调试示例。
+- 后续：跨 agent 恢复编排、仅观测失效的合并基准、真实模型与 token 计量。
+- 已知坑：全量测试期间不要改源码/测试或并行 build，避免缓存旧源码、新测试或半构建 dist。
 - 环境：已有 node_modules 与 cc，无需 install。
-- 本轮基线：pnpm test 551 通过、7 跳过；定向基准测试 5 通过。
-- 最终验证：pnpm typecheck、pnpm build、git diff --check 通过；pnpm test 556 通过、7 跳过（88.72 秒）。
+- 本轮基线：pnpm test 556 通过、7 跳过；定向 19 通过（新增 7 项）。
+- 最终验证：pnpm typecheck、pnpm build、git diff --check 通过；pnpm test 563 通过、7 跳过（88.94 秒）。

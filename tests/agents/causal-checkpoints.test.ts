@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -39,6 +39,143 @@ describe('agent checkpoint causal branches', () => {
     runtime?.close();
     domain.close();
     fs.rmSync(temp, { recursive: true, force: true });
+  });
+
+  it('forks an old checkpoint from its historical baseline after live changes and source disposal', async () => {
+    const source = node();
+    const output = graph.record({ txId: 'tx', actorId: 'a', dependsOn: [source.seq],
+      observation: { kind: 'mutate', call: { tool: 'write', args: {} }, resultHash: 'derived' },
+      writes: [{ status: 'M', path: 'input' }] });
+    open({ step: async () => {
+      fs.writeFileSync(path.join(workspace.forkRoot, 'input'), 'derived');
+      runtime.pause('a');
+      return { status: 'ready', checkpoint: { answer: 'derived' }, causalHeads: [output.seq] };
+    } });
+    create([source.seq]);
+    await runtime.drain();
+    const saved = runtime.checkpoints('a').at(-1)!;
+    const original = runtime.get('a');
+    const usage = runtime.getRunUsage('run');
+    const supervisor = new ProcessSupervisor(domain);
+    await supervisor.abortWorkspaceTransaction('tx');
+    fs.writeFileSync(path.join(temp, 'repo', 'input'), 'future');
+    const result = await forkAgentCheckpoint(runtime, supervisor, {
+      sourceAgentId: 'a', checkpointSeq: saved.seq, agentId: 'debug', txId: 'debug-tx',
+      forkPath: path.join(temp, 'debug'), maxSteps: 2, replayPolicy: 'deterministic',
+      observations: (checkpoint) => {
+        expect(checkpoint).toEqual(saved);
+        return { closedWorld: true, log: [source.observation, output.observation],
+          replay: async (entry, root) => {
+            if (entry.kind === 'mutate') fs.writeFileSync(path.join(root, 'input'), 'derived');
+            return fs.readFileSync(path.join(root, 'input'), 'utf8');
+          } };
+      },
+    });
+    expect(result.status).toBe('forked');
+    if (result.status !== 'forked') throw new Error('Expected fork');
+    expect(result).toMatchObject({ replayedSteps: 2, agent: { id: 'debug', status: 'ready',
+      checkpoint: { answer: 'derived' }, causalHeads: [output.seq], stepsUsed: 0, runId: 'run' } });
+    expect(fs.readFileSync(path.join(result.transaction.forkRoot, 'input'), 'utf8')).toBe('derived');
+    expect(fs.readFileSync(path.join(temp, 'repo', 'input'), 'utf8')).toBe('future');
+    expect(runtime.get('a')).toEqual(original);
+    expect(runtime.getRunUsage('run')).toMatchObject({ stepsUsed: usage.stepsUsed, agentsCreated: usage.agentsCreated + 1 });
+    expect(domain.getStore().getJournalEvents(domain.domainId).find((e) => e.type === 'AGENT_CHECKPOINT_FORK_PREPARED')?.payload)
+      .toMatchObject({ sourceAgentId: 'a', checkpointSeq: saved.seq, agentId: 'debug', txId: 'debug-tx', replayedSteps: 2 });
+    runtime.close(); domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    open();
+    expect(runtime.get('debug')).toMatchObject({ status: 'paused', checkpoint: saved.checkpoint, causalHeads: saved.causalHeads });
+    expect(runtime.checkpointCausalView('debug', runtime.checkpoints('debug')[0].seq)?.heads).toEqual([output.seq]);
+  });
+
+  it.each(['hash', 'throw'])('discards a divergent historical replay (%s) and retains the source baseline', async (failure) => {
+    const source = node();
+    open(); create([source.seq]);
+    const saved = runtime.checkpoints('a')[0];
+    const baseline = domain.getStore().getJournalEvents(domain.domainId).find((e) => e.type === 'TX_BEGUN')!.payload.baseSnapshotId as string;
+    const result = await forkAgentCheckpoint(runtime, new ProcessSupervisor(domain), {
+      sourceAgentId: 'a', checkpointSeq: saved.seq, agentId: 'debug', txId: 'debug-tx',
+      forkPath: path.join(temp, 'debug'), maxSteps: 2, replayPolicy: 'deterministic',
+      observations: () => ({ closedWorld: true, log: [source.observation], replay: async (_entry, root) => {
+        fs.writeFileSync(path.join(root, 'input'), 'dirty');
+        if (failure === 'throw') throw new Error('adapter failed');
+        return 'different';
+      } }),
+    });
+    expect(result).toMatchObject({ status: 'diverged', replay: { divergedAt: 0, matchedSteps: 0,
+      ...(failure === 'throw' ? { error: 'adapter failed' } : {}) } });
+    expect(runtime.get('debug')).toBeUndefined();
+    expect(fs.existsSync(path.join(temp, 'debug'))).toBe(false);
+    expect(domain.getStore().getSnapshot(baseline)).toBeDefined();
+    expect(fs.readFileSync(path.join(workspace.forkRoot, 'input'), 'utf8')).toBe('value');
+  });
+
+  it('cleans a matched fork if agent creation exhausts the shared Run budget', async () => {
+    const source = node();
+    open({ runBudget: { maxAgents: 1, maxSteps: 10, maxPendingCommands: 1 } });
+    create([source.seq]);
+    await expect(forkAgentCheckpoint(runtime, new ProcessSupervisor(domain), {
+      sourceAgentId: 'a', checkpointSeq: runtime.checkpoints('a')[0].seq, agentId: 'debug', txId: 'debug-tx',
+      forkPath: path.join(temp, 'debug'), maxSteps: 2, replayPolicy: 'deterministic',
+      observations: () => ({ closedWorld: true, log: [source.observation], replay: async () => 'value' }),
+    })).rejects.toThrow('Run agent budget exhausted');
+    expect(runtime.get('debug')).toBeUndefined();
+    expect(fs.existsSync(path.join(temp, 'debug'))).toBe(false);
+    expect(runtime.getRunUsage('run').agentsCreated).toBe(1);
+  });
+
+  it('does not fall back to the live world when the historical snapshot was pruned', async () => {
+    const source = node();
+    open(); create([source.seq]);
+    const supervisor = new ProcessSupervisor(domain);
+    const baseline = domain.getStore().getJournalEvents(domain.domainId).find((e) => e.type === 'TX_BEGUN')!.payload.baseSnapshotId as string;
+    await supervisor.abortWorkspaceTransaction('tx');
+    await supervisor.pruneSnapshots([baseline], { runId: 'run' });
+    let replayed = false;
+    await expect(forkAgentCheckpoint(runtime, supervisor, {
+      sourceAgentId: 'a', checkpointSeq: runtime.checkpoints('a')[0].seq, agentId: 'debug', txId: 'debug-tx',
+      forkPath: path.join(temp, 'debug'), maxSteps: 2, replayPolicy: 'deterministic',
+      observations: () => ({ closedWorld: true, log: [source.observation], replay: async () => {
+        replayed = true; return 'value';
+      } }),
+    })).rejects.toThrow('base snapshot');
+    expect(replayed).toBe(false);
+    expect(runtime.get('debug')).toBeUndefined();
+    expect(fs.existsSync(path.join(temp, 'debug'))).toBe(false);
+  });
+
+  it('replays the selected historical checkpoint and isolates recorded hashes from adapter mutation', async () => {
+    const source = node();
+    open({ step: async () => { runtime.pause('a'); return { status: 'ready', checkpoint: 'later', causalHeads: [] }; } });
+    create([source.seq]);
+    const initial = runtime.checkpoints('a')[0];
+    await runtime.drain();
+    const result = await forkAgentCheckpoint(runtime, new ProcessSupervisor(domain), {
+      sourceAgentId: 'a', checkpointSeq: initial.seq, agentId: 'debug', txId: 'debug-tx',
+      forkPath: path.join(temp, 'debug'), maxSteps: 2, replayPolicy: 'deterministic',
+      observations: (checkpoint) => {
+        expect(checkpoint.checkpoint).toBe('initial');
+        return { closedWorld: true, log: [source.observation], replay: async (entry) => {
+          entry.resultHash = 'changed'; return 'changed';
+        } };
+      },
+    });
+    expect(result).toMatchObject({ status: 'diverged', replay: { divergedAt: 0 } });
+    expect(runtime.get('a')?.checkpoint).toBe('later');
+  });
+
+  it('rejects incomplete replay evidence before allocating a historical fork', async () => {
+    const source = node();
+    open(); create([source.seq]);
+    const options = { sourceAgentId: 'a', checkpointSeq: runtime.checkpoints('a')[0].seq,
+      agentId: 'debug', txId: 'debug-tx', forkPath: path.join(temp, 'debug'), maxSteps: 2,
+      replayPolicy: 'deterministic' as const,
+      observations: () => ({ closedWorld: true as const,
+        log: [{ kind: 'mutate' as const, call: { tool: 'write', args: {} } }], replay: async () => undefined }) };
+    await expect(forkAgentCheckpoint(runtime, new ProcessSupervisor(domain), options)).rejects.toThrow('result hashes');
+    expect(fs.existsSync(options.forkPath)).toBe(false);
+    await expect(forkAgentCheckpoint(runtime, new ProcessSupervisor(domain), { ...options, checkpointSeq: 999999 }))
+      .rejects.toThrow('No checkpoint');
   });
 
   it('persists explicit branches, workspace bindings and restored context across reopen', async () => {

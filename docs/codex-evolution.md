@@ -138,3 +138,13 @@
 - 基线 551 通过、7 跳过；全量发现 src 同步子进程门禁，已改用现有异步 execFile 方式并重新生成样本。
 - 最终验证：pnpm typecheck、pnpm build、git diff --check 通过；pnpm test 556 通过、7 跳过（88.72 秒）。
 - 下一步：仅观测失效的合并冲突基准，或跨 agent 恢复编排与真实模型计量。
+
+## 2026-10-08 — 历史 checkpoint 分叉与确定性重放
+- 新增 forkAgentCheckpoint：复用历史事务基线、观测重放和 AgentRuntime，重建文件世界后创建具有历史上下文 / heads 的新 agent。
+- 逐步校验包含 mutation 的结果哈希；分歧返回首个位置及错误并清理 fork，创建失败也清理，共享历史基线保留。
+- 同 Run 创建计入 agent 限额，已用步数不回退；记录 AGENT_CHECKPOINT_FORK_PREPARED 来源，实际绑定以 AGENT_STATE 为准。
+- 7 项新增测试覆盖真实历史文件重建、源 fork 删除、Run 预算、重启查询、重放分歧 / 异常、缺失快照和哈希隔离。
+- 新增 docs/checkpoint-forks.md 契约与示例，更新 README / VISION 与 45 行交接摘要。
+- 边界：checkpoint 粒度、宿主保证完整确定性操作前缀；不重放模型 / 外部系统，不自动提交；准备后崩溃由宿主回收事务。
+- 验证：基线 556 通过、7 跳过；定向 19 通过；pnpm typecheck、pnpm build、git diff --check 通过；全量 563 通过、7 跳过（88.94 秒）。
+- 下一步：历史分支上下文 / 因果 / 文件差异查询及对照调试示例。
