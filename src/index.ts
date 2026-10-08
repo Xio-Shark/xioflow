@@ -34,3 +34,4 @@ export * from './otel/otlp.js';
 export { KernelMcpServer, SUPPORTED_PROTOCOL_VERSIONS } from './mcp/server.js';
 export type { KernelMcpServerOptions } from './mcp/server.js';
 export * from './workspace/causal-graph.js';
+export * from './workspace/speculation.js';
