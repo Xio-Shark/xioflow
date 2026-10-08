@@ -242,7 +242,20 @@ failures are surfaced. Before returning, the host owns cleanup on its own errors
 Shutdown joins preparation through the existing recovery lifecycle. Binding does
 not commit files, prove world validity, infer complete dependencies, or transform
 old model context automatically. Continue execution on the prepared fork and use
-the normal OCC commit path; cross-agent recovery remains host-orchestrated.
+the normal OCC commit path. The batch helper below coordinates per-agent calls;
+the host still owns dependency scheduling and reconstruction.
+
+### Causal recovery batches
+
+`recoverAgentCausalBatch(agents, changed, prepare)` snapshots `planCausalRecovery`
+and sequentially recovers affected stopped agents through `recoverCausalCheckpoint`.
+It returns the original plan and one outcome per affected agent: `repaired`,
+`skipped` (checkpoint changed, not stopped, or not repaired), or `failed` with the
+original error. Preparation receives an isolated copy of the impact entry.
+Each successful binding is independently journaled; failures do not undo earlier
+bindings or prevent later attempts. It does not stop/resume agents, commit
+transactions, deduplicate shared ancestors, or impose a causal scheduling order.
+See [batch semantics and integration example](../docs/causal-recovery-batches.md).
 
 ## Task scopes
 

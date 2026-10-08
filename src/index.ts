@@ -16,6 +16,7 @@ export * from './agents/workspace-recovery.js';
 export * from './agents/checkpoint-fork.js';
 export * from './agents/checkpoint-diff.js';
 export * from './agents/checkpoint-files.js';
+export * from './agents/causal-recovery.js';
 export * from './snapshot/git-shadow.js';
 export type {
   CommitOptions,

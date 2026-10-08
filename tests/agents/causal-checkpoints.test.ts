@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -532,6 +532,118 @@ describe('agent checkpoint causal branches', () => {
     expect(runtime.planCausalRecovery([])).toEqual({ changed: [], affected: [], unaffected: ['a'], untracked: [] });
     expect(() => runtime.planCausalRecovery([999999])).toThrow('absent');
     expect(() => runtime.planCausalRecovery([NaN])).toThrow('absent');
+  });
+
+  it('repairs a batch with real causal recomputation and preserves independent agents and budgets', async () => {
+    const source = node();
+    const derived = node([source.seq]);
+    const stable = node();
+    open();
+    for (const [id, heads] of [['first', [derived.seq]], ['second', [source.seq]],
+      ['stable', [stable.seq]], ['unknown', null]] as const) {
+      runtime.create({ id, runId: 'run', input: null, checkpoint: 'old', maxSteps: 2,
+        causalHeads: heads === null ? null : [...heads] });
+      runtime.pause(id);
+    }
+    const usage = runtime.getRunUsage('run');
+    const untouched = runtime.get('stable');
+    fs.writeFileSync(path.join(temp, 'repo', 'input'), 'updated');
+    const executed: number[] = [];
+    const batch = await recoverAgentCausalBatch(runtime, [source.seq, source.seq], async (impact) => {
+      const result = await prepareWorkspaceRepair(new ProcessSupervisor(domain), {
+        txId: `batch-${impact.agentId}`, runId: 'run', root: path.join(temp, 'repo'),
+        forkPath: path.join(temp, `batch-${impact.agentId}`), atSeq: impact.checkpoint.seq,
+        heads: impact.checkpoint.causalHeads!, changed: [source.seq],
+        validateReuse: async () => {},
+        execute: async (entry, tx) => {
+          executed.push(entry.seq);
+          return { actorId: impact.agentId, observation: { ...entry.observation,
+            resultHash: fs.readFileSync(path.join(tx.forkRoot, 'input'), 'utf8') } };
+        },
+      });
+      // Host mutation must not corrupt the retained impact snapshot.
+      impact.invalidatedNodes.length = 0;
+      return { checkpoint: 'updated', causalHeads: result.heads, workspace: result.transaction };
+    });
+    expect(batch.plan.changed).toEqual([source.seq]);
+    expect(batch.plan.affected[0].invalidatedNodes).toEqual([source.seq, derived.seq]);
+    expect(batch.plan.unaffected).toEqual(['stable']);
+    expect(batch.plan.untracked).toEqual(['unknown']);
+    expect(batch.outcomes.map(({ status }) => status)).toEqual(['repaired', 'repaired']);
+    expect(executed).toEqual([source.seq, derived.seq, source.seq]);
+    expect(runtime.planCausalRecovery([source.seq]).affected).toEqual([]);
+    expect(runtime.getRunUsage('run')).toEqual(usage);
+    expect(runtime.get('stable')).toEqual(untouched);
+    const saved = runtime.checkpoints('first').at(-1)!;
+    runtime.close(); domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    open();
+    expect(runtime.checkpoints('first').at(-1)).toEqual(saved);
+    expect(runtime.get('second')).toMatchObject({ checkpoint: 'updated', status: 'paused' });
+  });
+
+  it('reports binding failures and declined recovery while continuing the batch', async () => {
+    const source = node();
+    open();
+    for (const id of ['bad', 'declined', 'good']) {
+      runtime.create({ id, runId: 'run', input: null, checkpoint: 'old', causalHeads: [source.seq], maxSteps: 2 });
+      runtime.pause(id);
+    }
+    let discarded = 0;
+    const batch = await recoverAgentCausalBatch(runtime, [source.seq], async ({ agentId }) => {
+      if (agentId === 'declined') return undefined;
+      return { checkpoint: 'new', causalHeads: agentId === 'bad' ? [999999] : [], workspace,
+        discard: async () => { discarded++; } };
+    });
+    expect(batch.outcomes[0]).toMatchObject({ agentId: 'bad', status: 'failed', error: expect.any(Error) });
+    expect(batch.outcomes[1]).toMatchObject({ agentId: 'declined', status: 'skipped', reason: 'not_repaired' });
+    expect(batch.outcomes[2]).toMatchObject({ agentId: 'good', status: 'repaired' });
+    expect(discarded).toBe(1);
+    expect(runtime.get('bad')).toMatchObject({ status: 'paused', checkpoint: 'old' });
+    expect(runtime.get('declined')).toMatchObject({ status: 'paused', checkpoint: 'old' });
+  });
+
+  it('skips active and terminal agents and detects checkpoint changes during an earlier preparation', async () => {
+    const source = node();
+    open({ step: async () => ({ status: 'completed', checkpoint: 'done', causalHeads: [source.seq] }) });
+    runtime.create({ id: 'done', runId: 'run', input: null, checkpoint: null, maxSteps: 1, causalHeads: [source.seq] });
+    await runtime.drain();
+    for (const id of ['first', 'stale', 'active']) {
+      runtime.create({ id, runId: 'run', input: null, checkpoint: 'old', causalHeads: [source.seq], maxSteps: 2 });
+      if (id !== 'active') runtime.pause(id);
+    }
+    const called: string[] = [];
+    const batch = await recoverAgentCausalBatch(runtime, [source.seq], async ({ agentId }) => {
+      called.push(agentId);
+      runtime.restoreCheckpoint('stale', runtime.checkpoints('stale')[0].seq);
+      return { checkpoint: 'new', causalHeads: [], workspace };
+    });
+    expect(called).toEqual(['first']);
+    expect(batch.outcomes.map((entry) => entry.status === 'skipped' ? entry.reason : entry.status))
+      .toEqual(['not_stopped', 'repaired', 'checkpoint_changed', 'not_stopped']);
+    await expect(recoverAgentCausalBatch(runtime, [999999], async () => undefined)).rejects.toThrow('absent');
+    expect(await recoverAgentCausalBatch(runtime, [], async () => { throw new Error('unexpected'); }))
+      .toMatchObject({ outcomes: [] });
+  });
+
+  it('reports interrupted preparation without publishing context and continues to another agent', async () => {
+    const source = node();
+    open();
+    for (const id of ['first', 'second']) {
+      runtime.create({ id, runId: 'run', input: null, checkpoint: 'old', causalHeads: [source.seq], maxSteps: 2 });
+      runtime.pause(id);
+    }
+    let stopping: Promise<unknown> | undefined;
+    let discarded = 0;
+    const batch = await recoverAgentCausalBatch(runtime, [source.seq], async ({ agentId }) => {
+      if (agentId === 'first') stopping = runtime.interrupt(agentId);
+      return { checkpoint: 'new', causalHeads: [], workspace, discard: async () => { discarded++; } };
+    });
+    await stopping;
+    expect(batch.outcomes[0]).toMatchObject({ status: 'skipped', reason: 'not_repaired' });
+    expect(batch.outcomes[1]).toMatchObject({ status: 'repaired' });
+    expect(discarded).toBe(1);
+    expect(runtime.get('first')).toMatchObject({ status: 'interrupted', checkpoint: 'old' });
   });
 
   it('binds an actual incremental repair with rebuilt context and reopens its history', async () => {
