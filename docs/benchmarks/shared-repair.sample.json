@@ -1,0 +1,280 @@
+{
+  "schemaVersion": 1,
+  "config": {
+    "trials": 3,
+    "branches": 4,
+    "hashRounds": 1000
+  },
+  "modelTokens": null,
+  "environment": {
+    "node": "v22.23.3",
+    "platform": "linux",
+    "arch": "arm64",
+    "git": "git version 2.47.3"
+  },
+  "samples": [
+    {
+      "mode": "independent-repair",
+      "trial": 0,
+      "executionToolCalls": 12,
+      "changeDetectionReads": 1,
+      "distributionReads": 0,
+      "distributionWrites": 0,
+      "distributionBytes": 0,
+      "distributionValidationReads": 0,
+      "transactionsStarted": 4,
+      "elapsedMs": 358.157326,
+      "outputHashes": [
+        "11bd77b9a65b926c364a0de5a9cea160b164c16940856997689b7a53bd05d08c",
+        "8790cb597b217e2a45aa7977d4641f0e6f4dceae68d3e0a57777c94b9ed23a15",
+        "04454a247cdcb14fff2f4054597aff61bb2467f8e5459b5ab202d928f7ed1d62",
+        "ad65f629f963cc67b5208901bcd3ba08e98e44dddbb655c2abb296b092c4ef79"
+      ],
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "success": true,
+      "commitValidations": [
+        "files",
+        "files",
+        "files",
+        "files"
+      ]
+    },
+    {
+      "mode": "shared-repair",
+      "trial": 0,
+      "executionToolCalls": 6,
+      "changeDetectionReads": 1,
+      "distributionReads": 4,
+      "distributionWrites": 4,
+      "distributionBytes": 264,
+      "distributionValidationReads": 4,
+      "transactionsStarted": 5,
+      "elapsedMs": 384.95388300000013,
+      "outputHashes": [
+        "11bd77b9a65b926c364a0de5a9cea160b164c16940856997689b7a53bd05d08c",
+        "8790cb597b217e2a45aa7977d4641f0e6f4dceae68d3e0a57777c94b9ed23a15",
+        "04454a247cdcb14fff2f4054597aff61bb2467f8e5459b5ab202d928f7ed1d62",
+        "ad65f629f963cc67b5208901bcd3ba08e98e44dddbb655c2abb296b092c4ef79"
+      ],
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "success": true,
+      "commitValidations": [
+        "files",
+        "files",
+        "files",
+        "files"
+      ]
+    },
+    {
+      "mode": "unchecked-reuse",
+      "trial": 0,
+      "executionToolCalls": 0,
+      "changeDetectionReads": 0,
+      "distributionReads": 0,
+      "distributionWrites": 0,
+      "distributionBytes": 0,
+      "distributionValidationReads": 0,
+      "transactionsStarted": 0,
+      "elapsedMs": 0.0010760000000118453,
+      "outputHashes": [
+        "d51af6917da2d89607447f3f0637d6347764027b58b2f4d82b491f6b1fed02a5",
+        "1815bb449f8eaac79099015efdcc47a428dd782b2167a87ce5931417cb0234e2",
+        "41c521b94652ad23e4399d0525076cdaaa21ba04c7b5645f3680081ee42d2eca",
+        "d8cfb31936a202d01dfccb34448a1cbe982687a33902d26818e8385639d77048"
+      ],
+      "correctOutputs": 0,
+      "totalOutputs": 4,
+      "success": false,
+      "commitValidations": []
+    },
+    {
+      "mode": "shared-repair",
+      "trial": 1,
+      "executionToolCalls": 6,
+      "changeDetectionReads": 1,
+      "distributionReads": 4,
+      "distributionWrites": 4,
+      "distributionBytes": 264,
+      "distributionValidationReads": 4,
+      "transactionsStarted": 5,
+      "elapsedMs": 373.01902500000006,
+      "outputHashes": [
+        "83e12a4e638d5708dd478b8a7b620471aa83201559e0a123e51ff13aa46fc619",
+        "8065e6a5ea134c423721287944cfce00fc75c98e0b6897580235e93e4d12c938",
+        "b9c6390c70f18bd66e827d46c3ffe6a42aa8b367452bc3aa39bfa9581c3b79ea",
+        "af6baf7092931c9cdfc284d0fd450e541e8c9114afd10b38f2ade101df592fef"
+      ],
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "success": true,
+      "commitValidations": [
+        "files",
+        "files",
+        "files",
+        "files"
+      ]
+    },
+    {
+      "mode": "unchecked-reuse",
+      "trial": 1,
+      "executionToolCalls": 0,
+      "changeDetectionReads": 0,
+      "distributionReads": 0,
+      "distributionWrites": 0,
+      "distributionBytes": 0,
+      "distributionValidationReads": 0,
+      "transactionsStarted": 0,
+      "elapsedMs": 0.0025669999999990978,
+      "outputHashes": [
+        "d51af6917da2d89607447f3f0637d6347764027b58b2f4d82b491f6b1fed02a5",
+        "1815bb449f8eaac79099015efdcc47a428dd782b2167a87ce5931417cb0234e2",
+        "41c521b94652ad23e4399d0525076cdaaa21ba04c7b5645f3680081ee42d2eca",
+        "d8cfb31936a202d01dfccb34448a1cbe982687a33902d26818e8385639d77048"
+      ],
+      "correctOutputs": 0,
+      "totalOutputs": 4,
+      "success": false,
+      "commitValidations": []
+    },
+    {
+      "mode": "independent-repair",
+      "trial": 1,
+      "executionToolCalls": 12,
+      "changeDetectionReads": 1,
+      "distributionReads": 0,
+      "distributionWrites": 0,
+      "distributionBytes": 0,
+      "distributionValidationReads": 0,
+      "transactionsStarted": 4,
+      "elapsedMs": 341.72021900000004,
+      "outputHashes": [
+        "83e12a4e638d5708dd478b8a7b620471aa83201559e0a123e51ff13aa46fc619",
+        "8065e6a5ea134c423721287944cfce00fc75c98e0b6897580235e93e4d12c938",
+        "b9c6390c70f18bd66e827d46c3ffe6a42aa8b367452bc3aa39bfa9581c3b79ea",
+        "af6baf7092931c9cdfc284d0fd450e541e8c9114afd10b38f2ade101df592fef"
+      ],
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "success": true,
+      "commitValidations": [
+        "files",
+        "files",
+        "files",
+        "files"
+      ]
+    },
+    {
+      "mode": "unchecked-reuse",
+      "trial": 2,
+      "executionToolCalls": 0,
+      "changeDetectionReads": 0,
+      "distributionReads": 0,
+      "distributionWrites": 0,
+      "distributionBytes": 0,
+      "distributionValidationReads": 0,
+      "transactionsStarted": 0,
+      "elapsedMs": 0.0005999999998493877,
+      "outputHashes": [
+        "d51af6917da2d89607447f3f0637d6347764027b58b2f4d82b491f6b1fed02a5",
+        "1815bb449f8eaac79099015efdcc47a428dd782b2167a87ce5931417cb0234e2",
+        "41c521b94652ad23e4399d0525076cdaaa21ba04c7b5645f3680081ee42d2eca",
+        "d8cfb31936a202d01dfccb34448a1cbe982687a33902d26818e8385639d77048"
+      ],
+      "correctOutputs": 0,
+      "totalOutputs": 4,
+      "success": false,
+      "commitValidations": []
+    },
+    {
+      "mode": "independent-repair",
+      "trial": 2,
+      "executionToolCalls": 12,
+      "changeDetectionReads": 1,
+      "distributionReads": 0,
+      "distributionWrites": 0,
+      "distributionBytes": 0,
+      "distributionValidationReads": 0,
+      "transactionsStarted": 4,
+      "elapsedMs": 365.3063280000001,
+      "outputHashes": [
+        "3b5e7972978ebfc42ca8835ef76426f37ff00cb355924bda1e41c927bdf1f241",
+        "64c90761a751c06d88b97ce55fa8450a4c3c23607ce67550bea84e981d10eeba",
+        "ee5ecd3609919a8374c1597f1177b5a750036577ebe3cf7614e4af48b202a7a5",
+        "a0e1b6874de4c9f2d84774de10588359b5c07c02c25f9455e1a271dd78bd3905"
+      ],
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "success": true,
+      "commitValidations": [
+        "files",
+        "files",
+        "files",
+        "files"
+      ]
+    },
+    {
+      "mode": "shared-repair",
+      "trial": 2,
+      "executionToolCalls": 6,
+      "changeDetectionReads": 1,
+      "distributionReads": 4,
+      "distributionWrites": 4,
+      "distributionBytes": 264,
+      "distributionValidationReads": 4,
+      "transactionsStarted": 5,
+      "elapsedMs": 398.0090960000002,
+      "outputHashes": [
+        "3b5e7972978ebfc42ca8835ef76426f37ff00cb355924bda1e41c927bdf1f241",
+        "64c90761a751c06d88b97ce55fa8450a4c3c23607ce67550bea84e981d10eeba",
+        "ee5ecd3609919a8374c1597f1177b5a750036577ebe3cf7614e4af48b202a7a5",
+        "a0e1b6874de4c9f2d84774de10588359b5c07c02c25f9455e1a271dd78bd3905"
+      ],
+      "correctOutputs": 4,
+      "totalOutputs": 4,
+      "success": true,
+      "commitValidations": [
+        "files",
+        "files",
+        "files",
+        "files"
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "mode": "independent-repair",
+      "successRate": 1,
+      "meanExecutionToolCalls": 12,
+      "meanDistributionReads": 0,
+      "meanDistributionWrites": 0,
+      "meanDistributionBytes": 0,
+      "meanDistributionValidationReads": 0,
+      "meanTransactionsStarted": 4,
+      "medianElapsedMs": 358.157326
+    },
+    {
+      "mode": "shared-repair",
+      "successRate": 1,
+      "meanExecutionToolCalls": 6,
+      "meanDistributionReads": 4,
+      "meanDistributionWrites": 4,
+      "meanDistributionBytes": 264,
+      "meanDistributionValidationReads": 4,
+      "meanTransactionsStarted": 5,
+      "medianElapsedMs": 384.95388300000013
+    },
+    {
+      "mode": "unchecked-reuse",
+      "successRate": 0,
+      "meanExecutionToolCalls": 0,
+      "meanDistributionReads": 0,
+      "meanDistributionWrites": 0,
+      "meanDistributionBytes": 0,
+      "meanDistributionValidationReads": 0,
+      "meanTransactionsStarted": 0,
+      "medianElapsedMs": 0.0010760000000118453
+    }
+  ]
+}

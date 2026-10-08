@@ -1,60 +1,54 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；受监督执行是底座。
 - 分支：codex/evolve；复用 snapshot / fork / rollback、AgentRuntime、journal。
-- 已有：WorkspaceTransactions 文件读写集与观测重放 OCC；同基线隔离投机执行。
+- WorkspaceTransactions：文件读写集与观测重放 OCC；同基线隔离投机执行。
 - WorkspaceCausalGraph：持久因果节点、上游查询、历史切片、失效闭包。
-- prepareWorkspaceRepair：拓扑重算失效节点，复用独立结果，记录替代关系。
-- view(heads) 显式选择分支；修复返回替代后的 heads，支持连续多轮修复。
-- speculateWorkspace 接通 OCC 冲突后的 repair 与再提交，每候选最多一次修复。
-- commitPolicy: first_valid / all_valid；后者依声明顺序合并所有 OCC 有效结果。
-- winners 返回全部胜者，winner 为首个；committed 只表示至少一个成功。
-- 批次非原子；错误不撤销已有提交；提交异常保留不确定 fork / 基线供恢复。
-- TX journal 是提交事实依据；正常回收落选资源；入口 src/workspace/speculation.ts。
-- AgentRuntime create / step 将 causalHeads 与 checkpoint 原子持久化。
-- heads 引用同 domain 已有节点，支持跨 actor / 事务；null 未跟踪，[] 显式空分支。
-- checkpoints / checkpointCausalView 查询历史；restore / recover 同步恢复上下文与 heads。
-- findValidCheckpoint 使用候选自己的 heads；所有恢复均不回退已消耗预算。
-- planCausalRecovery(changed) 跨 agent 查询失效与历史候选，不证明当前世界有效。
-- recoverCausalCheckpoint 校验预期 checkpoint 序号，独占恢复并绑定宿主重建结果。
-- preparation 返回 checkpoint / 显式 heads / open workspace；discard 处理绑定失败或中断。
-- causal_repaired 原子保存上下文 / heads / workspace，checkpointRef 记录来源；成功 paused。
-- recoverAgentCausalBatch：固定影响计划，逐项接通单 agent 因果恢复。
-- 入口 src/agents/causal-recovery.ts；文档 docs/causal-recovery-batches.md 含集成示例。
-- 返回 plan 与逐项 outcomes：repaired / skipped / failed；异常保留原始 error。
-- 跳过 checkpoint_changed / not_stopped / not_repaired；后者含宿主放弃或中断。
-- prepare 拿影响条目副本；预算不回退；复用已有恢复独占与清理机制。
-- 批次非原子，失败继续，成功项不撤销；以逐项 causal_repaired journal 为准。
-- 不自动停止 / resume / OCC 提交；登记顺序不是拓扑顺序，共享祖先可能重复重算。
-- forkAgentCheckpoint：从历史 TX_BEGUN 基线重放后创建新 agent；保留 Run 累计预算。
-- 入口 src/agents/checkpoint-fork.ts；要求 deterministic、完整 closedWorld 前缀及逐步哈希。
-- 历史源 fork 删除不影响重建；基线缺失直接失败；不调用 drain，宿主协调调度。
-- compareAgentCheckpoints：跨 agent / 事务 / Run 对照历史上下文和因果分支。
-- context 是 JSON Pointer 差异；evidence 含共同 / 独有节点与结构分歧 roots。
-- compareAgentCheckpointFiles：重建历史基线并比较 Git 覆盖的实际文件 A/D/M/T。
-- 共享重建 src/agents/checkpoint-workspace.ts；不创建 agent，不增加 agent / step 预算。
-- 文档 docs/checkpoint-comparison.md；示例 pnpm build && node examples/checkpoint-debug/run.mjs。
-- 边界：无文本 patch / 空目录 / 时间戳 / 外部系统 diff；忽略文件遵循快照覆盖范围。
-- 边界：宿主保证依赖、操作前缀完整性、确定性和文件效果，哈希匹配不能证明这些声明。
-- 时间旅行目前是 checkpoint 粒度，不是任意序号系统回滚，不重放模型或外部系统。
-- 基准：pnpm benchmark:causal 与 benchmark:merge；协议见对应 docs/*benchmark.md。
-- 因果基准 3×4：完整 / 局部均 3/3 正确，实际工具 12→3，另计验证读取。
-- 合并基准 3×4：均 3/3 正确，总工具 25→16、恢复 12→3，另计检测 / 校验 / 复制。
-- modelTokens null，不声称真实模型 token 或总操作节省。
-- 本轮新增 prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。
-- branches 为唯一 id / heads；合并视图后拓扑执行，返回每分支 sourceHeads / 新 heads。
+- prepareWorkspaceRepair：拓扑重算失效节点、复用独立结果、记录替代关系。
+- view(heads) 显式选择分支；修复返回新 heads，支持连续多轮修复。
+- speculateWorkspace：OCC 冲突后最多一次 repair 与再提交。
+- commitPolicy first_valid / all_valid；后者依声明顺序合并 OCC 有效结果。
+- winners 为全部胜者；批次非原子，异常不撤销已提交项，journal 为提交事实。
+- AgentRuntime create / step 原子持久化 causalHeads 与 checkpoint。
+- heads 引用同 domain 已有节点；null 未跟踪，[] 显式空分支。
+- checkpoints / checkpointCausalView 查询历史；restore / recover 不回退预算。
+- planCausalRecovery(changed)：跨 agent 失效与历史候选查询，不证明当前世界有效。
+- recoverCausalCheckpoint：检查 checkpoint 序号、独占恢复、绑定宿主重建结果。
+- preparation 返回 checkpoint / 显式 heads / open workspace；discard 回收失败资源。
+- causal_repaired 原子保存上下文 / heads / workspace；成功后 paused。
+- recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。
+- 入口 src/agents/causal-recovery.ts；文档 docs/causal-recovery-batches.md。
+- 不自动停止 / resume / OCC 提交；登记顺序不是拓扑顺序。
+- prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。
+- branches 为唯一 id / heads；联合视图拓扑执行，返回各分支 sourceHeads / 新 heads。
 - 复用证据统一验证；独立 / 空分支保留，排除未选兄弟；支持连续修复。
 - 映射与替代关系同条 CAUSAL_REPAIR_PREPARED 持久化；不代表提交成功。
-- 任一步失败中止整体准备，回收 fork / 基线；成功后宿主统一 OCC / 回收。
-- 不合并互斥策略，不绑定 agent 上下文；跨 agent checkpoint 与文件提交非原子。
-- 新增 recoverAgentSharedCausalBatch：一次共享重算后，逐项绑定独立事务与上下文。
-- 入口 src/agents/causal-recovery.ts；复用冻结计划、checkpoint 版本检查和独占恢复。
-- 分支 id / sourceHeads 与 checkpoint 对照，新 heads 自动绑定；回调参数给副本。
-- runtime 仍要求单事务单活跃 agent；宿主 bind 负责独立文件输出分发和上下文重建。
-- 共享 repair 始终由宿主持有，返回 batch.repair；部分失败不回收共享事务。
-- 拒绝直接绑定共享事务且不调用其 discard；其他逐项失败按独立资源 discard 处理。
-- 无影响时不准备；prepare 异常由宿主清理；成功项持久化并暂停，批次非原子。
-- 下一步：自动化共享输出分发、OCC 提交协调，并量化共享重算与复制成本。
-- 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免缓存和 dist 竞态。
-- 本轮基线：578 通过、7 跳过、3 项僵尸进程恢复失败，测试身份缺 OS 启动时间。
-- 测试夹具现使用真实 OS 启动时间，避免墙钟 / btime 舍入差异误判 PGID 复用。
-- 验证：定向因果 36 通过；原失败 3 项通过；typecheck / build / diff 通过；全量 584 通过、7 跳过。
+- 准备失败回收 fork / 基线；成功后宿主统一 OCC / 回收；不合并互斥策略。
+- recoverAgentSharedCausalBatch：一次共享重算，逐项绑定独立事务与上下文。
+- 校验分支 id / sourceHeads 与 checkpoint；新 heads 自动绑定，回调收到副本。
+- 单事务单活跃 agent；宿主 bind 负责独立输出分发和上下文重建。
+- 共享 repair 始终由宿主持有并返回；部分失败不回收共享事务。
+- 拒绝直接绑定共享事务且不调用其 discard；其他失败回收独立资源。
+- 无影响时不准备；prepare 异常由宿主清理；跨 agent 文件 / checkpoint 非原子。
+- forkAgentCheckpoint：历史 TX_BEGUN 基线重放，创建同 Run 新 agent，保留累计预算。
+- 要求 deterministic、完整 closedWorld 前缀及逐步哈希；基线缺失失败。
+- compareAgentCheckpoints：跨 agent / 事务 / Run 对比上下文 JSON Pointer 与因果分支。
+- compareAgentCheckpointFiles：重建历史工作区并比较实际文件 A/D/M/T。
+- 共享重建 src/agents/checkpoint-workspace.ts；不创建 agent / 消耗 agent step 预算。
+- 文档 docs/checkpoint-comparison.md；示例 examples/checkpoint-debug/run.mjs。
+- 无文本 patch / 空目录 / 时间戳 / 外部系统 diff；快照覆盖遵循 Git 忽略规则。
+- 宿主保证依赖完整性、确定性和文件效果，哈希匹配不能证明这些声明。
+- 时间旅行是 checkpoint 粒度，不是任意序号回滚，不重放模型或外部系统。
+- 基准 pnpm benchmark:causal / benchmark:merge；协议 docs/*benchmark.md。
+- 因果基准 3×4：完整 / 局部均 3/3 正确，工具 12→3，另计验证读取。
+- 合并基准 3×4：均 3/3 正确，总工具 25→16、恢复 12→3，另计检测 / 复制。
+- 新增 pnpm benchmark:shared：逐分支独立修复 / 共享祖先修复 / 不校验复用。
+- 入口 src/testing/shared-repair-benchmark.ts；协议 docs/shared-repair-benchmark.md。
+- 公共 read→derive→N 个 write，扰动公共输入；全部失效，无独立节点复用。
+- 共享分发各分支输出到独立事务，逐份验证公共输入，再逐项 OCC 提交。
+- 计入实际工具、检测、分发读写 / 字节、输入再验证、事务数与端到端耗时。
+- 3×4 实测：两种修复均 3/3 正确；工具 12→6；复制 264 字节，事务 4→5。
+- 轻量任务中位数 358.16→384.95 ms；不声称速度或模型 token 节省。
+- modelTokens 均 null；共享基准为固定文件适配器，不覆盖 AgentRuntime 调度或并发扰动。
+- 下一步：通用共享输出分发与 OCC 证据迁移，优先降低额外事务 / 复制成本。
+- 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。
+- 新环境需 C 编译器；本轮基线缺 cc 导致 3 文件构建失败，已安装 build-essential。

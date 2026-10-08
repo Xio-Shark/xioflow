@@ -19,6 +19,8 @@ The experimental [`forkAgentCheckpoint`](docs/checkpoint-forks.md) reconstructs 
 
 Run `pnpm benchmark:causal` for a reproducible real-file comparison of full reruns, causal repairs, and unchecked reuse. The [benchmark protocol](docs/causal-repair-benchmark.md) reports output correctness, actual tool calls, validation reads, and elapsed time; it does not estimate model tokens. Run `pnpm benchmark:merge` for [speculative merge recovery](docs/speculative-merge-benchmark.md), including failed candidate execution, reuse validation, and output materialization costs.
 
+Run `pnpm benchmark:shared` to compare [independent and shared-ancestor repairs](docs/shared-repair-benchmark.md), including output distribution, per-workspace input validation, and OCC publication. The fixed workload reports tool savings separately from copying and transaction overhead.
+
 For integration, start with the [current implementation contract](spec/current-contract.md).
 It separates implemented guarantees, experimental APIs and planned Rust/daemon work.
 

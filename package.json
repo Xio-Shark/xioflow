@@ -57,7 +57,8 @@
     "verify:package": "node scripts/verify-package.mjs",
     "prepack": "npm run build && npm run build:native",
     "benchmark:causal": "pnpm build && node scripts/benchmarks/causal-repair.mjs",
-    "benchmark:merge": "pnpm build && node scripts/benchmarks/speculative-merge.mjs"
+    "benchmark:merge": "pnpm build && node scripts/benchmarks/speculative-merge.mjs",
+    "benchmark:shared": "pnpm build && node scripts/benchmarks/shared-repair.mjs"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.30.1",
