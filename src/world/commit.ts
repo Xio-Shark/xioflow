@@ -38,6 +38,10 @@ async function publishWorldCandidate(world: WorldState, ref: WorldRef,
         txId: candidate.txId, previous: ref, result }, timestamp: new Date().toISOString() });
     return result;
   };
+  if (store.getJournalEvents(domain.domainId).some(e => e.type === 'WORLD_CANDIDATE_ABANDONED'
+      && e.payload.worldId === state.worldId && e.payload.id === candidate.id)) {
+    return finish({ status: 'rejected', reason: 'candidate_abandoned' });
+  }
   let replayError: string | undefined;
   try {
     if (candidate.coverage.status !== 'complete' || candidate.heads === null

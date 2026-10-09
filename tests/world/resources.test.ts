@@ -191,3 +191,51 @@ it('does not confirm closure when report persistence fails, and preserves an emp
     ['snapshot', 'retained'], ['journal', 'retained'],
   ]);
 });
+
+it('abandons owned checkpoints durably, retries failed cleanup and preserves frozen history', async () => {
+  const result = await executeWorldStep(world, null, async () => ({ checkpoint: null, causalHeads: [] }));
+  if (result.status !== 'executed') throw new Error('execution failed');
+  const frozen = plan();
+  const root = world.state.root;
+  const fail = vi.spyOn(ProcessSupervisor.prototype, 'abortWorkspaceTransaction')
+    .mockRejectedValueOnce(new Error('cleanup unavailable'));
+  const report = await closeWorldResources(world);
+  expect(report.resources.find(r => r.id === result.txId)).toMatchObject({ status: 'cleanup_failed' });
+  fail.mockRestore();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(plan({ atSeq: frozen.atSeq })).toEqual(frozen);
+  expect(plan().resources[0]).toMatchObject({ reasons: ['historical_checkpoint'],
+    fork: { disposition: 'review' } });
+  expect(readWorldClose(world, report.ref)).toEqual(report);
+  const retry = await closeWorldResources(world);
+  expect(retry.resources.find(r => r.id === result.txId)).toMatchObject({ status: 'reclaimed' });
+  await expect(fs.stat(result.forkRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(world.domain.getStore().getJournalEvents('world')
+    .filter(e => e.type === 'WORLD_CANDIDATE_ABANDONED')).toHaveLength(1);
+  expect(world.domain.getStore().getSnapshot(world.state.snapshotId)).toBeDefined();
+});
+
+it.each(['foreign checkpoint', 'missing publication result'])('retains forks with %s after draining', async kind => {
+  const result = await executeWorldStep(world, null, async () => ({ checkpoint: null, causalHeads: [] }));
+  if (result.status !== 'executed') throw new Error('execution failed');
+  const store = world.domain.getStore();
+  if (kind === 'foreign checkpoint') {
+    const checkpoint = store.getJournalEvents('world').filter(e => e.type === 'AGENT_STATE').at(-1)!;
+    store.recordJournalEvent({ domainId: 'world', runId: 'owner', type: 'AGENT_STATE',
+      timestamp: new Date().toISOString(), payload: { ...checkpoint.payload,
+        state: { ...checkpoint.payload.state as object, id: 'foreign', runId: 'owner' } } });
+  } else {
+    store.recordJournalEvent({ domainId: 'world', type: 'WORLD_PUBLICATION_KEY_BOUND',
+      timestamp: new Date().toISOString(), payload: { worldId: world.state.worldId,
+        candidateId: result.id, key: 'pending', identity: { worldId: world.state.worldId,
+          candidateId: result.id, txId: result.id, key: 'pending' } } });
+  }
+  const root = world.state.root;
+  const report = await closeWorldResources(world);
+  expect(report.resources.find(r => r.id === result.id)).toMatchObject({ status: 'retained' });
+  await expect(fs.stat(result.forkRoot)).resolves.toBeDefined();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  const resource = plan().resources[0];
+  expect(resource.fork?.reasons).toContain(kind === 'foreign checkpoint' ? 'current_checkpoint' : 'pending_publication');
+});

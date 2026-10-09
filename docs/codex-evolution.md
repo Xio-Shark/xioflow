@@ -775,3 +775,10 @@
 - refresh传递agent关联，重开缺驱动仅新推理失败；发布身份和固定解释可重开查询。
 - 验证：handle/resources共13项及typecheck通过；全量pnpm test：66文件/969测试通过，1文件/7测试跳过，273.18秒。
 - M2仍缺未发布候选abandon、冻结类型/失败查询收口及六场景完整验收，未新增包导出。
+
+### 2026-10-09 — M2 durable candidate abandonment on close
+- 排空后持久中止open/conflicted候选，再复用共享fork清理；精确释放自有checkpoint占用，不改写历史/预算。
+- 保留其他agent引用、历史基线、committing及绑定key但结果缺失/未决的来源；清理失败重开可重试。
+- 重开后中止候选提交明确rejected/candidate_abandoned；固定历史查询不变。
+- 验证：handle/resources/commit共38项及typecheck通过；新增重开、失败清理重试、其他agent引用和缺失发布结果覆盖。
+- 本轮剩余不足5分钟未跑全量，下一轮先补跑；M2仍缺冻结类型/失败查询收口及六场景完整验收。

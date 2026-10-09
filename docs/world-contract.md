@@ -338,5 +338,15 @@ explainWorldPublication.bindings 独立报告 pending/bound/failed；TX_COMMITTE
 候选关联本进程agent，刷新后传递关联；重开查询、同key续发布和无变化复用无需agent，
 确需新推理但缺宿主驱动时明确failed，不猜测或重放模型。
 这仍是内部集成入口：explain沿用现有完整组合结构，失败准备查询和冻结类型投影尚未收口；
-未发布候选的持久中止仍未实现，close保留其fork/current checkpoint。
+未发布候选的持久中止及引用释放见下节；冻结类型和失败查询仍待收口。
 不得将其视为完整WorldHandle或M2验收通过；包导出保持不变。
+
+
+### 关闭时中止未发布候选（M2 部分实现）
+排空后，close 为 open/conflicted 候选持久记录 `WORLD_CANDIDATE_ABANDONED`，
+再由共享清理器回收 fork；记录失败不执行回收。只释放候选自身 agent/run 对应的
+精确 current checkpoint 引用，不改写 checkpoint、heads 或累计预算；历史和基线继续保留。
+其他 agent 的 current 引用、共享修复、committing 及 key 已绑定但结果缺失/未决的来源仍保留。
+中止与回收分别落盘，清理失败可重开重试；固定截止点不受后续中止影响。
+重开后中止候选提交返回 rejected/candidate_abandoned；既有发布回执优先且身份不变。
+历史查询和依赖完整的重新计算仍可使用保存的证据；中止不恢复已删除的 fork。

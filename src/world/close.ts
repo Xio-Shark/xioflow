@@ -10,7 +10,7 @@ export interface WorldCloseReport extends WorldCloseResult { readonly ref: World
 const closures = new WeakMap<WorldState, Promise<WorldCloseReport>>();
 
 /** Internal finalizer: callers must first drain all operations and exclude writers.
- * Live candidates/checkpoints remain retained until handle abandonment is implemented.
+ * Abandonment releases only owned checkpoints; unresolved publication stays retained.
  */
 export function closeWorldResources(world: WorldState): Promise<WorldCloseReport> {
   const previous = closures.get(world);
@@ -25,8 +25,27 @@ export function closeWorldResources(world: WorldState): Promise<WorldCloseReport
     const ids = new Set(allocations.map(e => e.payload.id as string));
     const supervisor = new ProcessSupervisor(domain);
     for (const txId of ids) {
-      const plan = planAgentCausalResourceCleanup(domain);
-      const resource = plan.resources.find(r => r.txId === txId);
+      let plan = planAgentCausalResourceCleanup(domain);
+      let resource = plan.resources.find(r => r.txId === txId);
+      const history = store.getJournalEvents(domain.domainId);
+      const bindings = history.filter(e => e.type === 'WORLD_PUBLICATION_KEY_BOUND'
+        && e.payload.worldId === state.worldId && e.payload.candidateId === txId);
+      const unresolved = bindings.some(binding => {
+        const result = history.filter(e => e.type === 'WORLD_PUBLICATION_KEY_RESULT'
+          && e.payload.worldId === state.worldId && e.payload.key === binding.payload.key).at(-1);
+        return !result || (result.payload.result as { status?: string })?.status === 'undetermined';
+      });
+      if (resource && ['open', 'conflicted'].includes(resource.state) && !unresolved
+          && !history.some(e => e.type === 'WORLD_CANDIDATE_ABANDONED'
+            && e.payload.worldId === state.worldId && e.payload.id === txId)) {
+        const checkpointSeqs = resource.references.filter(ref => ref.txId === txId
+          && ref.agentId === txId && ref.runId === txId && ref.current).map(ref => ref.checkpointSeq);
+        store.recordJournalEvent({ domainId: domain.domainId, runId: txId,
+          type: 'WORLD_CANDIDATE_ABANDONED', timestamp: new Date().toISOString(),
+          payload: { worldId: state.worldId, id: txId, txId, checkpointSeqs, reason: 'world_closed' } });
+        plan = planAgentCausalResourceCleanup(domain);
+        resource = plan.resources.find(r => r.txId === txId);
+      }
       if (resource?.fork?.disposition !== 'review'
           || !['open', 'conflicted'].includes(resource.state)) continue;
       try { await cleanupAgentCausalFork(supervisor, { txId, atSeq: plan.atSeq }); }

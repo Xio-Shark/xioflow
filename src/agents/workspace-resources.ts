@@ -12,6 +12,8 @@ export interface AgentCheckpointWorkspaceReference {
   forkRoot: string;
   /** Latest checkpoint at the cutoff, including completed and failed agents. */
   current: boolean;
+  /** Owner abandoned this exact checkpoint; history and baseline remain retained. */
+  released?: true;
   /** Absent when the transaction baseline was not recorded before this checkpoint. */
   baseline?: { beginSeq: number; snapshotId: string; root: string };
 }
@@ -41,7 +43,16 @@ export function listAgentCheckpointWorkspaceReferences(
   }
   return references.filter(ref => (options.runId === undefined || ref.runId === options.runId)
     && (options.txId === undefined || ref.txId === options.txId))
-    .map(ref => ({ ...ref, current: latest.get(ref.agentId) === ref.checkpointSeq }));
+    .map(ref => {
+      const released = events.some(event => event.type === 'WORLD_CANDIDATE_ABANDONED'
+        && event.payload.id === ref.txId && ref.agentId === ref.txId && ref.runId === ref.txId
+        && Array.isArray(event.payload.checkpointSeqs) && event.payload.checkpointSeqs.includes(ref.checkpointSeq)
+        && events.some(start => start.seq < event.seq && start.type === 'WORLD_STEP_STARTED'
+          && start.payload.id === ref.txId && start.runId === ref.runId
+          && start.payload.worldId === event.payload.worldId));
+      return { ...ref, current: latest.get(ref.agentId) === ref.checkpointSeq,
+        ...(released ? { released: true as const } : {}) };
+    });
 }
 
 export type AgentCausalResourceRetentionReason =
@@ -90,8 +101,8 @@ export function planAgentCausalResourceCleanup(
     const refs = references.filter(ref => ref.txId === txId
       || (baseSnapshotId !== undefined && ref.baseline?.snapshotId === baseSnapshotId));
     const reasons: AgentCausalResourceRetentionReason[] = [];
-    if (refs.some(ref => ref.txId === txId && ref.current)) reasons.push('current_checkpoint');
-    if (refs.some(ref => ref.txId === txId && !ref.current)) reasons.push('historical_checkpoint');
+    if (refs.some(ref => ref.txId === txId && ref.current && !ref.released)) reasons.push('current_checkpoint');
+    if (refs.some(ref => ref.txId === txId && (!ref.current || ref.released))) reasons.push('historical_checkpoint');
     if (refs.some(ref => ref.txId !== txId)) reasons.push('referenced_baseline');
     const state = latest ? transitions[latest.type as keyof typeof transitions] : 'reserved';
     if (state === 'committing') reasons.push('commit_in_progress');
@@ -129,7 +140,16 @@ export function planAgentCausalResourceCleanup(
       && e.type === (event.type === 'WORLD_STEP_STARTED' ? 'WORLD_STEP_FAILED' : 'WORLD_REPAIR_FAILED'));
     // Completed preparation is still a live publication source. Closing the
     // handle must explicitly terminate it before fork reclamation is possible.
-    if (!failed && ['reserved', 'open', 'committing'].includes(resource.state)) {
+    const abandoned = events.some(e => e.seq > event.seq && e.type === 'WORLD_CANDIDATE_ABANDONED'
+      && e.payload.worldId === event.payload.worldId && e.payload.id === txId);
+    const unresolved = events.some(binding => {
+      if (binding.type !== 'WORLD_PUBLICATION_KEY_BOUND' || binding.payload.candidateId !== txId
+          || binding.payload.worldId !== event.payload.worldId) return false;
+      const result = events.filter(e => e.type === 'WORLD_PUBLICATION_KEY_RESULT'
+        && e.payload.worldId === event.payload.worldId && e.payload.key === binding.payload.key).at(-1);
+      return !result || (result.payload.result as { status?: string })?.status === 'undetermined';
+    });
+    if (unresolved || (!failed && !abandoned && ['reserved', 'open', 'committing'].includes(resource.state))) {
       resource.reasons.push('pending_publication');
     }
   }

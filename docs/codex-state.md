@@ -1,8 +1,8 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
-- 下一步最小切片：句柄排空后持久中止未发布候选，按归属释放其current checkpoint对fork的占用；保留历史基线及未决提交。
+- 下一步最小切片：收口句柄与冻结类型，补齐失败准备的explain查询；随后六场景完整验收。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约冻结，M3/M4待推进。
-- M2完成标准仍缺：未发布候选abandon、句柄与冻结类型/失败explain收口；六类场景各10次、独立oracle、全部不变式及重开验收。
+- M2完成标准仍缺：句柄与冻结类型/失败explain收口；六类场景各10次、独立oracle、全部不变式及重开验收。
 - M1：docs/world-contract.md冻结六入口状态表、覆盖和六类失败/重试/资源归属；src/world/contract.ts共享非公开契约，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph持久节点、祖先/历史切片/失效闭包；explainRecomputation返回变化源及最短路径，explainCausalRecovery关联checkpoint。
@@ -56,5 +56,6 @@
 - readWorldClose按固定ref重开只读查询；清理失败逐项记录，报告落盘失败不宣称关闭；新会话可重试失败清理。
 - 本轮M2：内部openWorld组合runAgentStep/refresh/explain/strict commit/close；同步停止接收并等待全部已接收操作结束后清理，失败操作不阻断关闭。
 - close重复调用返回独立报告；落盘失败可重试close但不恢复接收；refresh传递agent，重开缺驱动仅新推理failed，查询/复用可用。
-- 未公开API；explain组合结构未符合冻结WorldHandle全部类型/失败查询；未发布候选仍保留；初始化中断仍拒绝重开，无自动恢复。
-- 验证：handle/resources共13项及typecheck通过；全量pnpm test通过：66文件、969测试，1文件/7测试跳过，273.18秒。
+- 未公开API；explain组合结构未符合冻结WorldHandle全部类型/失败查询；未发布候选已中止并按归属清理；初始化中断仍拒绝重开，无自动恢复。
+- 本轮M2：close持久abandon后释放精确自有checkpoint引用并清理fork；保留其他agent引用、历史基线和缺结果/未决key，重开提交拒绝abandoned。
+- 验证：handle/resources/commit共38项及typecheck通过；本轮剩余不足5分钟未跑全量，下一轮第一件事补跑。

@@ -59,7 +59,7 @@ it('drains accepted work, rejects all new operations, and deduplicates close', a
   expect(report.status).toBe('closed');
   expect(await duplicate).toEqual(report);
   expect(await world.close()).toEqual(report);
-  expect(report.resources.some(r => r.kind === 'fork' && r.status === 'retained')).toBe(true);
+  expect(report.resources.some(r => r.kind === 'fork' && r.status === 'reclaimed')).toBe(true);
   expect(await fs.readFile(path.join(options().root, 'input'), 'utf8')).toBe('original');
 });
 
@@ -117,4 +117,17 @@ it('carries the agent across refreshes and fails new inference honestly after re
     status: 'failed', reason: expect.stringContaining('not attached'),
   });
   expect(execute).toHaveBeenCalledTimes(3);
+});
+
+
+it('rejects publication of abandoned candidates after reopening', async () => {
+  const result = await world.runAgentStep(agent, { task: 'abandon' });
+  if (result.status !== 'prepared') throw new Error('preparation failed');
+  const explanation = await world.explain(result.candidate);
+  await world.close();
+  world = await openWorld(options());
+  expect(await world.explain(result.candidate)).toEqual(explanation);
+  expect(await world.commit(result.candidate, { validation: 'strict', key: 'late' }))
+    .toMatchObject({ status: 'rejected', reason: 'candidate_abandoned' });
+  expect(await fs.readFile(path.join(options().root, 'input'), 'utf8')).toBe('original');
 });

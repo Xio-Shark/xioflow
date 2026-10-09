@@ -7,7 +7,7 @@ import { refreshWorldCandidate } from './refresh.js';
 import { openWorldState } from './state.js';
 
 /** Internal integration handle, not yet the public frozen WorldHandle contract.
- * close drains accepted work; unpublished candidates remain retained for recovery.
+ * close drains accepted work before abandoning unpublished candidates.
  */
 export async function openWorld(options: { root: string; statePath: string; adapter: FileWorldAdapter }) {
   const world = await openWorldState(options);
