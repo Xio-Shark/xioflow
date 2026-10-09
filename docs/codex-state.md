@@ -1,9 +1,7 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；受监督执行是底座。 WorkspaceTransactions：文件读写集与观测重放 OCC；同基线隔离投机执行。
-- WorkspaceCausalGraph：持久因果节点、上游查询、历史切片、失效闭包。
-- prepareWorkspaceRepair：拓扑重算失效节点、复用独立结果、记录替代关系；view(heads) 与新 heads 支持连续修复。
-- speculateWorkspace：OCC 冲突后最多一次 repair 与再提交。
-- commitPolicy first_valid / all_valid；后者依声明顺序合并 OCC 有效结果。
+- WorkspaceCausalGraph：持久因果节点、上游查询、历史切片、失效闭包。 prepareWorkspaceRepair：拓扑重算失效节点、复用独立结果、记录替代关系；view(heads) 与新 heads 支持连续修复。
+- speculateWorkspace：OCC 冲突后最多一次 repair 与再提交。 commitPolicy first_valid / all_valid；后者依声明顺序合并 OCC 有效结果。
 - AgentRuntime create / step 原子持久化 causalHeads 与 checkpoint。 heads 引用同 domain 已有节点；null 未跟踪，[] 空分支；checkpoint 历史可查，恢复不回退预算。
 - planCausalRecovery 查询跨 agent 失效；recoverCausalCheckpoint 校验版本、独占绑定宿主重建。 成功后 causal_repaired 原子保存上下文 / heads / workspace 并 paused。
 - recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。
@@ -56,5 +54,7 @@
 - resumeAgentSharedCausalRefresh：新prepared持久完整repair，只续跑pending；开放共享事务+冻结checkpoint核对，复用共享计算、独立bind。 repaired/failed/skipped不重试，完成批次幂等返回；同domain同准备重叠拒绝。旧记录缺repair拒绝，宿主须核对中断副作用与保留/校验输出；文件仍需OCC。
 - 共享refresh/resume的bind第三参数attempt：attemptSeq/preparationSeq与reserveTransaction(txId)，分配前持久登记；旧回调兼容，普通shared recovery无attempt。
 - listAgentCausalBindingAttempts：planSeq/runId/atSeq/重开查询尝试、登记、TX生命周期、forkRoot和当前agent引用。登记非锁；无引用不代表可删除，宿主核实后用既有abort回收。
-- 验证：基线737通过/7跳过；本轮pnpm typecheck通过、定向60通过、全量739通过/7跳过；diff检查通过。
-- 下一步：基于尝试归属扩展failed绑定的显式重试，明确历史checkpoint资源保留及部分分配回收协议。
+- retryAgentSharedCausalRefresh：按agentId+最新failureSeq显式重试一个failed；复用共享repair，其他项不动，旧失败序号/终态/重叠调用拒绝。
+- AGENT_CAUSAL_BINDING_RETRY_REQUESTED先落盘，failed→pending(retrySeq)→新结果；历史查询验证转换，重开可复现。中断沿用resume；再次失败需新序号，保留宿主资源核对与OCC责任。
+- 验证：基线739通过/7跳过；本轮typecheck通过、定向66通过；全量745通过/7跳过，diff检查通过。
+- 下一步：扩展历史checkpoint资源引用查询，形成部分分配与孤立事务的可审查回收计划；不自动删除共享或历史资源。

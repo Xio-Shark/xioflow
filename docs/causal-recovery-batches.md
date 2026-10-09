@@ -288,3 +288,35 @@ committing / committed / conflicted / aborted，以及已开始事务的 forkRoo
 的部分文件分配，open 且无当前引用也不证明可删除。查询不扫描文件或删除资源；宿主核实后
 可用既有 abortWorkspaceTransaction 回收开放事务，历史切片仍保留回收前证据。
 续跑为同一 agent 创建新的尝试身份，不覆盖此前登记，也不会自动重试 failed / skipped。
+
+### 显式重试失败绑定
+
+`retryAgentSharedCausalRefresh(runtime, planSeq, { agentId, failureSeq }, bind)` 只重试指定
+agent 的当前 `failed` 结果。`failureSeq` 必须来自最新历史查询；过期请求、pending、
+repaired、skipped 均拒绝。共享事务必须仍开放，沿用冻结 checkpoint 与停止状态检查。
+
+```ts
+import { listAgentCausalRefreshExecutions, retryAgentSharedCausalRefresh } from '@xioflow/kernel';
+
+const execution = listAgentCausalRefreshExecutions(domain).find(entry => entry.seq === planSeq)!;
+const failed = execution.publications.find(entry => entry.agentId === agentId);
+if (failed?.status === 'failed') {
+  await retryAgentSharedCausalRefresh(runtime, planSeq,
+    { agentId, failureSeq: failed.seq }, async (impact, repair, attempt) => {
+      // 先核对此前 attempts 的分配和副作用；保留共享输出及历史 checkpoint 资源。
+      const txId = `retry-${attempt!.attemptSeq}`;
+      attempt!.reserveTransaction(txId);
+      const workspace = await supervisor.beginWorkspaceTransaction({
+        txId, runId, root, forkPath: `${bindingRoot}/${txId}`,
+      });
+      return reconstructContextAndOutputs(impact, repair, workspace);
+    });
+}
+```
+
+入口先持久记录 `AGENT_CAUSAL_BINDING_RETRY_REQUESTED`，关联原 `failureSeq`、共享准备和
+冻结 checkpoint，再运行新绑定。历史状态从 failed 变为 pending（附 `retrySeq`），
+随后记录新结果；旧失败仍能按 `atSeq` 查询。意图落盘失败不调用 bind；意图已保存而绑定
+中断时，使用已有 resume 续跑 pending。再次失败必须使用新的失败序号显式重试。
+同一准备记录的重叠调用仍拒绝，不重算共享节点、不改变其他项，也不消耗 agent step 预算。
+宿主仍负责核对和回收独立资源、校验保留输出，文件发布继续经过 OCC。

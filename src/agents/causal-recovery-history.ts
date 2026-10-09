@@ -78,7 +78,7 @@ export function listAgentCausalRefreshPlans(
 }
 
 export type AgentCausalRefreshPublication = { agentId: string; checkpointSeq: number } & (
-  | { status: 'pending' }
+  | { status: 'pending'; retrySeq?: number }
   | { status: 'repaired'; seq: number; workspace: AgentState['workspace'] }
   | { status: 'skipped'; seq: number; reason: string }
   | { status: 'failed'; seq: number; error: string }
@@ -177,31 +177,44 @@ export function listAgentCausalRefreshExecutions(
         (event.type === 'AGENT_STATE' && event.payload.transition === 'causal_repaired'
           && event.payload.refreshPreparationSeq === prepared.seq
           && (event.payload.state as AgentState).id === agentId)
-        || (event.type === 'AGENT_CAUSAL_REFRESH_OUTCOME' && event.payload.preparationSeq === prepared.seq
-          && event.payload.agentId === agentId));
-      if (outcomes.length > 1) throw new Error('Duplicate causal refresh publication');
-      const outcome = outcomes[0];
-      if (!outcome) return { ...identity, status: 'pending' };
-      if (outcome.seq <= prepared.seq) throw new Error('Invalid causal refresh publication order');
-      if (outcome.type === 'AGENT_STATE') {
-        if (outcome.payload.version !== 2 || outcome.payload.checkpointRef !== checkpoint.seq) {
-          throw new Error('Invalid causal refresh publication reference');
+        || (['AGENT_CAUSAL_REFRESH_OUTCOME', 'AGENT_CAUSAL_BINDING_RETRY_REQUESTED'].includes(event.type)
+          && event.payload.preparationSeq === prepared.seq && event.payload.agentId === agentId));
+      let publication: AgentCausalRefreshPublication = { ...identity, status: 'pending' };
+      for (const outcome of outcomes) {
+        if (outcome.type === 'AGENT_CAUSAL_BINDING_RETRY_REQUESTED') {
+          if (outcome.payload.version !== 1 || outcome.payload.checkpointSeq !== checkpoint.seq
+            || publication.status !== 'failed' || outcome.payload.failureSeq !== publication.seq
+            || outcome.seq <= publication.seq) throw new Error('Invalid causal binding retry reference');
+          publication = { ...identity, status: 'pending', retrySeq: outcome.seq };
+          continue;
         }
-        // Validate that the published checkpoint data remains resolvable.
-        readAgentCheckpoint(outcome.seq, agentId, seq => domain.getStore().getJournalEvent(domain.domainId, seq));
-        return { ...identity, status: 'repaired', seq: outcome.seq,
-          workspace: structuredClone((outcome.payload.state as AgentState).workspace) };
+        if (publication.status !== 'pending') throw new Error('Duplicate causal refresh publication');
+
+        if (outcome.seq <= prepared.seq) throw new Error('Invalid causal refresh publication order');
+        if (outcome.type === 'AGENT_STATE') {
+          if (outcome.payload.version !== 2 || outcome.payload.checkpointRef !== checkpoint.seq) {
+            throw new Error('Invalid causal refresh publication reference');
+          }
+          // Validate that the published checkpoint data remains resolvable.
+          readAgentCheckpoint(outcome.seq, agentId, seq => domain.getStore().getJournalEvent(domain.domainId, seq));
+          publication = { ...identity, status: 'repaired', seq: outcome.seq,
+            workspace: structuredClone((outcome.payload.state as AgentState).workspace) };
+          continue;
+        }
+        if (outcome.payload.version !== 1 || outcome.payload.checkpointSeq !== checkpoint.seq) {
+          throw new Error('Invalid causal refresh outcome reference');
+        }
+        if (outcome.payload.status === 'failed' && typeof outcome.payload.error === 'string') {
+          publication = { ...identity, status: 'failed', seq: outcome.seq, error: outcome.payload.error };
+          continue;
+        }
+        if (outcome.payload.status === 'skipped' && typeof outcome.payload.reason === 'string') {
+          publication = { ...identity, status: 'skipped', seq: outcome.seq, reason: outcome.payload.reason };
+          continue;
+        }
+        throw new Error('Invalid causal refresh outcome');
       }
-      if (outcome.payload.version !== 1 || outcome.payload.checkpointSeq !== checkpoint.seq) {
-        throw new Error('Invalid causal refresh outcome reference');
-      }
-      if (outcome.payload.status === 'failed' && typeof outcome.payload.error === 'string') {
-        return { ...identity, status: 'failed', seq: outcome.seq, error: outcome.payload.error };
-      }
-      if (outcome.payload.status === 'skipped' && typeof outcome.payload.reason === 'string') {
-        return { ...identity, status: 'skipped', seq: outcome.seq, reason: outcome.payload.reason };
-      }
-      throw new Error('Invalid causal refresh outcome');
+      return publication;
     });
     return { ...plan, ...(prepared ? { repair: { seq: prepared.seq, txId: prepared.payload.txId as string } } : {}),
       publications };

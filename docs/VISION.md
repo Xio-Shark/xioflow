@@ -8,6 +8,8 @@ xioflow 的目标是让多个 agent 在同一个不断变化的世界中投机�
 
 共享刷新绑定现有持久尝试身份与分配前事务登记；`listAgentCausalBindingAttempts` 可跨重开核对各次尝试的事务状态和当前 checkpoint 引用，为中断后资源处理提供证据。登记不是文件分配完成或可删除的证明，见[资源核对](causal-recovery-batches.md#绑定尝试与中断资源核对)。
 
+`retryAgentSharedCausalRefresh` 支持按最新失败序号显式重试单个绑定，复用共享因果计算；重试意图、原失败与新发布按时间切片可查，中断后沿用 resume。其他 agent 保持原结果，资源副作用仍由宿主核对，见[重试示例](causal-recovery-batches.md#显式重试失败绑定)。
+
 ## 核心抽象
 
 - **世界版本**：已有 snapshot / fork / rollback 定义文件系统的版本与分支；外部系统需要显式的版本化适配器。

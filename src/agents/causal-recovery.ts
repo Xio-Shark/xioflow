@@ -1,4 +1,4 @@
-import { listAgentCausalRefreshExecutions } from './causal-recovery-history.js';
+import { listAgentCausalRefreshExecutions, type AgentCausalRefreshExecutionRecord } from './causal-recovery-history.js';
 import type { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { validateWorkspaceCausalBranches, type CausalValidationOptions, type CausalValidationResult } from '../workspace/causal-validation.js';
 import type { WorkspaceBranchRepairResult } from '../workspace/causal-repair.js';
@@ -206,6 +206,43 @@ export async function resumeAgentSharedCausalRefresh(
   const pending = new Set(execution.publications.filter(entry => entry.status === 'pending').map(entry => entry.agentId));
   const plan = { ...execution.preview, affected: execution.preview.affected.filter(entry => pending.has(entry.agentId)) };
   if (!pending.size) return { plan, outcomes: [] };
+  const repair = readOpenSharedRepair(agents, execution);
+  return bindSharedRepair(agents, plan, bind, repair, execution.repair!.seq, execution.runId);
+}
+
+/** Explicitly retry one durable failure. The expected failure sequence prevents
+ * stale callers from authorizing another attempt. Reconcile prior allocations in
+ * bind; this reuses shared computation and does not commit or clean up files.
+ */
+export async function retryAgentSharedCausalRefresh(
+  agents: AgentRuntime, planSeq: number,
+  failure: { agentId: string; failureSeq: number },
+  bind: AgentSharedCausalRecoveryOptions['bind'],
+): Promise<AgentSharedCausalRecoveryBatch> {
+  const domain = agents.getDomain();
+  const execution = listAgentCausalRefreshExecutions(domain).find(entry => entry.seq === planSeq);
+  if (!execution) throw new Error('Unknown causal refresh plan');
+  if (execution.repair && activePreparations.get(domain)?.has(execution.repair.seq)) {
+    throw new Error('Causal refresh binding already active');
+  }
+  const publication = execution.publications.find(entry => entry.agentId === failure.agentId);
+  if (publication?.status !== 'failed' || publication.seq !== failure.failureSeq) {
+    throw new Error('Causal refresh failure changed; select the current failed outcome');
+  }
+  const repair = readOpenSharedRepair(agents, execution);
+  // No await between checking the failure and persisting its retry authorization.
+  domain.getStore().recordJournalEvent({ domainId: domain.domainId, runId: execution.runId,
+    type: 'AGENT_CAUSAL_BINDING_RETRY_REQUESTED', timestamp: new Date().toISOString(),
+    payload: { version: 1, preparationSeq: execution.repair!.seq, agentId: failure.agentId,
+      checkpointSeq: publication.checkpointSeq, failureSeq: failure.failureSeq },
+  });
+  const plan = { ...execution.preview,
+    affected: execution.preview.affected.filter(entry => entry.agentId === failure.agentId) };
+  return bindSharedRepair(agents, plan, bind, repair, execution.repair!.seq, execution.runId);
+}
+
+function readOpenSharedRepair(agents: AgentRuntime, execution: AgentCausalRefreshExecutionRecord): WorkspaceBranchRepairResult {
+  const domain = agents.getDomain();
   const prepared = execution.repair && domain.getStore().getJournalEvent(domain.domainId, execution.repair.seq);
   const repair = prepared?.payload.repair as WorkspaceBranchRepairResult | undefined;
   if (!repair || repair.transaction.txId !== execution.repair?.txId) {
@@ -219,7 +256,7 @@ export async function resumeAgentSharedCausalRefresh(
     || events.some(event => ['TX_COMMITTING', 'TX_COMMITTED', 'TX_ABORTED', 'TX_CONFLICTED'].includes(event.type))) {
     throw new Error('Shared repair must remain an open transaction');
   }
-  return bindSharedRepair(agents, plan, bind, structuredClone(repair), execution.repair!.seq, execution.runId);
+  return structuredClone(repair);
 }
 
 export interface AgentSharedCausalRefreshOptions extends AgentSharedCausalRecoveryOptions {

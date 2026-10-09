@@ -3,8 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
-import type { AgentRuntimeOptions, AgentWorkspace } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, retryAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
+import type { AgentRuntimeOptions, AgentWorkspace, AgentSharedCausalRecoveryOptions } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
   let temp: string;
@@ -46,7 +46,116 @@ describe('agent checkpoint causal branches', () => {
     open();
     const bind = vi.fn(async () => undefined);
     await expect(resumeAgentSharedCausalRefresh(runtime, 999999, bind)).rejects.toThrow('Unknown causal refresh plan');
+    await expect(retryAgentSharedCausalRefresh(runtime, 999999, { agentId: 'a', failureSeq: 1 }, bind))
+      .rejects.toThrow('Unknown causal refresh plan');
     expect(bind).not.toHaveBeenCalled();
+  });
+
+  it.each(['success', 'failed_again', 'interrupted', 'closed', 'advanced', 'intent_failed'] as const)(
+    'explicitly retries only the selected durable failure: %s', async (mode) => {
+    const source = node();
+    open();
+    for (const id of ['first', 'second']) {
+      runtime.create({ id, runId: 'run', input: null, checkpoint: 'old', causalHeads: [source.seq], maxSteps: 2 });
+      runtime.pause(id);
+    }
+    const supervisor = new ProcessSupervisor(domain);
+    const execute = vi.fn(async (entry: import('../../src/index.js').CausalNode) => ({
+      actorId: entry.actorId, observation: { ...entry.observation, resultHash: 'new' },
+    }));
+    const result = await refreshAgentSharedCausalBatch(runtime, supervisor, {
+      agentIds: ['first', 'second'],
+      validation: { txId: 'probe', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'probe'),
+        closedWorld: true, replayPolicy: 'deterministic', replay: async () => 'new' },
+      prepare: plan => prepareWorkspaceBranchRepair(supervisor, {
+        txId: 'shared', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'shared'),
+        atSeq: Math.max(...plan.affected.map(entry => entry.checkpoint.seq)), changed: plan.changed,
+        branches: plan.affected.map(entry => ({ id: entry.agentId, heads: entry.checkpoint.causalHeads! })),
+        validateReuse: async () => {}, execute,
+      }),
+      bind: async () => { throw new Error('initial failure'); },
+    });
+    if (result.status !== 'recovered') throw new Error(result.status);
+    const initial = listAgentCausalRefreshExecutions(domain)[0];
+    const failed = initial.publications[1];
+    if (failed.status !== 'failed') throw new Error('expected failure');
+    const failure = { agentId: 'second', failureSeq: failed.seq };
+    const usage = runtime.getRunUsage('run');
+    runtime.close(); domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    open();
+    const bind = vi.fn<AgentSharedCausalRecoveryOptions['bind']>(async (_impact, _repair, attempt) => {
+      await expect(retryAgentSharedCausalRefresh(runtime, result.planSeq, failure, bind)).rejects.toThrow('already active');
+      if (mode === 'failed_again' || mode === 'interrupted') throw new Error('retry failure');
+      const txId = `retry-${attempt!.attemptSeq}`;
+      attempt!.reserveTransaction(txId);
+      return { checkpoint: 'retried', workspace: await new ProcessSupervisor(domain).beginWorkspaceTransaction({
+        txId, runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, txId),
+      }) };
+    });
+    await expect(retryAgentSharedCausalRefresh(runtime, result.planSeq, { ...failure, failureSeq: failed.seq - 1 }, bind))
+      .rejects.toThrow('failure changed');
+    if (mode === 'closed') await new ProcessSupervisor(domain).abortWorkspaceTransaction('shared', 'test');
+    if (mode === 'advanced') runtime.restoreCheckpoint('second', failed.checkpointSeq);
+    if (mode === 'interrupted' || mode === 'intent_failed') {
+      const store = domain.getStore();
+      const record = store.recordJournalEvent.bind(store);
+      vi.spyOn(store, 'recordJournalEvent').mockImplementation(event => {
+        if (event.type === (mode === 'interrupted' ? 'AGENT_CAUSAL_REFRESH_OUTCOME' : 'AGENT_CAUSAL_BINDING_RETRY_REQUESTED')) {
+          throw new Error('disk unavailable');
+        }
+        return record(event);
+      });
+    }
+    if (mode === 'closed' || mode === 'intent_failed') {
+      await expect(retryAgentSharedCausalRefresh(runtime, result.planSeq, failure, bind))
+        .rejects.toThrow(mode === 'closed' ? 'open transaction' : 'disk unavailable');
+      expect(bind).not.toHaveBeenCalled();
+      expect(listAgentCausalRefreshExecutions(domain)[0].publications).toEqual(initial.publications);
+      return;
+    }
+    if (mode === 'interrupted') {
+      await expect(retryAgentSharedCausalRefresh(runtime, result.planSeq, failure, bind)).rejects.toThrow('disk unavailable');
+      vi.restoreAllMocks();
+      runtime.close(); domain.close();
+      domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+      open();
+      expect(listAgentCausalRefreshExecutions(domain)[0].publications[1]).toMatchObject({ status: 'pending' });
+      const resumed = await resumeAgentSharedCausalRefresh(runtime, result.planSeq, async () => undefined);
+      expect(resumed.outcomes).toMatchObject([{ agentId: 'second', status: 'skipped' }]);
+    } else {
+      const retried = await retryAgentSharedCausalRefresh(runtime, result.planSeq, failure, bind);
+      expect(retried.outcomes).toMatchObject([{ agentId: 'second',
+        status: mode === 'advanced' ? 'skipped' : mode === 'failed_again' ? 'failed' : 'repaired' }]);
+      if (mode === 'failed_again') {
+        const latest = listAgentCausalRefreshExecutions(domain)[0].publications[1];
+        if (latest.status !== 'failed') throw new Error('expected second failure');
+        await retryAgentSharedCausalRefresh(runtime, result.planSeq,
+          { agentId: 'second', failureSeq: latest.seq }, async () => undefined);
+      }
+    }
+    await expect(retryAgentSharedCausalRefresh(runtime, result.planSeq, failure, bind)).rejects.toThrow('failure changed');
+    const events = domain.getStore().getJournalEvents(domain.domainId);
+    const intent = events.find(event => event.type === 'AGENT_CAUSAL_BINDING_RETRY_REQUESTED')!;
+    expect(listAgentCausalRefreshExecutions(domain, { atSeq: intent.seq - 1 })[0].publications).toEqual(initial.publications);
+    expect(listAgentCausalRefreshExecutions(domain, { atSeq: intent.seq })[0].publications[1])
+      .toMatchObject({ status: 'pending', retrySeq: intent.seq });
+    expect(listAgentCausalRefreshExecutions(domain)[0].publications[0]).toEqual(initial.publications[0]);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(runtime.getRunUsage('run')).toEqual(usage);
+    const savedExecutions = listAgentCausalRefreshExecutions(domain);
+    const savedAttempts = listAgentCausalBindingAttempts(domain, { planSeq: result.planSeq });
+    expect(savedAttempts).toHaveLength(mode === 'advanced' ? 2 : mode === 'failed_again' || mode === 'interrupted' ? 4 : 3);
+    runtime.close(); domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    open();
+    expect(listAgentCausalRefreshExecutions(domain)).toEqual(savedExecutions);
+    expect(listAgentCausalBindingAttempts(domain, { planSeq: result.planSeq })).toEqual(savedAttempts);
+    if (mode === 'success') {
+      domain.getStore().recordJournalEvent({ domainId: domain.domainId, runId: 'run',
+        type: intent.type, timestamp: new Date().toISOString(), payload: intent.payload });
+      expect(() => listAgentCausalRefreshExecutions(domain)).toThrow('Invalid causal binding retry reference');
+    }
   });
 
   it.each(['resume', 'advanced', 'closed', 'legacy', 'allocated', 'reservation_failed'] as const)('resumes pending publication after reopen: %s', async (mode) => {
