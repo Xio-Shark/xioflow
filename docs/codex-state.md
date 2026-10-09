@@ -7,8 +7,7 @@
 - speculateWorkspace：OCC 冲突后最多一次 repair 与再提交。
 - commitPolicy first_valid / all_valid；后者依声明顺序合并 OCC 有效结果。
 - AgentRuntime create / step 原子持久化 causalHeads 与 checkpoint。
-- heads 引用同 domain 已有节点；null 未跟踪，[] 显式空分支。
-- checkpoints / checkpointCausalView 查询历史；restore / recover 不回退预算。
+- heads 引用同 domain 已有节点；null 未跟踪，[] 空分支；checkpoint 历史可查，恢复不回退预算。
 - planCausalRecovery 查询跨 agent 失效；recoverCausalCheckpoint 校验版本、独占绑定宿主重建。
 - causal_repaired 原子保存上下文 / heads / workspace；成功后 paused。
 - recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。
@@ -31,7 +30,6 @@
 - prepareWorkspaceCausalRefresh：自动探测→共享修复准备；failed / unchanged 不分配修复。
 - 任一探测失败阻断整批修复；prepared 返回开放事务，由宿主 OCC / 绑定 / 回收。
 - CAUSAL_VALIDATION_REPAIR_PREPARED 关联 validationSeq / txId；关联失败回收修复。
-- 修复使用新基线；validateReuse 必需；崩溃可能留下尚未关联的准备记录。
 - commitWorkspaceTransaction 支持 observationPolicy: 'always'，无文件冲突也重放。
 - refreshWorkspaceCausalBranches：探测→共享修复→联合 heads 完整日志→强制重放提交。
 - 包含复用祖先；成功回收基线，冲突中止回收；提交抛错保留恢复资源并报告 txId。
@@ -46,15 +44,17 @@
 - full 只重算选中联合祖先，共享节点一次；validateReuse 收到 []，保留强制 OCC。
 - 先探测再决策；估算不包含已发生探测和相同固定开销，不声称实测或 token 收益。
 - recomputeWorkspaceCausalBranches：显式跳过探测，完整重算所选联合祖先并强制 OCC 提交。
-- 共用刷新发布路径；共享节点一次、无复用；返回 preparationSeq / repair / commit，无 validation。
 - CAUSAL_RECOMPUTATION_PREPARED 记录来源与 full 策略；关联失败回收、未知提交保留资源。
-- benchmark:refresh 六模式 schemaVersion=3；完整阶段成本及因果/验证/重算 journal 计数。
-- 四种共享输入场景各三轮：受验证模式60/60正确，原始样本 causal-recompute.sample.json。
-- 直接重算与手工重跑同为18次调用；局部变化自适应26→18，无变化9→18；无token数据。
+- benchmark:refresh 七模式 schemaVersion=4；完整阶段成本及因果/验证/重算/策略 journal 计数。
+- 历史六模式样本 causal-recompute.sample.json；直接重算与手工重跑工具数相同。
 - refreshWorkspaceCausalBranchesWithPolicy：探测前按宿主概率和条件成本选择 probe / recompute。
 - planWorkspaceCausalRefreshPolicy 纯查询；联合节点去重、持平探测、拒绝非法估算与溢出。
 - CAUSAL_REFRESH_POLICY_SELECTED 先记意图，关联源 branches / atSeq / probeTxPrefix / repairTxId。
 - 预测不授权复用；直接重算沿用 repair 身份、无 validateReuse；两条发布路径均强制 OCC。
 - 概率不自动学习；forecast 与 costModel 同单位，条件刷新成本含复用和完整提交重放。
-- 下一步：六模式基准加入探测前策略、独立预测与失准场景，报告实际总成本和正确性。
-- 最新验证：补齐gcc/libc；typecheck/build通过；pnpm test 670通过/7跳过（127.48秒）。
+- 策略基准先固定 forecast，再注入变化；CLI --forecast=JSON，默认先验独立于实际扰动。
+- policyDecision / policyCostPrediction 报告探测前总成本；原 decision / costPrediction 仍为探测后成本。
+- 四组先验命中/失准各三轮：72/72受验证结果正确，causal-refresh-policy.sample.json。
+- 局部变化选重算26→18次；无变化误判重算9→18次；成本预测准确不代表策略最优。
+- 下一步：持久化真实刷新阶段遥测，为跨运行成本估计提供证据；不从本轮真值反推先验。
+- 最新验证：typecheck/build通过；针对性30项；pnpm test 677通过/7跳过（140.76秒）。

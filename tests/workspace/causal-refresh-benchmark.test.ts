@@ -6,9 +6,9 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 describe('causal refresh benchmark', () => {
   it('measures actual probe, repair, reuse and mandatory publication replay against equal guarantees', async () => {
     const report = await runCausalRefreshBenchmark({ trials: 2, branches: 3, hashRounds: 2 });
-    expect(report.schemaVersion).toBe(3);
+    expect(report.schemaVersion).toBe(4);
     expect(report.modelTokens).toBeNull();
-    expect(report.samples).toHaveLength(12);
+    expect(report.samples).toHaveLength(14);
     for (let trial = 0; trial < 2; trial++) {
       const samples = report.samples.filter((sample) => sample.trial === trial);
       const full = samples.find((sample) => sample.mode === 'full-rerun')!;
@@ -37,8 +37,8 @@ describe('causal refresh benchmark', () => {
         commitValidation: null, transactionsStarted: 0, snapshotsCaptured: 0 });
       expect(refresh.elapsedMs).toBeGreaterThan(0);
     }
-    expect(report.summary.map((row) => row.successRate)).toEqual([1, 1, 1, 1, 1, 0]);
-    expect(report.summary.map((row) => row.meanTotalToolCalls)).toEqual([12, 12, 17, 17, 17, 0]);
+    expect(report.summary.map((row) => row.successRate)).toEqual([1, 1, 1, 1, 1, 1, 0]);
+    expect(report.summary.map((row) => row.meanTotalToolCalls)).toEqual([12, 12, 17, 17, 17, 17, 0]);
   }, 30_000);
 
   it.each([0, 2])('covers %i changed inputs including unchanged fast path and full invalidation', async (changedBranches) => {
@@ -128,6 +128,42 @@ describe('causal refresh benchmark', () => {
       executionToolCalls: 0, reuseToolCalls: 0, commitReplayToolCalls: 0, probeToolCalls: 5,
     });
   }, 30_000);
+
+
+  it.each([
+    { probability: 0, changedBranches: 0, strategy: 'probe', total: 7, error: 0 },
+    { probability: 0, changedBranches: 1, strategy: 'probe', total: 20, error: 13 },
+    { probability: 1, changedBranches: 0, strategy: 'recompute', total: 14, error: 0 },
+    { probability: 1, changedBranches: 1, strategy: 'recompute', total: 14, error: 0 },
+  ])('measures independent forecasts, including wrong predictions: %j', async (scenario) => {
+    const forecast = { changeProbability: scenario.probability, probeUnchanged: 7, probeChanged: 4, refreshChanged: 14 };
+    const report = await runCausalRefreshBenchmark({ trials: 1, branches: 3, hashRounds: 1,
+      sharedInput: true, changedBranches: scenario.changedBranches, forecast });
+    expect(report.config.forecast).toEqual(forecast);
+    const sample = report.samples.find(sample => sample.mode === 'causal-refresh-policy')!;
+    const full = report.samples.find(sample => sample.mode === 'full-rerun')!;
+    expect(sample).toMatchObject({ success: true, totalToolCalls: scenario.total, policiesSelected: 1,
+      policyDecision: { strategy: scenario.strategy, forecast },
+      policyCostPrediction: { actualTotalToolCalls: scenario.total, errorToolCalls: scenario.error } });
+    expect(sample.outputHashes).toEqual(full.outputHashes);
+    expect(sample.totalToolCalls).toBe(sample.executionToolCalls + sample.probeToolCalls + sample.reuseToolCalls + sample.commitReplayToolCalls);
+    if (scenario.strategy === 'recompute') {
+      expect(sample).toMatchObject({ probeToolCalls: 0, reuseToolCalls: 0, executionToolCalls: 7,
+        commitReplayToolCalls: 7, validationsCompleted: 0, recomputationsPrepared: 1, commitValidation: 'observations' });
+    } else {
+      expect(sample.validationsCompleted).toBe(1);
+      expect(sample.commitValidation).toBe(scenario.changedBranches ? 'observations' : null);
+    }
+    expect(report.summary.find(row => row.mode === 'causal-refresh-policy')).toMatchObject({
+      meanAbsoluteTotalCostErrorToolCalls: Math.abs(scenario.error),
+      policySelections: { probe: scenario.strategy === 'probe' ? 1 : 0, recompute: scenario.strategy === 'recompute' ? 1 : 0 },
+    });
+  }, 30_000);
+
+  it.each([-1, 2, NaN])('rejects invalid policy probability %s', async (changeProbability) => {
+    await expect(runCausalRefreshBenchmark({ forecast: { changeProbability,
+      probeUnchanged: 7, probeChanged: 4, refreshChanged: 14 } })).rejects.toThrow('Invalid causal refresh forecast');
+  });
 
   it.each([{ trials: 0 }, { branches: 1.5 }, { hashRounds: NaN }, { changedBranches: -1 },
     { branches: 2, changedBranches: 3 }, { changedBranches: Infinity }, { changeSharedInput: true },

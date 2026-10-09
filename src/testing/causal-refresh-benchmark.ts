@@ -9,6 +9,9 @@ import { ExecutionDomain } from '../domain.js';
 import { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { WorkspaceCausalGraph } from '../workspace/causal-graph.js';
 import { recomputeWorkspaceCausalBranches, refreshWorkspaceCausalBranches } from '../workspace/causal-refresh.js';
+import { planWorkspaceCausalRefreshPolicy, refreshWorkspaceCausalBranchesWithPolicy,
+  type CausalRefreshForecast, type CausalRefreshPolicyDecision } from '../workspace/causal-refresh-policy.js';
+import type { WorkspaceCausalRefreshOptions } from '../workspace/causal-refresh.js';
 import type { CausalRefreshDecision } from '../workspace/causal-refresh-cost.js';
 import type { ObservationEntry, CommitValidation } from '../workspace/transactions.js';
 import type { CausalBenchmarkOptions } from './causal-repair-benchmark.js';
@@ -16,6 +19,8 @@ import type { CausalBenchmarkOptions } from './causal-repair-benchmark.js';
 export interface CausalRefreshBenchmarkOptions extends CausalBenchmarkOptions {
   /** Number of independent inputs changed per trial; zero measures the unchanged fast path. */
   changedBranches?: number;
+  /** Fixed before trials; never inferred from the injected changes or measured results. */
+  forecast?: CausalRefreshForecast;
   /** Actual complete validation passes over retained evidence (sensitivity workload). */
   reusePasses?: number;
   /** Estimated calls per retained node; defaults to reusePasses. */
@@ -26,7 +31,7 @@ export interface CausalRefreshBenchmarkOptions extends CausalBenchmarkOptions {
   changeSharedInput?: boolean;
 }
 const exec = promisify(execFile);
-const modes = ['full-rerun', 'causal-recompute', 'causal-refresh', 'causal-refresh-reuse', 'causal-refresh-adaptive', 'unchecked-reuse'] as const;
+const modes = ['full-rerun', 'causal-recompute', 'causal-refresh', 'causal-refresh-reuse', 'causal-refresh-adaptive', 'causal-refresh-policy', 'unchecked-reuse'] as const;
 type Mode = typeof modes[number];
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 function output(value: string, rounds: number): string {
@@ -36,9 +41,12 @@ function output(value: string, rounds: number): string {
 
 /** End-to-end validation cost, with identical mandatory replay for all publishing modes. */
 export async function runCausalRefreshBenchmark(options: CausalRefreshBenchmarkOptions = {}) {
+  const nodes = 2 * (options.branches ?? 4) + (options.sharedInput ? 1 : 0);
   const config = { trials: options.trials ?? 3, branches: options.branches ?? 4,
     hashRounds: options.hashRounds ?? 1000, changedBranches: options.changedBranches ?? 1,
     reusePasses: options.reusePasses ?? 1, estimatedReusePasses: options.estimatedReusePasses ?? options.reusePasses ?? 1,
+    forecast: { ...(options.forecast ?? { changeProbability: 0.5, probeUnchanged: nodes,
+      probeChanged: (options.branches ?? 4) + (options.sharedInput ? 1 : 0), refreshChanged: 2 * nodes }) },
     sharedInput: options.sharedInput ?? false, changeSharedInput: options.changeSharedInput ?? false };
   for (const key of ['trials', 'branches', 'hashRounds', 'reusePasses'] as const) {
     if (!Number.isSafeInteger(config[key]) || config[key] < 1) throw new Error(`${key} must be a positive safe integer`);
@@ -53,13 +61,15 @@ export async function runCausalRefreshBenchmark(options: CausalRefreshBenchmarkO
     || (config.changeSharedInput && !config.sharedInput)) {
     throw new Error('shared input flags must be booleans; changeSharedInput requires sharedInput');
   }
+  // Validate forecasts before allocating fixtures, using the production planner.
+  planWorkspaceCausalRefreshPolicy([], config.forecast, () => ({ execute: 1, reuse: 1, replay: 1 }));
   const samples: Awaited<ReturnType<typeof runSample>>[] = [];
   for (let trial = 0; trial < config.trials; trial++) {
     for (let offset = 0; offset < modes.length; offset++) {
       samples.push(await runSample(modes[(trial + offset) % modes.length], trial, config));
     }
   }
-  return { schemaVersion: 3, config, modelTokens: null,
+  return { schemaVersion: 4, config, modelTokens: null,
     environment: { node: process.version, platform: process.platform, arch: process.arch,
       git: (await exec('git', ['--version'])).stdout.trim() },
     samples, summary: modes.map((mode) => {
@@ -67,6 +77,7 @@ export async function runCausalRefreshBenchmark(options: CausalRefreshBenchmarkO
       const mean = (key: 'executionToolCalls' | 'probeToolCalls' | 'reuseToolCalls' | 'commitReplayToolCalls' | 'totalToolCalls' | 'reusedProbeSteps') =>
         selected.reduce((sum, sample) => sum + sample[key], 0) / selected.length;
       const predictions = selected.flatMap(sample => sample.costPrediction ? [sample.costPrediction] : []);
+      const policyPredictions = selected.flatMap(sample => sample.policyCostPrediction ? [sample.policyCostPrediction] : []);
       const times = selected.map((sample) => sample.elapsedMs).sort((a, b) => a - b);
       const middle = Math.floor(times.length / 2);
       return { mode, successRate: selected.filter((sample) => sample.success).length / selected.length,
@@ -75,6 +86,10 @@ export async function runCausalRefreshBenchmark(options: CausalRefreshBenchmarkO
         meanTotalToolCalls: mean('totalToolCalls'), meanReusedProbeSteps: mean('reusedProbeSteps'),
         strategySelections: { incremental: selected.filter(sample => sample.decision?.strategy === 'incremental').length,
           full: selected.filter(sample => sample.decision?.strategy === 'full').length },
+        policySelections: { probe: selected.filter(sample => sample.policyDecision?.strategy === 'probe').length,
+          recompute: selected.filter(sample => sample.policyDecision?.strategy === 'recompute').length },
+        meanAbsoluteTotalCostErrorToolCalls: policyPredictions.length
+          ? policyPredictions.reduce((sum, prediction) => sum + Math.abs(prediction.errorToolCalls), 0) / policyPredictions.length : null,
         meanAbsoluteCostErrorToolCalls: predictions.length
           ? predictions.reduce((sum, prediction) => sum + Math.abs(prediction.errorToolCalls), 0) / predictions.length : null,
         medianElapsedMs: times.length % 2 ? times[middle] : (times[middle - 1] + times[middle]) / 2 };
@@ -148,6 +163,7 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
     let reusedProbeSteps = 0;
     let commitValidation: CommitValidation | null = null;
     let decision: CausalRefreshDecision | null = null;
+    let policyDecision: CausalRefreshPolicyDecision | null = null;
     if (mode === 'full-rerun') {
       const tx = await supervisor.beginWorkspaceTransaction(txOptions('rerun'));
       const log: ObservationEntry[] = [];
@@ -170,13 +186,13 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
       });
       status = result.status;
       if (result.commit.status === 'committed') commitValidation = result.commit.validation;
-    } else if (mode === 'causal-refresh' || mode === 'causal-refresh-reuse' || mode === 'causal-refresh-adaptive') {
+    } else if (mode === 'causal-refresh' || mode === 'causal-refresh-reuse' || mode === 'causal-refresh-adaptive' || mode === 'causal-refresh-policy') {
       let repairing = false;
-      const result = await refreshWorkspaceCausalBranches(supervisor, {
+      const refreshOptions: WorkspaceCausalRefreshOptions = {
         ...txOptions('probe'), atSeq: view.nodes.at(-1)!.seq, branches,
         closedWorld: true, replayPolicy: 'deterministic',
         replayReuse: mode === 'causal-refresh' ? 'none' : 'baseline_observations',
-        ...(mode === 'causal-refresh-adaptive' ? { costModel: () => ({
+        ...(['causal-refresh-adaptive', 'causal-refresh-policy'].includes(mode) ? { costModel: () => ({
           execute: 1, reuse: config.estimatedReusePasses, replay: 1,
         }) } : {}),
         replay: (entry, dir) => perform(entry, dir, repairing ? 'commitReplayToolCalls' : 'probeToolCalls'),
@@ -191,14 +207,22 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
               }
             }
           },
-          execute: async (node, tx) => ({ actorId: node.actorId,
-            observation: { ...node.observation, resultHash: await perform(node.observation, tx.forkRoot, 'executionToolCalls') },
-            writes: node.writes?.map((write) => ({ ...write, status: 'M' as const })) }),
+          execute: async (node, tx) => {
+            repairing = true;
+            return { actorId: node.actorId,
+              observation: { ...node.observation, resultHash: await perform(node.observation, tx.forkRoot, 'executionToolCalls') },
+              writes: node.writes?.map((write) => ({ ...write, status: 'M' as const })) };
+          },
         },
-      });
+      };
+      const policyResult = mode === 'causal-refresh-policy'
+        ? await refreshWorkspaceCausalBranchesWithPolicy(supervisor, { ...refreshOptions,
+          costModel: refreshOptions.costModel!, forecast: config.forecast }) : null;
+      const result = policyResult ? policyResult.result : await refreshWorkspaceCausalBranches(supervisor, refreshOptions);
+      policyDecision = policyResult?.policy ?? null;
       decision = 'decision' in result ? result.decision ?? null : null;
       status = result.status;
-      reusedProbeSteps = result.validation.reusedSteps;
+      reusedProbeSteps = 'validation' in result ? result.validation.reusedSteps : 0;
       if (result.status === 'committed' && result.commit.status === 'committed') commitValidation = result.commit.validation;
     }
     const elapsedMs = performance.now() - start;
@@ -218,8 +242,16 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
       unit: 'toolCalls' as const, estimatedRemainingToolCalls, actualRemainingToolCalls,
       errorToolCalls: actualRemainingToolCalls - estimatedRemainingToolCalls,
     };
-    return { mode, trial, decision, costPrediction, changedBranches: changed, status, ...counters, reusedProbeSteps,
-      totalToolCalls: Object.values(counters).reduce((a, b) => a + b, 0), elapsedMs,
+    const totalToolCalls = Object.values(counters).reduce((a, b) => a + b, 0);
+    const estimatedTotalToolCalls = policyDecision
+      ? policyDecision.strategy === 'probe' ? policyDecision.expectedProbeCost : policyDecision.recomputeCost : null;
+    const policyCostPrediction = estimatedTotalToolCalls === null ? null : {
+      unit: 'toolCalls' as const, estimatedTotalToolCalls, actualTotalToolCalls: totalToolCalls,
+      errorToolCalls: totalToolCalls - estimatedTotalToolCalls,
+    };
+    return { mode, trial, decision, costPrediction, policyDecision, policyCostPrediction, changedBranches: changed, status, ...counters, reusedProbeSteps,
+      totalToolCalls, elapsedMs,
+      policiesSelected: events.filter((event) => event.type === 'CAUSAL_REFRESH_POLICY_SELECTED').length,
       causalStepsRecorded: events.filter((event) => event.type === 'CAUSAL_STEP').length,
       validationsCompleted: events.filter((event) => event.type === 'CAUSAL_VALIDATION_COMPLETED').length,
       recomputationsPrepared: events.filter((event) => event.type === 'CAUSAL_RECOMPUTATION_PREPARED').length,

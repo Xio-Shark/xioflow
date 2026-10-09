@@ -1,6 +1,6 @@
 # 自动因果刷新的验证成本基准
 
-运行 `pnpm benchmark:refresh [trials] [branches] [hashRounds] [changedBranches] [reusePasses] [estimatedReusePasses]`，默认 `3 4 1000 1 1 1`。JSON 包含环境版本、逐轮原始数据和均值 / 中位数。构建后可用 `node scripts/benchmarks/causal-refresh.mjs 3 4 1000 1 > report.json` 保存纯 JSON。六种模式各自创建全新 Git 工作区，轮换运行次序；初始化和最终正确性检查不计入耗时。
+运行 `pnpm benchmark:refresh [trials] [branches] [hashRounds] [changedBranches] [reusePasses] [estimatedReusePasses]`，默认 `3 4 1000 1 1 1`。JSON 包含环境版本、逐轮原始数据和均值 / 中位数。构建后可用 `node scripts/benchmarks/causal-refresh.mjs 3 4 1000 1 > report.json` 保存纯 JSON。七种模式各自创建全新 Git 工作区，轮换运行次序；初始化和最终正确性检查不计入耗时。
 
 默认每个独立分支有两个真实工具：读取输入、读取同一输入并经指定轮数 SHA-256 计算后写入输出。读取节点是写入节点的因果上游。每轮改变指定数量的输入，位置随 trial 轮换。工具在所在工作区重新读取文件，无跨分叉缓存或模拟延时。
 
@@ -11,6 +11,7 @@
 | `causal-refresh` | 调用 `refreshWorkspaceCausalBranches`，自动发现变化、重算、提交 | 同样完整重放，包括复用祖先 |
 | `causal-refresh-reuse` | 同上，启用 `replayReuse: 'baseline_observations'` | 同样完整重放，缓存只用于探测 |
 | `causal-refresh-adaptive` | 观测复用刷新加成本模型，选择增量或完整选中子图重算 | 同样完整重放，成本估算不能授权复用 |
+| `causal-refresh-policy` | 在探测前按独立预测选择探测后自适应刷新或直接因果重算 | 两条发布路径均完整重放，预测不授权复用 |
 | `unchecked-reuse` | 保留旧输出 | 不验证、不提交 |
 
 计数按实际回调调用分别记录：`executionToolCalls`（生成 / 重算）、`probeToolCalls`（探测）、`reuseToolCalls`（新修复基线上的复用验证）、`commitReplayToolCalls`（提交重放）。`totalToolCalls` 包含四者；`reusedProbeSteps` 单列实际跳过的探测回调，不计为工具调用。复用验证会按拓扑重放完整的独立未变分支并检查哈希，也会重现写入效果。`transactionsStarted`、`snapshotsCaptured` 来自计时区间的真实 journal 事件；快照内部 Git 操作不算工具调用，但计入端到端 `elapsedMs`。`commitValidation` 用于核查发布确实经过观测验证。
@@ -84,7 +85,7 @@ pnpm benchmark:refresh 3 4 1000 1 3 1 --shared  # 低估复用成本，暴露预
 
 ## 无探测的因果重算对照
 
-当前报告为 schemaVersion=3，新增 `causal-recompute` 模式，以及逐样本的 `causalStepsRecorded`、`validationsCompleted`、`recomputationsPrepared` journal 计数。历史样本保留原 schema；按 mode 名称比较，不按数组位置比较。直接重算是显式策略，`decision` / `costPrediction` 为 null，不计入自适应策略选择次数。
+该阶段报告为 schemaVersion=3，新增 `causal-recompute` 模式，以及逐样本的 `causalStepsRecorded`、`validationsCompleted`、`recomputationsPrepared` journal 计数。历史样本保留原 schema；按 mode 名称比较，不按数组位置比较。直接重算是显式策略，`decision` / `costPrediction` 为 null，不计入自适应策略选择次数。
 
 直接重算与 `full-rerun` 都执行选中联合祖先 N 次、提交重放 N 次，总调用 2N，且没有探测与复用验证。区别是直接重算保留因果替代节点和分支 heads，并记录 `CAUSAL_RECOMPUTATION_PREPARED`；手工完整重跑不记录新因果节点。journal 计数帮助解释相同工具调用下的管理开销，不代表额外工具调用。
 
@@ -109,3 +110,30 @@ pnpm benchmark:refresh 3 4 1000 0 3 --shared --change-shared
 | 共享输入 | 19→18 | 333.81→221.61 | 214.36 |
 
 在有变化的三个场景中，直接重算省去 8 / 5 / 1 次探测调用及探测工作区开销；无变化时却多执行 9 次工具调用。手工完整重跑每组也为 18 次调用，本轮中位耗时均略低于因果重算；因果记录并非免费。这是小型确定性文件负载的三轮实测，不代表普遍加速或模型 token 收益。采样期间未并行运行本仓库测试。
+
+
+## 探测前策略与独立预测
+
+当前报告为 schemaVersion=4，加入 `causal-refresh-policy`，调用生产 API `refreshWorkspaceCausalBranchesWithPolicy`。`forecast` 在所有 trial 开始前固定，不读取 `changedBranches`、`changeSharedInput`、探测结果或实测成本。默认先验为 p=0.5，未变探测成本 N、变化探测成本 B+S、变化后刷新成本 2N（N=2B+S，S 表示有无共享节点）。这是人为设定的先验，既非训练结果，也不保证条件成本符合实际扰动。
+
+可用 `--forecast=JSON` 显式传入四个字段；成本单位为工具调用。相同预测分别测试无变化和局部变化，避免从本轮真值反推策略。以下命令固定预测不变，重复运行时只改变 `changedBranches`；再将概率改为 1，可复现预测变化的两组对照。
+
+```sh
+node scripts/benchmarks/causal-refresh.mjs 3 4 1000 0 --shared --forecast='{"changeProbability":0,"probeUnchanged":9,"probeChanged":5,"refreshChanged":18}'
+node scripts/benchmarks/causal-refresh.mjs 3 4 1000 1 --shared --forecast='{"changeProbability":0,"probeUnchanged":9,"probeChanged":5,"refreshChanged":18}'
+```
+
+`policyDecision` 保存探测前策略和预测，`policyCostPrediction` 比较所选路径的预期**总**调用与实际总调用（actual − estimated）；`policiesSelected` 计数真实决策 journal 事件。summary 新增探测 / 重算选择次数及平均绝对总成本偏差。已有 `decision` / `costPrediction` 仍只描述探测后的重算策略与剩余成本，直接重算时为 null。非策略模式的两个 policy 字段为 null。
+
+预期成本是概率加权值，单个样本偏差不是概率校准指标。即使重算成本预测完全准确，错误的变化概率仍可能让无变化任务付出多余重算。应同时对照同轮 `causal-refresh-adaptive` 与 `causal-recompute` 的实测成本；这里不自动学习概率，也不把事后最优选择作为可部署策略。
+
+[原始样本](benchmarks/causal-refresh-policy.sample.json) 按 p=0 / 1、changedBranches=0 / 1 的嵌套顺序保存四组完整报告（各三轮、四分支、1000 次哈希、共享输入、单轮复用校验）。2026-10-09 采样时没有并行运行测试，六种受验证模式全部 72/72 正确；策略模式为 12/12。直接复用仅无变化组正确。
+
+| 先验 p | 实际独立输入变化 | 所选策略 | 策略总调用 | 探测后自适应 / 直接重算总调用 | 总成本绝对偏差 | 策略中位耗时 ms |
+| ---: | --- | --- | ---: | ---: | ---: | ---: |
+| 0 | 无 | probe | 9 | 9 / 18 | 0 | 101.74 |
+| 0 | 一个 | probe | 26 | 26 / 18 | 17 | 308.39 |
+| 1 | 无 | recompute | 18 | 9 / 18 | 0 | 203.11 |
+| 1 | 一个 | recompute | 18 | 26 / 18 | 0 | 210.21 |
+
+局部变化时，选直接重算比探测后自适应少 8 次调用；错误预测不变会承担这些探测成本。无变化时，错误预测变化让总调用从 9 增至 18，即使所选重算路径的成本预测误差为零。这里没有宣称学到了最佳策略，也没有真实模型 / token 数据；三轮耗时仅为本机小负载实测。
