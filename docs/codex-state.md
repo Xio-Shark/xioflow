@@ -56,6 +56,5 @@
 - 本轮M2：失败step/refresh/recompute引用可explain，返回阶段/原因、空候选或旧候选、验证与资源；固定截止点只读且重开一致。
 - 本轮M2：新增统一句柄六场景60例，独立BigInt oracle核对发布正文，检查隔离、生成次数、重开固定解释与终态key。
 - 本轮M2：refresh返回WorldRefreshResult.ref，成功/unknown指向完成报告，失败保留原失败ref；explain(refreshed.ref)在发布前给出计划与变化路径。
-- candidate.atSeq不变，直接explain(candidate)仍只含准备时刻证据；六场景60例检查刷新引用的固定截止点与重开一致。
-- 本轮M2：汇总第3节不变式证据索引；竞争提交改为同基线不同正文，核对仅胜者发布及双方幂等重试。验证结果待本轮收尾记录。
+- 本轮M2：汇总第3节不变式证据索引；竞争提交改为同基线不同正文，核对仅胜者发布及双方幂等重试。
 - 验证：commit专项22项、pnpm typecheck、git diff --check通过；剩余不足5分钟，未跑全量，下一轮优先安排补跑（不作开发基线）。
