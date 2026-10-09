@@ -1,7 +1,7 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约已冻结，统一公开入口待M2实现；M3/M4未完成。
-- 下一轮最小切片：接入内部strict commit，复用既有发布队列/OCC/输出核验，先补刷新后再次改文件拒绝发布验收。
+- 下一轮先补全量测试；最小切片：strict commit独立key持久绑定/结果查询，收敛重试与未决状态。
 - M2完成标准仍缺：统一句柄、完整explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md冻结六入口状态表、覆盖和六类失败/重试/资源归属；src/world/contract.ts共享非公开契约，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
@@ -32,16 +32,19 @@
 - readWorldRefresh/readWorldCandidateValidation/explainWorldPreparation固定引用只读恢复，重开和后续历史不影响同截止点；解释区分验证计划与实际full/reuse/incremental结果。
 - 内部入口均未公开；无重算幂等、中断自动续跑或统一资源清理；explain仍缺发布/绑定/资源事实。
 - 候选产物覆盖检查：执行完成及验证前后复用精确路径/Git树核验，拒绝symlink、目录和指纹漏收的忽略文件，failed并保留证据，不发布。
-- 该检查不推断隐性读取或未声明写入，也不是文件系统锁；仍需strict commit。合法写入/删除、声明不存在路径保持可用。
+- 该检查不推断隐性读取或未声明写入，也不是文件系统锁；最终由内部strict commit重验。合法写入/删除、声明不存在路径保持可用。
 - 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，每轮先确认cc，当前容器已重新安装gcc/libc6-dev。
 - 内部prepareWorldRepair消费changed/selected_nodes持久报告，接既有prepareWorkspaceRepair；固定基线拓扑重放复用节点并验全部hash，物化复用写入后才重算闭包。
 - 修复前/复用后/完成后重验原产物及版本，最终覆盖/指纹检查；失败abort并留WORLD_REPAIR_FAILED与验证基线；成功记录事务、复用/替换及指纹。
 - 该基础层返回open事务及筛选后的refresh上下文，未产生WorldCandidate/执行模型或绑定checkpoint；不替代OCC或业务验收；已有5项回归覆盖修复准备边界。
 - matched刷新接prepareWorldStep：固定验证版本上完整重放/物化，映射节点、heads与已保存产物依赖，保存新候选及checkpoint，不调用模型。
-- WORLD_REUSE_PREPARED/FAILED保存引用和映射；原产物重验、重放首差/异常失败且不兜底重算，资源仍保留；strict commit尚未接入。
+- WORLD_REUSE_PREPARED/FAILED保存引用和映射；原产物重验、重放首差/异常失败且不兜底重算，资源仍保留；strict commit已通过内部桥接接入。
 - 复用验证后才暴露正文，各回调独立副本；previous仅投影候选元数据防止夹带失效正文；持久记录可复用/失效产物ID。
 - prepareRepairedWorldCandidate共用matched准备执行器和repair产物筛选，重验物化unaffected后调用一次WorldAgent并保存候选/checkpoint。
 - null事件及其传递后继保留实际依赖但不进入可复用图，候选/checkpoint heads为null；伪造引用仍失败。
 - refresh产物依赖映射到本次节点；旧节点引用failed，null为unknown；源产物前后核验，复用工具异常不调用agent，仍不发布主目录。
 - 本轮M2：changed refresh自动增量；refresh.reusedNodes覆盖无产物节点映射，explain.reuse持久区分实际映射和验证计划。
-- 验证：repair/step/refresh共58项及pnpm typecheck通过；全量63文件/935项通过，跳过1文件/7项，259.83秒；下一轮无需全量基线。M2尚未完成。
+- 本轮M2：commitWorldCandidate读取持久候选，复用共享supervisor发布队列/完整重放/OCC/只读业务验收；版本/正文/输出/覆盖检查。
+- WORLD_PUBLICATION_RESULT保存结果；txId成功重试/重开返回原回执，清理失败以持久回执为准；未决保留证据，无自动恢复。
+- 工具异常为validation_failed（底层可能conflicted，须新候选）；unknown不发布；独立key、绑定/close仍缺，入口非公开。
+- 验证：新增commit测试9项（含刷新后再次改价10次全部冲突）及pnpm typecheck通过；未跑全量（剩余不足5分钟），下一轮先补。M2未完成。
