@@ -203,3 +203,10 @@ validateWorkspaceCausalBranches 与 prepareWorkspaceRepair（含共享分支）�
 验证结束或修复失败均不删除它；修复 journal 保存实际 baseSnapshotId，失败仍回收修复 fork。
 共享快照不豁免 validateReuse、产物物化检查或最终 OCC；当前目录再次改变时不能凭旧探测发布。
 world refresh 尚未自动接入增量修复，changed 仍全量重算；下一步需连接复用节点重验与产物物化。
+
+固定版本的核验也覆盖句柄打开后的使用阶段：`restoreWorldRevision` 统一接受初始
+`WORLD_CREATED` 与后续 `WORLD_VERSION_CREATED`，核对持久身份、覆盖及 Git 对象。
+步骤在创建事务前核验版本，物化后核对 fork 的基线指纹，执行后再次核验；验证在重放
+前后核验旧候选版本，并在重放后核验探测版本。引用缺失或错配返回 failed，不调用后续
+agent、不生成 prepared/changed 结论，已有执行证据和预算保留。该检查不是 Git 引用锁，
+也不替代提交阶段的严格验证；未承诺抵御检查间瞬时改写再恢复的外部并发操作。

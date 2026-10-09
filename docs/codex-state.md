@@ -55,4 +55,6 @@
 - 本轮changed refresh全量重算使用持久validation引用的固定版本；unknown/显式全量默认重新采集，原句柄基线不变。
 - restoreWorldRevision核验版本事件/覆盖/归属及Git ref/commit/tree/blob；缺失或错配failed，不回退当前目录、不调用agent。
 - 新增6项覆盖探测期间再改价、重开后固定重算、快照丢失/错配、候选错配及伪造版本；仍无增量复用或发布许可。
-- 环境基线804通过/7跳过，3套件因缺cc加载失败；已安装gcc/libc6-dev。typecheck与相关27项通过，全量复验待回填。
+- 本轮M2版本使用核验：restoreWorldRevision统一初始/后续版本，步骤执行前后及验证重放前后核对持久身份/Git对象，物化后核对fork基线指纹。
+- 篡改/丢失返回failed，阻断agent或prepared/changed结论；5项回归覆盖两类版本及执行/重放期间失效。检查不是引用锁，仍需strict commit。
+- 验证：基线903通过/7跳过；pnpm typecheck及新增5项回归通过；最终全量测试运行中，结束后回填。

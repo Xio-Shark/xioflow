@@ -5,7 +5,7 @@ import { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
 import { WorkspaceCausalGraph } from '../workspace/causal-graph.js';
 import type { ObservationEntry } from '../workspace/transactions.js';
-import type { openWorldState } from './state.js';
+import { restoreWorldRevision, type openWorldState } from './state.js';
 
 type WorldState = Awaited<ReturnType<typeof openWorldState>>;
 const active = new WeakSet<WorldState['domain']>();
@@ -35,10 +35,18 @@ export async function executeWorldStep(world: WorldState, input: AgentData, exec
         status: 'running', startedAt: timestamp });
       append('WORLD_STEP_STARTED', { input, snapshotId: state.snapshotId });
     });
+    const version = { worldId: state.worldId, id: state.snapshotId, atSeq: state.atSeq,
+      snapshotId: state.snapshotId, manifestHash: state.manifestHash, fingerprint: state.fingerprint };
+    await restoreWorldRevision(world, version);
     const workspace = await new ProcessSupervisor(domain).beginWorkspaceTransaction({
       txId: id, runId: id, root: state.root, baseSnapshotId: state.snapshotId,
       forkPath: path.join(domain.domainPath, 'forks', id),
     });
+    const driver = new GitShadowSnapshotDriver();
+    const snapshot = store.getSnapshot(state.snapshotId)!;
+    if (await driver.fingerprint([workspace.forkRoot], { against: snapshot }) !== state.fingerprint) {
+      throw new Error('World fork baseline fingerprint mismatch');
+    }
     const graph = new WorkspaceCausalGraph(domain);
     const recorded = new Set<number>();
     let untracked = false;
@@ -70,7 +78,7 @@ export async function executeWorldStep(world: WorldState, input: AgentData, exec
     await runtime.drain();
     const agent = runtime.get(id)!;
     if (agent.status !== 'completed') throw new Error(agent.error ?? agent.reason ?? 'World agent did not complete');
-    const snapshot = store.getSnapshot(state.snapshotId)!;
+    await restoreWorldRevision(world, version);
     const outputFingerprint = await new GitShadowSnapshotDriver().fingerprint([workspace.forkRoot], { against: snapshot });
     const atSeq = append('WORLD_STEP_COMPLETED', { snapshotId: state.snapshotId, outputFingerprint,
       checkpoint: agent.checkpoint, causalHeads: agent.causalHeads, forkRoot: workspace.forkRoot });

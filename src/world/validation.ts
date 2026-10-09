@@ -6,7 +6,7 @@ import { WorkspaceCausalGraph, type ExplainedRecomputationPlan } from '../worksp
 import { validateWorkspaceCausalBranches } from '../workspace/causal-validation.js';
 import { readWorldArtifacts } from './artifacts.js';
 import type { FileWorldAdapter, WorldCandidate, WorldRef, WorldVersion } from './contract.js';
-import { captureWorldRevision, type openWorldState } from './state.js';
+import { captureWorldRevision, restoreWorldRevision, type openWorldState } from './state.js';
 
 type WorldState = Awaited<ReturnType<typeof openWorldState>>;
 export interface WorldCandidateValidation {
@@ -62,6 +62,7 @@ export async function validateWorldCandidate(world: WorldState, ref: WorldRef,
         reasons.push('manifest_mismatch');
       }
     } else {
+      await restoreWorldRevision(world, candidate.version);
       readWorldArtifacts(world, previous);
       const completed = store.getJournalEvents(domain.domainId).find(e => e.seq <= ref.atSeq
         && e.type === 'WORLD_STEP_COMPLETED' && e.payload.id === candidate.id
@@ -93,6 +94,8 @@ export async function validateWorldCandidate(world: WorldState, ref: WorldRef,
         closedWorld: true, replayPolicy: 'deterministic', replay: (entry, root) => adapter.replay(entry, root),
       });
       validationSeq = validation.seq;
+      await restoreWorldRevision(world, candidate.version);
+      await restoreWorldRevision(world, version);
       await checkOutput();
       const failures = validation.branches.filter(branch => branch.status === 'failed');
       status = failures.length ? 'failed' : validation.changed.length ? 'changed' : 'matched';

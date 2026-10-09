@@ -228,7 +228,7 @@ export async function restoreWorldRevision(world: Awaited<ReturnType<typeof open
   const store = domain.getStore();
   const event = store.getJournalEvent(domain.domainId, version.atSeq);
   const record = event?.payload as unknown as WorldStateRecord | undefined;
-  if (!event || event.type !== 'WORLD_VERSION_CREATED' || !record
+  if (!event || !['WORLD_CREATED', 'WORLD_VERSION_CREATED'].includes(event.type) || !record
       || version.worldId !== state.worldId || version.id !== version.snapshotId
       || record.worldId !== state.worldId || record.snapshotId !== version.snapshotId
       || record.fingerprint !== version.fingerprint || record.root !== state.root
