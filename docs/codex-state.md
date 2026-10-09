@@ -1,7 +1,7 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约已冻结，统一公开入口待M2实现；M3/M4未完成。
-- 下一轮最小切片：将内部prepareWorldRepair已筛选的refresh上下文接到WorldAgent执行与候选/checkpoint准备，复用已有版本/产物依赖保存路径；changed刷新仍保守全量，不扩大公开入口。
+- 下一轮最小切片：将prepareRepairedWorldCandidate接入refresh changed分支及持久解释，补连续增量刷新与无产物复用节点依赖映射验收；先补跑本轮未跑的全量测试。
 - M2完成标准仍缺：统一句柄、增量refresh、完整explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md冻结六入口状态表、覆盖和六类失败/重试/资源归属；src/world/contract.ts共享非公开契约，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
@@ -30,7 +30,7 @@
 - 内部refreshWorldCandidate组合validate/recompute：matched重建固定验证版本候选，unknown拒绝或重算，changed保守全量；工具/产物异常不触发重算。
 - changed全量重算使用持久validation固定版本；unknown/显式全量默认新采集，原句柄基线不变。restoreWorldRevision缺失/错配不回退当前目录、不调用agent。
 - readWorldRefresh/readWorldCandidateValidation/explainWorldPreparation固定引用只读恢复，重开和后续历史不影响同截止点；解释区分验证计划与实际full/reuse结果。
-- 内部入口均未公开；无WorldAgent增量refresh、重算幂等、中断自动续跑或统一资源清理；explain仍缺发布/绑定/资源事实。
+- 内部入口均未公开；无自动WorldAgent增量refresh、重算幂等、中断自动续跑或统一资源清理；explain仍缺发布/绑定/资源事实。
 - 候选产物覆盖检查：执行完成及验证前后复用精确路径/Git树核验，拒绝symlink、目录和指纹漏收的忽略文件，failed并保留证据，不发布。
 - 该检查不推断隐性读取或未声明写入，也不是文件系统锁；仍需strict commit。合法写入/删除、声明不存在路径保持可用。
 - 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，每轮先确认cc，当前容器已重新安装gcc/libc6-dev。
@@ -45,3 +45,6 @@
 - 复用验证后才暴露正文，各回调独立副本；previous仅投影候选元数据防止夹带失效正文；持久记录可复用/失效产物ID。
 - 本轮修复M2未跟踪依赖传播：null事件及传递后继可被本步骤引用，保存实际依赖，均不进入可复用图；候选/checkpoint heads为null，伪造引用仍失败。
 - 本轮验证：step/repair共33项及pnpm typecheck通过；补装gcc/libc6-dev，全量63文件/930项通过，跳过1文件/7项，239.13秒；下一轮无需全量基线。
+- 本轮M2：prepareRepairedWorldCandidate与matched共用准备执行器，复用repair产物筛选，先重放物化unaffected，再调用WorldAgent并保存新候选/checkpoint。
+- refresh产物依赖映射到本次节点；旧节点引用failed，null为unknown；源产物前后核验，复用工具异常不调用agent，仍不发布主目录。
+- 本轮验证：repair/step/refresh共57项与pnpm typecheck通过；未跑全量（剩余时间不足5分钟），下一轮先补全量。

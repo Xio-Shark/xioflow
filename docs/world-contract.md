@@ -239,3 +239,13 @@ WORLD_REPAIR_PREPARED 记录验证引用、版本、复用/替换节点、输出
 未跟踪依赖的工具链保留已记录事件身份：后续观测/写入可引用本步骤中依赖为 null 的事件，
 以及其传递后继；这些事件保存实际 dependsOn，但不进入可复用因果图。结果和 checkpoint
 的 causalHeads 为 null，候选返回 unknown；混合依赖中出现伪造或跨步骤序号仍失败。
+
+
+内部 `prepareRepairedWorldCandidate` 现在与 matched 路径共用候选准备执行器，并复用
+prepareWorldRepair 的产物筛选规则。changed / selected_nodes 报告的固定版本上，先重放
+unaffected 节点并物化写入、核验所有哈希，再调用一次 WorldAgent.execute；首差或异常不调用 agent。
+refresh.previous 与 plan 保持历史身份，reusableArtifacts.dependsOn 映射为本次新节点，
+宿主须在返回 artifacts/heads 中显式保留所需复用成果，并记录新工作的依赖；直接引用旧节点拒绝。
+普通 prepareWorldStep 负责覆盖、产物、候选及 AgentRuntime checkpoint 保存；null 依赖返回 unknown。
+新候选支持关闭重开后取回产物和再次验证，WORLD_REUSE_* 记录 incremental 模式及节点映射。
+这是内部准备能力，refresh 协调器尚未自动选择增量路径，未接 strict commit 或保证业务结果完整性。

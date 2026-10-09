@@ -1,5 +1,5 @@
 import type { AgentData } from '../agents/runtime.js';
-import type { AgentExecution, DependencyCoverage, PreparationResult, WorldAgent, WorldVersion } from './contract.js';
+import type { AgentExecution, AgentStepContext, DependencyCoverage, PreparationResult, WorldAgent, WorldVersion } from './contract.js';
 import { executeWorldStep } from './step.js';
 import { verifyWorldArtifactBody } from './artifacts.js';
 import type { openWorldState } from './state.js';
@@ -8,21 +8,24 @@ type WorldState = Awaited<ReturnType<typeof openWorldState>>;
 
 /** Internal adapter for the frozen WorldAgent contract; preparation never publishes. */
 export async function prepareWorldStep(world: WorldState, agent: WorldAgent,
-  input: { task: string }): Promise<PreparationResult> {
+  input: { task: string },
+  initialize?: (context: AgentStepContext) => Promise<AgentStepContext['refresh']>): Promise<PreparationResult> {
   const { state, domain } = world;
   const version: WorldVersion = { worldId: state.worldId, id: state.snapshotId,
     atSeq: state.atSeq, snapshotId: state.snapshotId, manifestHash: state.manifestHash,
     fingerprint: state.fingerprint };
   const result = await executeWorldStep(world, { task: input.task }, async ({ forkRoot, record }) => {
     const nodes = new Map<number, { dependsOn: readonly number[] | null; kind: string }>();
-    const execution = await agent.execute({ forkRoot, version: Object.freeze(version), refresh: null,
+    const context: AgentStepContext = { forkRoot, version: Object.freeze(version), refresh: null,
       record: async (entry, dependsOn) => {
         if (!entry.resultHash?.trim()) throw new Error('World observations require a result hash');
         const seq = record({ ...entry, resultHash: entry.resultHash }, dependsOn === null ? null : [...dependsOn]);
         nodes.set(seq, { dependsOn: dependsOn === null ? null : [...dependsOn], kind: entry.kind });
         return seq;
       },
-    }, { task: input.task });
+    };
+    const refresh = initialize ? await initialize(context) : null;
+    const execution = await agent.execute({ ...context, refresh: structuredClone(refresh) }, { task: input.task });
     // Copy declarations before yielding control: later host mutation must not alter evidence.
     const saved = JSON.parse(JSON.stringify(execution)) as AgentExecution;
     const reasons: string[] = [];

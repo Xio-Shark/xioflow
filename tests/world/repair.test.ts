@@ -138,3 +138,61 @@ it.each(['mismatch', 'exception', 'source_tampered', 'final_coverage'] as const)
   expect(world.domain.getStore().getSnapshot(probe.version!.snapshotId)).toBeDefined();
   await expect(fs.stat(path.join(world.state.root, 'out-b'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
+
+it('prepares an incremental WorldAgent candidate with remapped reusable dependencies and checkpoint', async () => {
+  const { prepareRepairedWorldCandidate } = await import('../../src/world/reuse.js');
+  const { candidate, probe } = await fixture();
+  let calls = 0;
+  const result = await prepareRepairedWorldCandidate(world, probe.ref, adapter, { execute: async (context, input) => {
+    calls++;
+    expect(input.task).toBe('copy both');
+    expect(context.version).toEqual(probe.version);
+    expect(context.refresh!.previous).toEqual(candidate);
+    expect(context.refresh!.plan).toEqual(probe.plan);
+    expect(context.refresh!.reusableArtifacts.map(a => a.id)).toEqual(['stable', 'constant']);
+    expect(await fs.readFile(path.join(context.forkRoot, 'out-b'), 'utf8')).toBe('stable-b');
+    const stable = context.refresh!.reusableArtifacts[0];
+    expect(stable.dependsOn).not.toEqual(readWorldArtifacts(world, candidate)[1].dependsOn);
+    const read = { kind: 'observe' as const, call: { tool: 'read', args: { key: 'a' } } };
+    const value = await adapter.replay(read, context.forkRoot);
+    const seq = await context.record({ ...read, resultHash: value }, []);
+    const write = { kind: 'mutate' as const, call: { tool: 'copy', args: { key: 'a' } } };
+    await adapter.replay(write, context.forkRoot);
+    const head = await context.record({ ...write, resultHash: value }, [seq]);
+    return { coverage: { status: 'complete', manifestHash: context.version.manifestHash },
+      heads: [head, ...stable.dependsOn!], artifacts: context.refresh!.reusableArtifacts };
+  } });
+  expect(calls).toBe(1);
+  expect(result.status).toBe('prepared');
+  if (result.status !== 'prepared') throw new Error(JSON.stringify(result));
+  const events = world.domain.getStore().getJournalEvents('world');
+  const completed = events.find(e => e.type === 'WORLD_STEP_COMPLETED' && e.payload.id === result.candidate.id)!;
+  expect((completed.payload.checkpoint as { artifacts: unknown }).artifacts).toEqual(readWorldArtifacts(world, result.candidate));
+  expect(completed.payload.causalHeads).toEqual(result.candidate.heads);
+  expect(await fs.readFile(path.join(completed.payload.forkRoot as string, 'out-a'), 'utf8')).toBe('new-a');
+  await expect(fs.stat(path.join(world.state.root, 'out-a'))).rejects.toMatchObject({ code: 'ENOENT' });
+  const root = world.state.root;
+  world.close();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(readWorldArtifacts(world, result.candidate).map(a => a.id)).toEqual(['stable', 'constant']);
+  expect((await validateWorldCandidate(world, result.candidate, adapter, 'selected_nodes')).status).toBe('matched');
+});
+
+it.each(['exception', 'old_dependency', 'untracked'] as const)('incremental preparation handles %s without publication', async failure => {
+  const { prepareRepairedWorldCandidate } = await import('../../src/world/reuse.js');
+  const { candidate, probe } = await fixture();
+  let calls = 0;
+  const result = await prepareRepairedWorldCandidate(world, probe.ref, { ...adapter,
+    replay: async (entry, root) => {
+      if (failure === 'exception') throw new Error('reuse offline');
+      return adapter.replay(entry, root);
+    } }, { execute: async context => {
+    calls++;
+    return { coverage: { status: 'complete', manifestHash: context.version.manifestHash },
+      heads: failure === 'old_dependency' ? candidate.heads : null, artifacts: context.refresh!.reusableArtifacts };
+  } });
+  expect(calls).toBe(failure === 'exception' ? 0 : 1);
+  expect(result.status).toBe(failure === 'untracked' ? 'unknown' : 'failed');
+  if (result.status === 'failed') expect(result.reason).toContain(failure === 'exception' ? 'reuse offline' : 'outside this world step');
+  await expect(fs.stat(path.join(world.state.root, 'out-b'))).rejects.toMatchObject({ code: 'ENOENT' });
+});

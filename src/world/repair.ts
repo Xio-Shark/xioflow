@@ -6,7 +6,7 @@ import { replayObservationLog } from '../workspace/observation-replay.js';
 import { readWorldArtifacts } from './artifacts.js';
 import { readWorldCandidateValidation } from './validation.js';
 import { fingerprintWorldOutput, restoreWorldRevision, type openWorldState } from './state.js';
-import type { AgentStepContext, FileWorldAdapter, WorldCandidate, WorldRef } from './contract.js';
+import type { AgentStepContext, FileWorldAdapter, WorldArtifact, WorldCandidate, WorldRef } from './contract.js';
 
 type RepairContext = NonNullable<AgentStepContext['refresh']>;
 type RepairExecutor = (...args: [...Parameters<WorkspaceRepairOptions['execute']>, RepairContext]) =>
@@ -32,17 +32,9 @@ export async function prepareWorldRepair(world: Awaited<ReturnType<typeof openWo
   const candidate = structuredClone(store.getJournalEvent(domain.domainId, previous.atSeq)!.payload) as unknown as WorldCandidate;
   if (candidate.coverage.status !== 'complete' || candidate.heads === null
       || candidate.coverage.manifestHash !== state.manifestHash) throw new Error('Repair coverage incomplete');
-  const unaffected = new Set(probe.plan.unaffected.map(node => node.seq));
-  // An artifact is reusable only when ALL its declared inputs survived. In particular,
-  // null is not an empty dependency list, and invalidated model text is never replayed.
-  const reusableArtifacts = artifacts.filter(artifact => artifact.dependsOn !== null
-    && artifact.dependsOn.every(seq => unaffected.has(seq)));
-  const refresh: RepairContext = {
-    // Project the public metadata: the journal payload also holds invalidated artifacts.
-    previous: { ...previous, txId: candidate.txId, version: candidate.version,
-      heads: candidate.heads, outputFingerprint: candidate.outputFingerprint, coverage: candidate.coverage },
-    plan: probe.plan, reusableArtifacts,
-  };
+  const refresh = createWorldRepairContext(previous, candidate, probe.plan, artifacts);
+  const reusableArtifacts = refresh.reusableArtifacts;
+
   const completed = store.getJournalEvents(domain.domainId).find(e => e.seq <= previous.atSeq
     && e.type === 'WORLD_STEP_COMPLETED' && e.payload.worldId === state.worldId && e.payload.id === previous.id);
   if (!completed) throw new Error('Candidate execution evidence missing');
@@ -111,4 +103,20 @@ export async function prepareWorldRepair(world: Awaited<ReturnType<typeof openWo
       resources: 'retained' });
     throw failure;
   }
+}
+
+/** Shared eligibility rule for node repair and WorldAgent preparation. */
+export function createWorldRepairContext(previous: WorldRef, candidate: WorldCandidate,
+  plan: RepairContext['plan'], artifacts: readonly WorldArtifact[]): RepairContext {
+  const unaffected = new Set(plan.unaffected.map(node => node.seq));
+  // An artifact is reusable only when ALL its declared inputs survived. In particular,
+  // null is not an empty dependency list, and invalidated model text is never replayed.
+  const reusableArtifacts = artifacts.filter(artifact => artifact.dependsOn !== null
+    && artifact.dependsOn.every(seq => unaffected.has(seq)));
+  return {
+    // Project the public metadata: the journal payload also holds invalidated artifacts.
+    previous: { ...previous, txId: candidate.txId, version: candidate.version,
+      heads: candidate.heads, outputFingerprint: candidate.outputFingerprint, coverage: candidate.coverage },
+    plan, reusableArtifacts,
+  };
 }

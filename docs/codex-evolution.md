@@ -694,3 +694,9 @@
 - 保留实际dependsOn供历史解释，未知链不进入可复用图，checkpoint/candidate heads均为null；混入伪造序号仍拒绝。
 - 新增混合/传递依赖、隔离写入、重开证据、低层heads及伪造引用回归；step/repair共33项和typecheck通过。
 - 补装gcc/libc6-dev；全量63文件/930项通过，跳过1文件/7项，239.13秒。M2仍缺WorldAgent增量候选、统一句柄、strict commit/key、资源与完整验收。
+
+## 2026-10-09 — M2 WorldAgent 增量候选准备
+- matched与内部prepareRepairedWorldCandidate共用执行器，复用repair产物筛选；固定版本重放物化unaffected后调用一次WorldAgent。
+- 复用产物依赖映射为本次节点，普通prepareWorldStep保存候选与checkpoint；旧节点拒绝、未跟踪返回unknown。
+- 新增增量输出、上下文/依赖映射、checkpoint、关闭重开验证及工具异常阻断测试；不新增包公开入口，changed自动refresh暂仍全量。
+- repair/step/refresh共57项及typecheck通过；未跑全量（剩余不足5分钟），下一轮先补全量，再接refresh协调与解释；M2未完成。
