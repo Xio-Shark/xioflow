@@ -57,4 +57,4 @@
 - 本轮M2：失败step/refresh/recompute引用可explain，返回阶段/原因、空候选或旧候选、验证与资源；固定截止点只读且重开一致。
 - 本轮M2：新增统一句柄六场景60例，独立BigInt oracle核对发布正文，检查隔离、生成次数、重开固定解释与终态key。
 - M2验收：六场景每次explain直接比较原始/刷新Run非零getRunUsage、完整journal、覆盖正文和调用次数；重开预算不变。证据索引11文件统一复核通过，见docs/world-acceptance.md。
-- 本轮验证：报价fixture/oracle 8/8、pnpm typecheck、git diff --check通过；正在最后补跑全量，期间禁止改源码/测试或并行build。
+- 本轮验证：报价8/8、typecheck、build、CLI冒烟及diff检查通过；全量68文件通过/1跳过，1044通过/7跳过（325s），无需下轮补跑基线。
