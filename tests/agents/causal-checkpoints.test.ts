@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, prepareWorkspaceBranchRepair } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, prepareWorkspaceBranchRepair } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -87,6 +87,16 @@ describe('agent checkpoint causal branches', () => {
     const saved = runtime.checkpoints('first').at(-1);
     runtime.close(); domain.close();
     domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    const beforeQuery = domain.getStore().getJournalEvents(domain.domainId);
+    const records = listAgentCausalRefreshPlans(domain);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ seq: result.planSeq, validationSeq: result.validation.seq, preview: result.preview });
+    expect(listAgentCausalRefreshPlans(domain, { atSeq: result.planSeq - 1 })).toEqual([]);
+    expect(listAgentCausalRefreshPlans(domain, { atSeq: result.planSeq, runId: 'run' })).toEqual(records);
+    expect(listAgentCausalRefreshPlans(domain, { runId: 'other' })).toEqual([]);
+    records[0].preview.affected[0].checkpoint.checkpoint = 'tampered';
+    expect(listAgentCausalRefreshPlans(domain)[0].preview).toEqual(result.preview);
+    expect(domain.getStore().getJournalEvents(domain.domainId)).toEqual(beforeQuery);
     open();
     expect(runtime.checkpoints('first').at(-1)).toEqual(saved);
     expect(domain.getStore().getJournalEvent(domain.domainId, result.planSeq)?.payload).toMatchObject({
@@ -114,7 +124,10 @@ describe('agent checkpoint causal branches', () => {
       expect(prepared).toBe(0);
       if (result.status === 'checkpoint_changed') expect(result.agentIds).toEqual(['a']);
       if (result.status === 'validation_failed') expect(result.validation.changed).toEqual([]);
-      if (result.status === 'unchanged') expect(result.preview.unaffected).toEqual(['a']);
+      if (result.status === 'unchanged') {
+        expect(result.preview.unaffected).toEqual(['a']);
+        expect(listAgentCausalRefreshPlans(domain)[0].preview).toEqual(result.preview);
+      }
       expect(fs.existsSync(path.join(temp, 'probe', '0'))).toBe(false);
     },
   );
@@ -137,6 +150,60 @@ describe('agent checkpoint causal branches', () => {
     await expect(refreshAgentSharedCausalBatch(runtime, new ProcessSupervisor(domain), { ...options, agentIds: ['a', 'a'] }))
       .rejects.toThrow('unique');
     expect(calls).toBe(2);
+  });
+
+  it('reconstructs intent after prepare fails, including restored context and historical restart candidates', async () => {
+    const source = node();
+    const derived = node([source.seq]);
+    open({ step: async () => {
+      runtime.pause('a');
+      return { status: 'ready', checkpoint: { answer: 'old' }, causalHeads: [derived.seq] };
+    } });
+    create([]);
+    const initial = runtime.checkpoints('a')[0];
+    await runtime.drain();
+    runtime.restoreCheckpoint('a', runtime.checkpoints('a').at(-1)!.seq);
+    runtime.create({ id: 'b', runId: 'run', input: null, checkpoint: null, maxSteps: 1, causalHeads: [] });
+    runtime.create({ id: 'unknown', runId: 'run', input: null, checkpoint: null, maxSteps: 1 });
+    const expected = runtime.explainCausalRecovery([source.seq]);
+    await expect(refreshAgentSharedCausalBatch(runtime, new ProcessSupervisor(domain), {
+      agentIds: ['unknown', 'b', 'a'],
+      validation: { txId: 'probe', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'probe'),
+        closedWorld: true, replayPolicy: 'deterministic', replay: async () => 'new' },
+      prepare: async () => { throw new Error('preparation unavailable'); },
+      bind: async () => { throw new Error('must not bind'); },
+    })).rejects.toThrow('preparation unavailable');
+    const records = listAgentCausalRefreshPlans(domain);
+    expect(records[0].preview).toEqual(expected);
+    expect(records[0].preview.affected[0].restartFrom).toEqual(initial);
+    expect(records[0].preview.affected[0].checkpoint.checkpoint).toEqual({ answer: 'old' });
+    runtime.restoreCheckpoint('a', initial.seq);
+    node([derived.seq]);
+    expect(runtime.planCausalRecovery([source.seq]).affected).toEqual([]);
+    expect(listAgentCausalRefreshPlans(domain)).toEqual(records);
+    runtime.close(); domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    expect(listAgentCausalRefreshPlans(domain)).toEqual(records);
+    const original = domain.getStore().getJournalEvent(domain.domainId, records[0].seq)!;
+    domain.getStore().recordJournalEvent({ domainId: domain.domainId, runId: 'run',
+      type: original.type, timestamp: new Date().toISOString(), payload: { ...original.payload,
+        checkpoints: [{ agentId: 'another-agent', checkpointSeq: initial.seq }] } });
+    expect(() => listAgentCausalRefreshPlans(domain)).toThrow('refresh checkpoint');
+    expect(listAgentCausalRefreshPlans(domain, { atSeq: records[0].seq })).toEqual(records);
+  });
+
+  it.each([-1, 0.5, NaN, Infinity])('rejects invalid recovery history cutoff %s', (atSeq) => {
+    expect(() => listAgentCausalRefreshPlans(domain, { atSeq })).toThrow('history sequence');
+  });
+
+  it.each([
+    { version: 2 },
+    { version: 1, validationSeq: 999, changed: [], checkpoints: [] },
+  ])('rejects unsupported or incomplete historical intent $version', (payload) => {
+    const seq = domain.getStore().recordJournalEvent({ domainId: domain.domainId, runId: 'run',
+      type: 'AGENT_CAUSAL_REFRESH_PLANNED', timestamp: new Date().toISOString(), payload });
+    expect(listAgentCausalRefreshPlans(domain, { atSeq: seq - 1 })).toEqual([]);
+    expect(() => listAgentCausalRefreshPlans(domain)).toThrow();
   });
 
   it('compares reconstructed files after source disposal without changing agents or live files', async () => {

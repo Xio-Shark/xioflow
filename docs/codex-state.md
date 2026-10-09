@@ -19,7 +19,6 @@
 - 宿主保证依赖完整、确定性和文件效果；时间旅行仅 checkpoint 粒度，不重放模型/外部系统。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。
 - validateWorkspaceCausalBranches：同一当前基线，逐分支独立 fork 重放，自动发现因果修复种子。
-- 返回 matched / changed / failed、首个差异 seq、去重 changed、联合 plan 与实际 replayedSteps。
 - 工具异常不进入 changed；每分支首差即停；验证 fork / 基线回收，不改 checkpoint / 不提交。
 - CAUSAL_VALIDATION_COMPLETED 持久化报告、源分支 heads、基线 SnapshotRef 元数据。
 - listWorkspaceCausalValidations(domain, { runId?, atSeq? }) 支持重开与报告历史切片。
@@ -36,7 +35,6 @@
 - refresh / prepare refresh 可选 costModel；planWorkspaceCausalRefresh 可纯查询比较成本。
 - 每节点 execute / reuse / replay 同单位有限非负估算；溢出或异常在修复事务前拒绝。
 - 比较增量重算+复用验证+完整提交重放与全部重算+完整提交重放；相等保留增量。 full 只重算选中联合祖先，共享节点一次；validateReuse 收到 []，保留强制 OCC。
-- 先探测再决策；估算不包含已发生探测和相同固定开销，不声称实测或 token 收益。
 - recomputeWorkspaceCausalBranches：显式跳过探测，完整重算所选联合祖先并强制 OCC 提交。
 - CAUSAL_RECOMPUTATION_PREPARED 记录来源与 full 策略；关联失败回收、未知提交保留资源。
 - benchmark:refresh 七模式 schemaVersion=4；先固定forecast再扰动，命中/失准样本见causal-refresh-policy.sample.json。
@@ -56,5 +54,7 @@
 - 任一probe失败阻断修复；探测期间任一选中checkpoint推进返回checkpoint_changed；未跟踪单列，未选中不恢复。
 - AGENT_CAUSAL_REFRESH_PLANNED关联validationSeq和checkpoint序号；意图不等于发布，recovered须检查逐项outcomes。
 - 共享恢复复用冻结计划绑定循环；不自动停止/resume/OCC提交，宿主仍负责复用验证、上下文/文件分发与资源回收。
-- 本轮基线717通过/7跳过，typecheck通过、定向43通过；最终全量722通过/7跳过。工作区原先干净，无额外依赖安装。
-- 下一步：恢复计划的持久查询与重开后的解释重建，串联validation→计划→共享修复→各checkpoint发布；补充部分绑定失败示例。
+- listAgentCausalRefreshPlans(domain, {runId?, atSeq?})：纯journal查询冻结计划，重建原checkpoint上下文/失效最短路径/restartFrom；无需AgentRuntime。
+- 查询按原checkpoint引用与计划时序切片；后续发布不改旧preview；恢复引用可解析；缺失引用/未知版本报错，返回深拷贝。runId是发起探测的Run。
+- 查询只表示意图，即使prepare失败也可查询；未自动关联共享修复及逐项发布，不证明OCC成功。本轮typecheck通过、全量729通过/7跳过，定向50通过；无新依赖。
+- 下一步：持久关联planSeq→共享修复事务→逐项causal_repaired；覆盖部分绑定失败和崩溃窗口，避免凭checkpointRef猜测发布归属。

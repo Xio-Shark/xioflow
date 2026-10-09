@@ -172,3 +172,31 @@ if (result.status === 'recovered') {
 - 此入口不提交工作区、不停止或 resume agent。当前世界可能继续变化，观测匹配只是修复种子；
   宿主仍须验证复用、重建上下文和独立文件分支，并通过 OCC 发布文件。
   `prepare` 抛错由宿主清理资源，之后可从 journal 查询探测和计划；不存在跨 agent 原子提交。
+
+## 重开后查询冻结的恢复解释
+
+`listAgentCausalRefreshPlans(domain, { runId?, atSeq? })` 从 journal 查询历史计划，
+并按计划引用的 checkpoint 重建与当时 `preview` 相同的上下文、失效节点、最短因果路径
+和 `restartFrom` 候选。只需要打开 `ExecutionDomain`，不需要创建 `AgentRuntime`，
+不触发工具重放、文件分叉或任何 journal 写入。
+
+```ts
+import { listAgentCausalRefreshPlans } from '@xioflow/kernel';
+
+const history = listAgentCausalRefreshPlans(domain, { runId, atSeq: auditSeq });
+for (const plan of history) {
+  console.log(plan.seq, plan.validationSeq, plan.checkpoints);
+  for (const impact of plan.preview.affected) {
+    console.log(impact.agentId, impact.checkpoint.seq, impact.recomputation.explanations);
+  }
+}
+```
+
+`atSeq` 是包含边界的 journal 截止序号；`runId` 筛选发起探测的 Run，选中 agent
+可以属于其他 Run。后续修复、恢复、运行或新增因果节点不会改写旧计划的解释。
+返回值可由调用方修改，不影响持久记录。未知版本和缺失引用会报错，不能伪装成空历史。
+
+这些记录表示**恢复意图**：即使 `prepare` 抛错，已经落盘的计划仍可查询。
+例如两个 agent 中一个绑定成功、另一个绑定失败，二者仍在原计划的 `affected` 内；
+查询不会把后者变成成功，也不推断事务已经 OCC 提交。逐项发布仍需核对
+`AGENT_STATE / causal_repaired` 及其 `checkpointRef`，当前接口不自动关联发布结果。

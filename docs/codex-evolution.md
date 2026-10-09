@@ -405,3 +405,11 @@
 - 补充自动恢复示例、runtime 契约与定位入口；保持宿主复用验证、上下文分发、OCC 和资源管理职责。
 - 验证：基线717通过/7跳过；新增5例，定向43通过；pnpm typecheck通过；pnpm test最终722通过/7跳过；diff检查通过。
 - 下一步：持久恢复计划查询与重开后的解释重建，串联探测、共享修复及逐项发布历史。
+
+## 2026-10-09 — 重开后重建冻结的恢复计划
+- 新增 listAgentCausalRefreshPlans：只读 journal 查询，按 Run / atSeq 返回计划与 validationSeq、原 checkpoint 引用。
+- 无需 AgentRuntime 即可重建上下文、失效子图、最短因果路径和 restartFrom；复用 checkpoint 引用解析与因果图解释。
+- 后续修复/恢复/新增节点不改写历史 preview；prepare 失败仍可查询意图，返回深拷贝，未知版本及缺失引用明确报错。
+- 文档补充查询示例与部分失败语义：计划不代表 checkpoint 发布或 OCC 成功，不猜测共享修复/发布归属。
+- 验证：基线722通过/7跳过；新增7例，定向50通过；pnpm typecheck通过；最终pnpm test为729通过/7跳过；diff检查通过。
+- 下一步：持久关联planSeq、共享修复事务和逐项causal_repaired，覆盖部分绑定失败与崩溃窗口。
