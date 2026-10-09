@@ -21,8 +21,9 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const modes = ['durable-recovery', 'rerun-unfinished'] as const;
 const faults = ['binding-failure', 'outcome-interruption'] as const;
 
-/** Measures checkpoint/workspace recovery, not OCC publication or model execution. */
-export async function runCausalRecoveryBenchmark(options: { trials?: number; branches?: number; hashRounds?: number } = {}) {
+/** Measures durable recovery, with optional OCC publication after a second input change. */
+export async function runCausalRecoveryBenchmark(options: { trials?: number; branches?: number; hashRounds?: number; publication?: 'stable' | 'input-changed' } = {}) {
+  if (options.publication !== undefined && !['stable', 'input-changed'].includes(options.publication)) throw new Error('Invalid publication');
   const config = { trials: options.trials ?? 3, branches: options.branches ?? 4, hashRounds: options.hashRounds ?? 1000 };
   for (const [key, value] of Object.entries(config)) {
     if (!Number.isSafeInteger(value) || value < (key === 'branches' ? 2 : 1)) throw new Error(`Invalid ${key}`);
@@ -31,12 +32,12 @@ export async function runCausalRecoveryBenchmark(options: { trials?: number; bra
   for (let trial = 0; trial < config.trials; trial++) {
     for (const fault of faults) {
       for (let offset = 0; offset < modes.length; offset++) {
-        samples.push(await runSample(modes[(trial + offset) % modes.length], fault, trial, config));
+        samples.push(await runSample(modes[(trial + offset) % modes.length], fault, trial, config, options.publication));
       }
     }
   }
-  return { schemaVersion: 1, config, modelTokens: null,
-    scope: 'checkpoint-and-isolated-workspace-recovery',
+  return { schemaVersion: 2, config, publication: options.publication ?? null, modelTokens: null,
+    scope: options.publication ? 'recovery-through-occ-publication' : 'checkpoint-and-isolated-workspace-recovery',
     environment: { node: process.version, platform: process.platform, arch: process.arch }, samples,
     summary: faults.flatMap(fault => modes.map(mode => {
       const rows = samples.filter(row => row.mode === mode && row.fault === fault);
@@ -49,7 +50,7 @@ export async function runCausalRecoveryBenchmark(options: { trials?: number; bra
 }
 
 async function runSample(mode: typeof modes[number], fault: typeof faults[number], trial: number,
-  config: { branches: number; hashRounds: number }) {
+  config: { branches: number; hashRounds: number }, publication?: 'stable' | 'input-changed') {
   const temp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'xio-recovery-bench-')));
   let domain: ExecutionDomain | undefined;
   let runtime: AgentRuntime | undefined;
@@ -179,7 +180,6 @@ async function runSample(mode: typeof modes[number], fault: typeof faults[number
       cleanedForks++;
     }
     const cleanupMs = performance.now() - cleanupStarted;
-    const elapsedMs = performance.now() - started;
     const expected = derive(updated);
     const correctOutputs = ids.filter(id => {
       const agent = runtime!.get(id)!;
@@ -187,12 +187,73 @@ async function runSample(mode: typeof modes[number], fault: typeof faults[number
         && fs.readFileSync(path.join(agent.workspace.forkRoot, 'derived.txt'), 'utf8') === expected;
     }).length;
     const preservedPublications = ids.slice(0, -1).every((id, i) => runtime!.checkpoints(id).at(-1)!.seq === settled[i]);
-    return { mode, fault, trial, ...counters, executionBeforeRecovery,
-      recoveryExecutionToolCalls: counters.executionToolCalls - executionBeforeRecovery,
+    const recoveryExecutionToolCalls = counters.executionToolCalls - executionBeforeRecovery;
+    let publicationResult: {
+      scenario: string; firstStatus: string; finalStatus: string; conflictReason: string | null;
+      staleOutputBlocked: boolean; checkpointsCurrent: boolean; rootCorrect: boolean;
+      commitAttempts: number; commitReplayToolCalls: number; executionToolCalls: number;
+      probeCalls: number; elapsedMs: number; finalTxId: string; validation: string | null;
+      transactionHistoryVerified: boolean;
+    } | null = null;
+    if (publication) {
+      const publicationStarted = performance.now();
+      const executionBefore = counters.executionToolCalls;
+      const probesBefore = counters.probeCalls;
+      let commitReplayToolCalls = 0;
+      let commitAttempts = 0;
+      const currentInput = publication === 'input-changed' ? `changed-again-${trial}` : updated;
+      fs.writeFileSync(path.join(root, 'input.txt'), currentInput);
+      const publish = async () => {
+        const agent = runtime!.get(ids.at(-1)!)!;
+        const log = new WorkspaceCausalGraph(domain!).view(agent.causalHeads!).nodes.map(node => node.observation);
+        commitAttempts++;
+        return supervisor.commitWorkspaceTransaction(agent.workspace!.txId, {
+          observationPolicy: 'always', observations: { closedWorld: true, log,
+            replay: async (entry, context) => {
+              commitReplayToolCalls++;
+              const value = fs.readFileSync(path.join(context, 'input.txt'), 'utf8');
+              if (entry.call.tool === 'read') return hash(value);
+              const result = derive(value);
+              fs.writeFileSync(path.join(context, 'derived.txt'), result);
+              return hash(result);
+            } },
+        });
+      };
+      const first = await publish();
+      const staleOutputBlocked = publication === 'stable' || (first.status === 'conflict'
+        && first.observation?.reason === 'observation_changed' && !fs.existsSync(path.join(root, 'derived.txt')));
+      let final = first;
+      if (publication === 'input-changed') {
+        if (!staleOutputBlocked) throw new Error('OCC failed to block stale recovered output');
+        const refreshed = await refresh('publication', ids);
+        if (refreshed.status !== 'recovered') throw new Error(`Publication refresh: ${refreshed.status}`);
+        final = await publish();
+      }
+      const checkpointsCurrent = ids.every(id => runtime!.get(id)!.checkpoint === derive(currentInput));
+      publicationResult = { scenario: publication, firstStatus: first.status, finalStatus: final.status,
+        conflictReason: first.status === 'conflict' ? first.observation?.reason ?? null : null,
+        staleOutputBlocked, checkpointsCurrent,
+        rootCorrect: fs.existsSync(path.join(root, 'derived.txt'))
+          && fs.readFileSync(path.join(root, 'derived.txt'), 'utf8') === derive(currentInput)
+          && fs.readFileSync(path.join(root, 'input.txt'), 'utf8') === currentInput,
+        commitAttempts, commitReplayToolCalls, executionToolCalls: counters.executionToolCalls - executionBefore,
+        probeCalls: counters.probeCalls - probesBefore, elapsedMs: performance.now() - publicationStarted,
+        finalTxId: final.txId, validation: final.status === 'committed' ? final.validation : null,
+        transactionHistoryVerified: domain.getStore().getJournalEvents(domain.domainId).some(event =>
+          event.type === 'TX_COMMITTED' && event.payload.txId === final.txId)
+          && (first.status !== 'conflict' || domain.getStore().getJournalEvents(domain.domainId).some(event =>
+            event.type === 'TX_CONFLICTED' && event.payload.txId === first.txId)) };
+    }
+    const elapsedMs = performance.now() - started;
+    return { mode, fault, trial, ...counters, executionBeforeRecovery, publication: publicationResult,
+      recoveryExecutionToolCalls,
       recoveryMs, cleanupMs, elapsedMs, historySurvived, preservedPublications, correctOutputs,
       totalOutputs: ids.length, cleanedForks, abandonedForkDisposition: abandoned.fork?.disposition,
       retainedForks: planAgentCausalResourceCleanup(domain).resources.filter(row => row.state === 'open' && row.fork?.disposition === 'retain').length,
-      success: correctOutputs === ids.length && historySurvived && preservedPublications && counters.injectedFaults === 1 };
+      success: correctOutputs === ids.length && historySurvived && preservedPublications && counters.injectedFaults === 1
+        && (!publicationResult || (publicationResult.finalStatus === 'committed' && publicationResult.staleOutputBlocked
+          && publicationResult.rootCorrect && publicationResult.checkpointsCurrent
+          && publicationResult.validation === 'observations' && publicationResult.transactionHistoryVerified)) };
   } finally {
     runtime?.close(); domain?.close();
     fs.rmSync(temp, { recursive: true, force: true });

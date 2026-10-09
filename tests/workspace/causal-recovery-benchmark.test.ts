@@ -21,6 +21,22 @@ describe('causal recovery fault benchmark', () => {
       expect(sample.recoveryMs).toBeGreaterThan(0);
     }
   });
+  it.each(['stable', 'input-changed'] as const)('publishes recovered results with OCC: %s', async publication => {
+    const report = await runCausalRecoveryBenchmark({ trials: 1, branches: 2, hashRounds: 2, publication });
+    expect(report.scope).toBe('recovery-through-occ-publication');
+    for (const sample of report.samples) {
+      expect(sample.success).toBe(true);
+      expect(sample.publication).toMatchObject({ scenario: publication, finalStatus: 'committed',
+        validation: 'observations', transactionHistoryVerified: true,
+        firstStatus: publication === 'stable' ? 'committed' : 'conflict',
+        conflictReason: publication === 'stable' ? null : 'observation_changed',
+        staleOutputBlocked: true, checkpointsCurrent: true, rootCorrect: true,
+        commitAttempts: publication === 'stable' ? 1 : 2,
+        commitReplayToolCalls: publication === 'stable' ? 2 : 3,
+        executionToolCalls: publication === 'stable' ? 0 : sample.mode === 'durable-recovery' ? 2 : 4,
+        probeCalls: publication === 'stable' ? 0 : 2 });
+    }
+  });
   it('rejects invalid workload sizes before allocating resources', async () => {
     await expect(runCausalRecoveryBenchmark({ branches: 1 })).rejects.toThrow('Invalid branches');
     await expect(runCausalRecoveryBenchmark({ trials: 0 })).rejects.toThrow('Invalid trials');

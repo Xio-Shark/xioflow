@@ -9,7 +9,7 @@
 - 要求 deterministic、完整 closedWorld 前缀及逐步哈希；基线缺失失败。 compareAgentCheckpoints：跨 agent / 事务 / Run 对比上下文 JSON Pointer 与因果分支。 compareAgentCheckpointFiles：重建历史工作区并比较实际文件 A/D/M/T。
 - 共享重建 src/agents/checkpoint-workspace.ts；不创建 agent / 消耗 agent step 预算。
 - 宿主保证依赖完整、确定性和文件效果；时间旅行仅 checkpoint 粒度，不重放模型/外部系统。
-- 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。
+- 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。环境需gcc/libc6-dev（缺cc时原生故障套件无法加载）。
 - validateWorkspaceCausalBranches：同一当前基线，逐分支独立 fork 重放，自动发现因果修复种子。
 - 工具异常不进入 changed；每分支首差即停；验证 fork / 基线回收，不改 checkpoint / 不提交。 CAUSAL_VALIDATION_COMPLETED 持久化报告、源分支 heads、基线 SnapshotRef 元数据。
 - listWorkspaceCausalValidations(domain, { runId?, atSeq? }) 支持重开与报告历史切片。
@@ -57,4 +57,4 @@
 - cleanupAgentCausalFork：整个 domain 最新截止点核对→持久请求→既有 abort；只处理已登记 open/conflicted，保留所有基线。共享/pending/当前/committing拒绝，关闭事务不重复回收。
 - 截止点是前置核对，不锁异步文件操作；宿主须停止相关写入/发布并核对外部使用。请求不代表成功，TX_ABORTED reason关联requestSeq；中断需核对磁盘后重新规划。
 - listAgentCausalForkCleanups：runId/txId/atSeq/重开查询pending/aborted/failed；精确关联TX_ABORTED reason，失败持久记录；双重故障抛AggregateError，未决不推断磁盘。
-- benchmark:recovery：真实文件/journal重开，对照持久retry/resume与未完成分支重跑，注入绑定失败/结果记录中断；计工具、探测、分发、恢复耗时与遗留fork。仅checkpoint/隔离输出，不含OCC/模型；12样本正确，执行4→2。下一步：真实进程退出或重开后再次变化与OCC的端到端基准。
+- benchmark:recovery：真实文件/journal重开，对照retry/resume与未完成分支重跑；绑定失败/结果记录中断。可选第四参数stable/input-changed，schemaVersion=2接通恢复→强制OCC→变化拒绝→全批刷新→代表输出提交。12变化样本正确，总执行8→4，提交重放均3；见causal-recovery-occ.sample.json。下一步：真实进程退出/恢复中输入变化；当前发布非多事务原子提交，不运行模型。
