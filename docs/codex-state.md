@@ -57,4 +57,4 @@
 - resumeAgentSharedCausalRefreshWithPolicy：完整pending批次成本选择validate/recompute；正常验证拒绝自动宿主重建，异常抛出。planAgentCausalResumePolicy纯查询，概率/有限成本/溢出检查，持平验证。
 - recompute逐项返回完整checkpoint/heads/独立workspace，沿用冻结版本核对、原preparation发布和重叠保护；保留已发布项及旧共享资源。SELECTED/COMPLETED/FAILED事件关联决策/拒绝证据/耗时；批次完成须核对outcomes，文件仍需OCC。 listAgentCausalResumeTelemetry按taskKey/runId/atSeq/重开查询；SELECTED携带forecastUnit(ms/host)，结果持久phases(验证+续跑/重算)、outcomes计数，显式ms才算预测误差；旧缺测量不补零、未决pending。
 - estimateAgentCausalResumeHistory：taskKey+精确pending数量，冻结滑动窗口训练完整成功验证路径；失败/未决/缺测/直接重算分列。accepted含验证与分发，resume=0仅编码；heldOut阶段MAE/Brier，输出大小宿主taskKey分档，显式采用。
-- 下一步：接真实恢复基准做多规模独立训练/验证；检验拒绝后重算成本能否代表直接重算，避免选择偏差，不宣称生产/token收益。
+- NORTH_STAR.md 为最新优先级：先收敛成果有效性发布契约，成本预测与基准扩展后置。publication 接入既有 commit 队列：覆盖未知拒绝、准备候选指纹、强制重放、实际发布目录只读验收；TX_COMMITTING 保存来源指纹，续提核对，拒绝记录 TX_PUBLICATION_REJECTED。见 workspace-publication.md。下一轮补统一句柄类型/状态表和终态提交身份；尚非 openWorld/M1/M2，宿主须保持 fork 静止。

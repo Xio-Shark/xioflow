@@ -89,7 +89,24 @@ export type CommitResult =
   | ({ status: 'committed'; txId: string; validation: CommitValidation } & TransactionEffects)
   | ({ status: 'conflict'; txId: string; conflicts: TransactionConflict[]; observation?: ObservationOutcome } & TransactionEffects);
 
+export class WorkspacePublicationError extends Error {
+  constructor(public readonly reason: 'coverage_unknown' | 'output_changed' | 'acceptance_rejected' | 'validation_failed') {
+    super(`Workspace publication rejected: ${reason}`);
+    this.name = 'WorkspacePublicationError';
+  }
+}
+
+export interface WorkspacePublicationValidation {
+  /** Host attests that the snapshot coverage and observation log cover every dependency. */
+  coverage: 'complete' | 'unknown';
+  /** Prepared fork fingerprint, computed against the transaction base snapshot. */
+  outputFingerprint: string;
+  /** Read-only business acceptance on the actual replay output, before publication. */
+  accept(root: string): Promise<boolean>;
+}
+
 export interface CommitOptions {
+  publication?: WorkspacePublicationValidation;
   observations?: ObservationValidation;
   /** Always replay on the current world, even without file conflicts or read tracking.
    * Requires a complete observation log. Default: 'on_conflict'.
@@ -103,6 +120,7 @@ interface CommitPlan {
   sourceRoot: string;
   validation: CommitValidation;
   replay?: { forkPath: string; snapshotId: string };
+  publication?: { sourceFingerprint: string; snapshotId: string };
 }
 
 export interface TransactionHost {
@@ -225,12 +243,26 @@ export class WorkspaceTransactions {
         sourceRoot: p.sourceRoot ?? tx.forkRoot,
         validation: p.validation ?? (p.effects.readSet === null ? 'write_only' : 'files'),
         replay: p.replay,
+        publication: p.publication,
       };
       if (!fs.existsSync(plan.sourceRoot)) {
         throw new Error(`Workspace transaction "${txId}" cannot finish committing: ${plan.sourceRoot} is gone`);
       }
     } else {
-      const alwaysReplay = options?.observationPolicy === 'always';
+      if (options?.publication) {
+        const gate = options.publication;
+        if (gate.coverage !== 'complete') this.rejectPublication(tx, 'coverage_unknown');
+        try {
+          const base = this.host.domain.getStore().getSnapshot(tx.baseSnapshotId);
+          if (!base) throw new Error('Missing publication baseline');
+          const actual = await this.host.snapshotDriver.fingerprint([tx.forkRoot], { against: base });
+          if (actual !== gate.outputFingerprint) this.rejectPublication(tx, 'output_changed');
+        } catch (error) {
+          if (error instanceof WorkspacePublicationError) throw error;
+          this.rejectPublication(tx, 'validation_failed');
+        }
+      }
+      const alwaysReplay = options?.publication !== undefined || options?.observationPolicy === 'always';
       if (alwaysReplay && (!options.observations || options.observations.closedWorld !== true
         || options.observations.log.some((entry) => entry.kind === 'observe'
           && (typeof entry.resultHash !== 'string' || !entry.resultHash.trim())))) {
@@ -247,6 +279,32 @@ export class WorkspaceTransactions {
         plan = byObservation.plan;
         fileConflicts = conflicts;
       }
+    }
+
+    if (!committing && options?.publication) {
+      try {
+        const snapshotId = plan.replay!.snapshotId;
+        const snapshot = this.host.domain.getStore().getSnapshot(snapshotId);
+        if (!snapshot) throw new Error('Missing publication replay baseline');
+        const sourceFingerprint = await this.host.snapshotDriver.fingerprint([plan.sourceRoot], { against: snapshot });
+        if (await options.publication.accept(plan.sourceRoot) !== true) {
+          this.rejectPublication(tx, 'acceptance_rejected');
+        }
+        const after = await this.host.snapshotDriver.fingerprint([plan.sourceRoot], { against: snapshot });
+        if (after !== sourceFingerprint) this.rejectPublication(tx, 'output_changed');
+        plan.publication = { sourceFingerprint, snapshotId };
+      } catch (error) {
+        await this.discardReplayFork(tx);
+        if (error instanceof WorkspacePublicationError) throw error;
+        this.rejectPublication(tx, 'validation_failed');
+      }
+    }
+    // A persisted application plan must never apply a tampered recovery source.
+    if (committing && plan.publication) {
+      const snapshot = this.host.domain.getStore().getSnapshot(plan.publication.snapshotId);
+      if (!snapshot) this.rejectPublication(tx, 'validation_failed');
+      const actual = await this.host.snapshotDriver.fingerprint([plan.sourceRoot], { against: snapshot });
+      if (actual !== plan.publication.sourceFingerprint) this.rejectPublication(tx, 'output_changed');
     }
 
     const { effects, validation } = plan;
@@ -284,6 +342,11 @@ export class WorkspaceTransactions {
     }
     this.open.delete(txId);
     return { status: 'committed', txId, validation, ...effects };
+  }
+
+  private rejectPublication(tx: OpenTransaction, reason: WorkspacePublicationError['reason']): never {
+    this.record(tx.runId, 'TX_PUBLICATION_REJECTED', { txId: tx.txId, reason });
+    throw new WorkspacePublicationError(reason);
   }
 
   private conflicted(

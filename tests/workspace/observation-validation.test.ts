@@ -275,6 +275,77 @@ describe('commit with observation validation', () => {
     }
   }
 
+  async function publication(tx: { baseSnapshotId: string; forkRoot: string }) {
+    const base = domain.getStore().getSnapshot(tx.baseSnapshotId)!;
+    return {
+      coverage: 'complete' as const,
+      outputFingerprint: await supervisor.getSnapshotDriver().fingerprint([tx.forkRoot], { against: base }),
+      accept: vi.fn(async (_root: string) => true),
+    };
+  }
+
+  it.each(['unknown', 'tampered', 'rejected', 'throws', 'mutates'] as const)(
+    'rejects publication %s before changing the main workspace', async mode => {
+      const { repo, tx, log } = await unobserved(`publication-${mode}`);
+      const gate = await publication(tx);
+      const before = fs.readFileSync(path.join(repo, 'src/util.mjs'), 'utf8');
+      if (mode === 'tampered') fs.appendFileSync(path.join(tx.forkRoot, 'src/util.mjs'), '// corrupt');
+      if (mode === 'rejected') gate.accept.mockImplementation(async () => false);
+      if (mode === 'throws') gate.accept.mockImplementation(async () => { throw new Error('oracle unavailable'); });
+      if (mode === 'mutates') gate.accept.mockImplementation(async root => {
+        fs.appendFileSync(path.join(root, 'src/util.mjs'), '// illegal oracle write'); return true;
+      });
+      const reason = mode === 'unknown' ? 'coverage_unknown' : mode === 'rejected' ? 'acceptance_rejected'
+        : mode === 'throws' ? 'validation_failed' : 'output_changed';
+      await expect(supervisor.commitWorkspaceTransaction(tx.txId, {
+        observations: observations(log), publication: { ...gate, coverage: mode === 'unknown' ? 'unknown' : 'complete' },
+      })).rejects.toMatchObject({ reason });
+      expect(fs.readFileSync(path.join(repo, 'src/util.mjs'), 'utf8')).toBe(before);
+      expect(events('TX_COMMITTING')).toHaveLength(0);
+      expect(events('TX_PUBLICATION_REJECTED').at(-1)?.payload).toMatchObject({ txId: tx.txId, reason });
+      expect(leftovers()).toEqual([`fork-publication-${mode}`]);
+      if (mode === 'unknown' || mode === 'tampered') expect(gate.accept).not.toHaveBeenCalled();
+    });
+
+  it('accepts the actual replay output and records its publication seal', async () => {
+    const { repo, tx, log } = await unobserved('publication-valid');
+    const gate = await publication(tx);
+    gate.accept.mockImplementation(async root => {
+      expect(root).not.toBe(tx.forkRoot);
+      return fs.readFileSync(path.join(root, 'src/util.mjs'), 'utf8').includes('function bar()');
+    });
+    expect(await supervisor.commitWorkspaceTransaction(tx.txId, {
+      observations: observations(log), publication: gate,
+    })).toMatchObject({ status: 'committed', validation: 'observations' });
+    expect(events('TX_COMMITTING').at(-1)?.payload.publication).toMatchObject({
+      sourceFingerprint: expect.any(String), snapshotId: expect.any(String),
+    });
+    expect(fs.readFileSync(path.join(repo, 'src/util.mjs'), 'utf8')).toContain('function bar()');
+    expect(leftovers()).toEqual([]);
+  });
+
+  it('refuses a corrupted sealed source after reopening an interrupted commit', async () => {
+    const { repo, tx, log } = await unobserved('publication-recovery');
+    const gate = await publication(tx);
+    const store = domain.getStore();
+    const record = store.recordJournalEvent.bind(store);
+    const interrupted = vi.spyOn(store, 'recordJournalEvent').mockImplementation(event => {
+      const seq = record(event);
+      if (event.type === 'TX_COMMITTING') throw new Error('simulated crash');
+      return seq;
+    });
+    await expect(supervisor.commitWorkspaceTransaction(tx.txId, {
+      observations: observations(log), publication: gate,
+    })).rejects.toThrow('simulated crash');
+    interrupted.mockRestore();
+    const source = events('TX_COMMITTING').at(-1)!.payload.sourceRoot as string;
+    fs.appendFileSync(path.join(source, 'src/util.mjs'), '// corrupt after crash');
+    supervisor = new ProcessSupervisor(domain);
+    await expect(supervisor.commitWorkspaceTransaction(tx.txId)).rejects.toMatchObject({ reason: 'output_changed' });
+    expect(events('TX_COMMITTED')).toHaveLength(0);
+    expect(fs.readFileSync(path.join(repo, 'src/util.mjs'), 'utf8')).toContain('function foo()');
+  });
+
   it('always replays without file conflicts and commits from the verified fork on noatime', async () => {
     const { repo, tx, log } = await unobserved('always-valid');
     const validation = observations(log);

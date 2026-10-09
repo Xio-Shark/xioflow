@@ -24,6 +24,7 @@ export * from './agents/causal-recovery-history.js';
 export * from './agents/workspace-resources.js';
 export * from './snapshot/git-shadow.js';
 export type {
+  WorkspacePublicationValidation,
   CommitOptions,
   CommitResult,
   CommitValidation,
@@ -52,3 +53,5 @@ export { listWorkspaceCausalRefreshTelemetry } from './workspace/causal-refresh-
 export type { CausalRefreshTelemetry, CausalRefreshCallbackMeasurement } from './workspace/causal-refresh-telemetry.js';
 export * from './workspace/speculation.js';
 export * from './workspace/causal-refresh-history.js';
+
+export { WorkspacePublicationError } from './workspace/transactions.js';

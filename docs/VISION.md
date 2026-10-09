@@ -18,6 +18,8 @@ xioflow 的目标是让多个 agent 在同一个不断变化的世界中投机�
 
 恢复调度新增 `resumeAgentSharedCausalRefreshWithPolicy`：按完整 pending 批次的验证、分发与拒绝后重算成本，选择验证续跑或直接重建；决策和实际路径持久可查，预测不替代有效性证据。恢复策略现有持久阶段耗时、逐项成功/失败计数和显式毫秒预测误差，可按任务类别冻结历史窗口查询，为成本校准提供实测反馈。新增冻结窗口历史估计：按任务类别和 pending 数量拟合恢复成本，以后续决策验证 MAE/Brier，宿主显式采用。见[成本策略](causal-recovery-batches.md#按总成本选择持久恢复路径)。
 
+提交现可通过 `publication` 将覆盖声明、准备输出指纹、实际重放目录的业务验收接入现有 OCC；通过后的来源指纹持久保存，中断续提时核对。见[发布验证](workspace-publication.md)。产品收敛优先级以 [NORTH_STAR](NORTH_STAR.md) 为准。
+
 ## 核心抽象
 
 - **世界版本**：已有 snapshot / fork / rollback 定义文件系统的版本与分支；外部系统需要显式的版本化适配器。
