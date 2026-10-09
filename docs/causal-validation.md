@@ -149,3 +149,31 @@ console.log({ actualCalls: report.replayedSteps, reusedCalls: report.reusedSteps
 `pnpm benchmark:probe-reuse [branches] [trials]` 对真实文件的共享读取和独立写入进行探测对照，默认四分支、三轮，轮换策略次序，输出 JSON 原始样本、工具次数、耗时与正确性。无变化时实际工具调用为 8→5，共享输入变化时为 4→1；两种策略都保留独立 fork 成本。此基准仅衡量探测，不包含修复 / 提交，不代表端到端加速或模型 token 收益（`modelTokens: null`）。
 
 本轮[原始样本](benchmarks/causal-probe-reuse.sample.json)共 12 次探测全部正确；无变化中位耗时约 94.69→89.55 ms，输入变化约 98.40→93.25 ms。微小耗时差异受环境影响，工具次数是该固定任务下更稳定的指标。
+
+## 按预计成本选择增量修复或完整重算
+
+刷新入口可选 `costModel`，在探测发现变化后为选中联合视图的每个节点估算执行、复用验证和提交重放成本。内核按共享节点去重，比较两种方案的剩余成本；完整重算严格更便宜才选择 `full`，相等时保留 `incremental`。不提供模型时仍只做增量修复。
+
+```ts
+const result = await refreshWorkspaceCausalBranches(supervisor, {
+  ...refreshOptions,
+  // Example estimates in tool-call units; calibrate against your adapter.
+  costModel: node => ({
+    execute: 1,
+    reuse: node.observation.kind === 'mutate' ? 2 : 1,
+    replay: 1,
+  }),
+});
+if (result.status === 'committed' || result.status === 'conflict') {
+  console.log(result.decision); // strategy, incremental/full cost breakdowns
+  console.log(result.validation.replayedSteps); // actual probe calls already spent
+}
+```
+
+成本模型必须使用同一单位，返回有限非负数。`execute` 包含重算该节点的全部工作，`reuse` 包含复用证据检查和保留输出的物化，`replay` 包含提交时再次执行该节点的成本。估算器收到节点副本；无变化或探测失败时不会调用估算器。无效值、溢出或估算器异常会在创建修复事务前抛出，已完成的探测报告仍保留。
+
+两种预计总成本分别为 `失效节点执行 + 未失效节点复用 + 全部节点提交重放` 与 `全部节点执行 + 全部节点提交重放`。探测已经发生，不计入剩余成本；相同的事务固定开销也不计入。估算不是实测，当前不避免探测成本、不预测重试或证明耗时 / token 节省。批量复用的非线性成本需要宿主分摊到节点；公开的 `planWorkspaceCausalRefresh(plan, costModel)` 可单独对已有因果计划进行成本分析。
+
+`full` 在新事务中拓扑重算所选 heads 的整个联合祖先视图，不包含未选中的兄弟分支，共享节点仍只执行一次。`validateReuse` 收到空数组；宿主应能处理没有复用结果的情况。分支 heads 和替代关系继续通过既有修复 journal 保存；原始探测的 `changed` 仍仅表示实际发现的变化。两种策略发布时都完整重放观测并执行 OCC。
+
+准备成功的 `CAUSAL_VALIDATION_REPAIR_PREPARED` 事件新增可选 `decision`，保存所选策略及两种预计成本，可在重开 domain 后沿 `validationSeq → txId` 审计。旧事件无需迁移；未提供成本模型时仍写入原格式。准备失败不会写入该关联事件。

@@ -41,4 +41,5 @@ export * from './workspace/causal-graph.js';
 export * from './workspace/causal-repair.js';
 export * from './workspace/causal-validation.js';
 export * from './workspace/causal-refresh.js';
+export * from './workspace/causal-refresh-cost.js';
 export * from './workspace/speculation.js';

@@ -1,6 +1,8 @@
 import type { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { WorkspaceCausalGraph } from './causal-graph.js';
 import type { CommitResult } from './transactions.js';
+import { planWorkspaceCausalRefresh, type CausalRefreshCostModel,
+  type CausalRefreshDecision } from './causal-refresh-cost.js';
 import { prepareWorkspaceBranchRepair, type WorkspaceBranchRepairOptions,
   type WorkspaceBranchRepairResult } from './causal-repair.js';
 import { validateWorkspaceCausalBranches, type CausalValidationOptions,
@@ -8,16 +10,19 @@ import { validateWorkspaceCausalBranches, type CausalValidationOptions,
 
 export interface WorkspaceCausalRefreshOptions extends CausalValidationOptions {
   repair: Pick<WorkspaceBranchRepairOptions, 'txId' | 'forkPath' | 'validateReuse' | 'execute'>;
+  /** Opt in to choosing incremental repair or full selected-union recomputation. */
+  costModel?: CausalRefreshCostModel;
 }
 
 export type WorkspaceCausalRefreshResult =
   | { status: 'failed' | 'unchanged'; validation: CausalValidationResult }
-  | { status: 'prepared'; validation: CausalValidationResult; repair: WorkspaceBranchRepairResult };
+  | { status: 'prepared'; validation: CausalValidationResult; repair: WorkspaceBranchRepairResult;
+      decision?: CausalRefreshDecision };
 
 export type WorkspaceCausalRefreshCommitResult =
   | { status: 'failed' | 'unchanged'; validation: CausalValidationResult }
   | { status: 'committed' | 'conflict'; validation: CausalValidationResult;
-      repair: WorkspaceBranchRepairResult; commit: CommitResult };
+      repair: WorkspaceBranchRepairResult; commit: CommitResult; decision?: CausalRefreshDecision };
 
 /** Refresh compatible branches and publish their union with mandatory observation replay.
  * The selected union must be a complete deterministic operation log, including reused nodes.
@@ -59,7 +64,7 @@ export async function refreshWorkspaceCausalBranches(
   } catch (error) {
     throw new Error(`Causal refresh ${tx.txId} ${commit.status}; cleanup incomplete`, { cause: error });
   }
-  return { status: commit.status, validation, repair: {
+  return { status: commit.status, validation, ...(prepared.decision ? { decision: prepared.decision } : {}), repair: {
     ...repair, transaction: { ...tx, status: commit.status === 'committed' ? 'committed' : 'aborted' },
   }, commit };
 }
@@ -74,15 +79,20 @@ export async function prepareWorkspaceCausalRefresh(
   const validation = await validateWorkspaceCausalBranches(supervisor, options);
   if (validation.branches.some((branch) => branch.status === 'failed')) return { status: 'failed', validation };
   if (!validation.changed.length) return { status: 'unchanged', validation };
+  const decision = options.costModel ? planWorkspaceCausalRefresh(validation.plan, options.costModel) : undefined;
+  const changed = decision?.strategy === 'full'
+    ? [...validation.plan.invalidated, ...validation.plan.unaffected].map(node => node.seq).sort((a, b) => a - b)
+    : validation.changed;
   const repair = await prepareWorkspaceBranchRepair(supervisor, {
     ...options.repair, runId: validation.runId, root: validation.root,
-    atSeq: validation.atSeq, branches: validation.sourceBranches, changed: validation.changed,
+    atSeq: validation.atSeq, branches: validation.sourceBranches, changed,
   });
   const domain = supervisor.getDomain();
   try {
     domain.getStore().recordJournalEvent({
       domainId: domain.domainId, runId: validation.runId, type: 'CAUSAL_VALIDATION_REPAIR_PREPARED',
-      payload: { version: 1, validationSeq: validation.seq, txId: repair.transaction.txId },
+      payload: { version: 1, validationSeq: validation.seq, txId: repair.transaction.txId,
+        ...(decision ? { decision } : {}) },
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -94,5 +104,5 @@ export async function prepareWorkspaceCausalRefresh(
     }
     throw error;
   }
-  return { status: 'prepared', validation, repair };
+  return { status: 'prepared', validation, repair, ...(decision ? { decision } : {}) };
 }

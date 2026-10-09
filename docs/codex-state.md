@@ -7,18 +7,14 @@
 - view(heads) 显式选择分支；修复返回新 heads，支持连续多轮修复。
 - speculateWorkspace：OCC 冲突后最多一次 repair 与再提交。
 - commitPolicy first_valid / all_valid；后者依声明顺序合并 OCC 有效结果。
-- winners 为全部胜者；批次非原子，异常不撤销已提交项，journal 为提交事实。
 - AgentRuntime create / step 原子持久化 causalHeads 与 checkpoint。
 - heads 引用同 domain 已有节点；null 未跟踪，[] 显式空分支。
 - checkpoints / checkpointCausalView 查询历史；restore / recover 不回退预算。
 - planCausalRecovery(changed)：跨 agent 失效与历史候选查询，不证明当前世界有效。
 - recoverCausalCheckpoint：检查 checkpoint 序号、独占恢复、绑定宿主重建结果。
-- preparation 返回 checkpoint / 显式 heads / open workspace；discard 回收失败资源。
 - causal_repaired 原子保存上下文 / heads / workspace；成功后 paused。
 - recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。
 - prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。
-- branches 为唯一 id / heads；联合视图拓扑执行，返回各分支 sourceHeads / 新 heads。
-- 复用证据统一验证；独立 / 空分支保留，排除未选兄弟；支持连续修复。
 - recoverAgentSharedCausalBatch：一次共享重算，逐项绑定独立事务与上下文。
 - 校验分支 id / sourceHeads 与 checkpoint；新 heads 自动绑定，回调收到副本。
 - 单事务单活跃 agent；宿主 bind 负责独立输出分发和上下文重建。
@@ -28,7 +24,6 @@
 - compareAgentCheckpoints：跨 agent / 事务 / Run 对比上下文 JSON Pointer 与因果分支。
 - compareAgentCheckpointFiles：重建历史工作区并比较实际文件 A/D/M/T。
 - 共享重建 src/agents/checkpoint-workspace.ts；不创建 agent / 消耗 agent step 预算。
-- 无文本 patch / 空目录 / 时间戳 / 外部系统 diff；快照覆盖遵循 Git 忽略规则。
 - 宿主保证依赖完整性、确定性和文件效果，哈希匹配不能证明这些声明。
 - 时间旅行是 checkpoint 粒度，不是任意序号回滚，不重放模型或外部系统。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。
@@ -50,11 +45,16 @@
 - validate / prepare refresh / refresh 支持 replayReuse: baseline_observations（默认 none）。
 - 单次基线按 seq 复用 mutation 前纯观测；错误不缓存、不同节点不合并；提交完整重放。
 - 适配器须纯文件观测、与 fork 路径 / 内存副作用无关；缓存不跨调用或修复。
-- 持久报告新增 replayReuse / reusedSteps；旧 v1 查询补 none / 0。
 - benchmark:probe-reuse 仅探测；benchmark:refresh 四模式计入修复 / 复用 / 强制提交。
 - refresh 新增 --shared / --change-shared，共享祖先加独立输入，支持四种变化场景。
 - 四分支总调用普通→缓存：无变化 12→9，局部 29→26，全部独立 26→23，共享变化 22→19。
 - 受验证模式 36/36 正确；有变化时仍多于完整重跑 18 次，无稳定耗时收益，无模型 token。
 - 原始数据 docs/benchmarks/causal-refresh-shared.sample.json；协议 docs/causal-refresh-benchmark.md。
-- 下一步：基于完整验证成本选择重跑 / 增量修复；或独立输出 / checkpoint 发布协调。
-- 最新验证：pnpm typecheck / build / 基准 CLI 通过；pnpm test 631 通过 / 7 跳过（112.21 秒）。
+- refresh / prepare refresh 可选 costModel；planWorkspaceCausalRefresh 可纯查询比较成本。
+- 每节点 execute / reuse / replay 同单位有限非负估算；溢出或异常在修复事务前拒绝。
+- 比较增量重算+复用验证+完整提交重放与全部重算+完整提交重放；相等保留增量。
+- full 只重算选中联合祖先，共享节点一次；validateReuse 收到 []，保留强制 OCC。
+- 返回 decision；关联事件可选 decision 持久保存策略及成本，旧行为 / 事件兼容。
+- 先探测再决策；估算不包含已发生探测和相同固定开销，不声称实测或 token 收益。
+- 下一步：将自适应选择接入端到端基准，校准估算误差与实际总调用 / 耗时。
+- 最新验证：补齐 gcc / libc6-dev；pnpm typecheck 通过，pnpm test 639 通过 / 7 跳过（117.37 秒）。

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, validateWorkspaceCausalBranches, prepareWorkspaceBranchRepair, listWorkspaceCausalValidations, prepareWorkspaceCausalRefresh, refreshWorkspaceCausalBranches } from '../../src/index.js';
+import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, validateWorkspaceCausalBranches, prepareWorkspaceBranchRepair, listWorkspaceCausalValidations, prepareWorkspaceCausalRefresh, refreshWorkspaceCausalBranches, planWorkspaceCausalRefresh } from '../../src/index.js';
 import type { CausalStep } from '../../src/index.js';
 
 describe('workspace causal validation', () => {
@@ -258,6 +258,101 @@ describe('workspace causal validation', () => {
     expect(listWorkspaceCausalValidations(domain)[0]).toEqual(result);
   });
 
+  it.each([0, 1, 4])('selects and publishes using reuse cost %s', async (reuseCost) => {
+    fs.writeFileSync(path.join(root, 'stable.txt'), 'stable');
+    const stable = graph.record({ ...step('a'), observation: {
+      kind: 'observe', call: { tool: 'read', args: { path: 'stable.txt' } }, resultHash: 'stable',
+    } });
+    const input = graph.record(step('a'));
+    const outputs = ['a', 'b'].map(txId => graph.record({ ...step(txId, [stable.seq, input.seq]),
+      observation: { kind: 'mutate', call: { tool: 'write', args: { path: `${txId}.txt` } }, resultHash: 'old' },
+    }));
+    // An unselected sibling must never enter full recomputation.
+    const sibling = graph.record(step('b'));
+    fs.writeFileSync(path.join(root, 'input.txt'), 'new');
+    const replay = vi.fn(async (entry: CausalStep['observation'], dir: string) => {
+      if (entry.kind === 'observe') return fs.readFileSync(path.join(dir, String(entry.call.args.path)), 'utf8');
+      const value = fs.readFileSync(path.join(dir, 'input.txt'), 'utf8');
+      fs.writeFileSync(path.join(dir, String(entry.call.args.path)), value);
+      return value;
+    });
+    const executed: number[] = [];
+    const full = reuseCost > 1;
+    const result = await refreshWorkspaceCausalBranches(supervisor, {
+      ...options(outputs.map((node, i) => ({ id: String(i), heads: [node.seq] }))), replay,
+      costModel: () => ({ execute: 1, reuse: reuseCost, replay: 2 }),
+      repair: { txId: 'adaptive', forkPath: path.join(temp, 'adaptive'),
+        validateReuse: async (_tx, nodes) => {
+          expect(nodes.map(node => node.seq)).toEqual(full ? [] : [stable.seq]);
+        },
+        execute: async (source, tx, dependencies) => {
+          executed.push(source.seq);
+          if (source.observation.kind === 'mutate') {
+            expect(dependencies.map(node => node.observation.resultHash)).toEqual(['stable', 'new']);
+          }
+          return { actorId: source.actorId, observation: {
+            ...source.observation, resultHash: await replay(source.observation, tx.forkRoot),
+          } };
+        },
+      },
+    });
+    expect(result.status).toBe('committed');
+    if (result.status !== 'committed') throw new Error('Expected publication');
+    expect(result.decision).toEqual({ strategy: full ? 'full' : 'incremental',
+      incremental: { execution: 3, reuseValidation: reuseCost, commitReplay: 8, total: 11 + reuseCost },
+      full: { execution: 4, reuseValidation: 0, commitReplay: 8, total: 12 },
+    });
+    expect(executed).toEqual(full ? [stable.seq, input.seq, ...outputs.map(node => node.seq)]
+      : [input.seq, ...outputs.map(node => node.seq)]);
+    expect(executed).not.toContain(sibling.seq);
+    expect(result.commit).toMatchObject({ validation: 'observations' });
+    expect(replay.mock.calls.slice(-4).map(([entry]) => entry.call.args.path))
+      .toEqual(['stable.txt', 'input.txt', 'a.txt', 'b.txt']);
+    expect(fs.readFileSync(path.join(root, 'a.txt'), 'utf8')).toBe('new');
+    expect(fs.readFileSync(path.join(root, 'b.txt'), 'utf8')).toBe('new');
+    expect(result.repair.branches.map(branch => branch.sourceHeads)).toEqual(outputs.map(node => [node.seq]));
+    expect(fs.existsSync(path.join(temp, 'adaptive'))).toBe(false);
+    domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal');
+    expect(domain.getStore().getJournalEvents(domain.domainId)
+      .find(event => event.type === 'CAUSAL_VALIDATION_REPAIR_PREPARED')?.payload)
+      .toMatchObject({ validationSeq: result.validation.seq, txId: 'adaptive', decision: result.decision });
+  });
+
+  it.each([-1, NaN, Infinity, Number.MAX_VALUE])('rejects invalid or overflowing costs before allocating repair: %s', async (cost) => {
+    const input = graph.record(step('a'));
+    fs.writeFileSync(path.join(root, 'input.txt'), 'new');
+    const execute = vi.fn();
+    await expect(prepareWorkspaceCausalRefresh(supervisor, {
+      ...options([{ id: 'a', heads: [input.seq] }]),
+      costModel: () => ({ execute: cost, reuse: cost, replay: cost }),
+      repair: { txId: 'invalid-cost', forkPath: path.join(temp, 'invalid-cost'),
+        execute, validateReuse: async () => {} },
+    })).rejects.toThrow(/cost/);
+    expect(execute).not.toHaveBeenCalled();
+    expect(domain.getStore().getJournalEvents(domain.domainId)
+      .some(event => event.type === 'TX_BEGUN' && event.payload.txId === 'invalid-cost')).toBe(false);
+  });
+
+  it('isolates estimator mutations and accounts for weighted full-union replay', () => {
+    const first = graph.record(step('a'));
+    const second = graph.record(step('b'));
+    const plan = graph.planRecomputation([first.seq], second.seq, [first.seq, second.seq]);
+    const saved = structuredClone(plan);
+    const estimate = vi.fn((node) => {
+      const execute = node.seq === first.seq ? 10 : 20;
+      node.dependsOn.push(999);
+      node.observation.resultHash = 'tampered';
+      return { execute, reuse: 30, replay: 5 };
+    });
+    expect(planWorkspaceCausalRefresh(plan, estimate)).toEqual({ strategy: 'full',
+      incremental: { execution: 10, reuseValidation: 30, commitReplay: 10, total: 50 },
+      full: { execution: 30, reuseValidation: 0, commitReplay: 10, total: 40 },
+    });
+    expect(estimate).toHaveBeenCalledTimes(2);
+    expect(plan).toEqual(saved);
+  });
+
   it('automatically prepares shared changes once and links the repair to its durable probe', async () => {
     const input = graph.record(step('a'));
     const output = (txId: string) => graph.record({ ...step(txId, [input.seq]), observation: {
@@ -382,9 +477,11 @@ describe('workspace causal validation', () => {
     const independent = graph.record(step('b'));
     const execute = vi.fn();
     const validateReuse = vi.fn();
+    const costModel = vi.fn();
     let calls = 0;
     const result = await refreshWorkspaceCausalBranches(supervisor, {
       ...options([{ id: 'left', heads: [input.seq] }, { id: 'right', heads: [independent.seq] }]),
+      costModel,
       replay: async () => {
         if (status === 'unchanged') return 'old';
         if (++calls === 1) return 'new';
@@ -395,6 +492,7 @@ describe('workspace causal validation', () => {
     expect(result.status).toBe(status);
     expect(execute).not.toHaveBeenCalled();
     expect(validateReuse).not.toHaveBeenCalled();
+    expect(costModel).not.toHaveBeenCalled();
     expect(listWorkspaceCausalValidations(domain)).toEqual([result.validation]);
     expect(domain.getStore().getJournalEvents(domain.domainId)
       .some((event) => event.payload.txId === 'refresh')).toBe(false);
