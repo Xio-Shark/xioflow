@@ -780,5 +780,5 @@
 - 排空后持久中止open/conflicted候选，再复用共享fork清理；精确释放自有checkpoint占用，不改写历史/预算。
 - 保留其他agent引用、历史基线、committing及绑定key但结果缺失/未决的来源；清理失败重开可重试。
 - 重开后中止候选提交明确rejected/candidate_abandoned；固定历史查询不变。
-- 验证：handle/resources/commit共38项及typecheck通过；新增重开、失败清理重试、其他agent引用和缺失发布结果覆盖。
+- 验证：world相关38项、causal-checkpoints 85项及typecheck通过；新增重开、失败清理重试、其他agent引用和缺失发布结果覆盖。
 - 本轮剩余不足5分钟未跑全量，下一轮先补跑；M2仍缺冻结类型/失败查询收口及六场景完整验收。

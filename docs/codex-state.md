@@ -55,7 +55,6 @@
 - 本轮M2：内部closeWorldResources复用共享规划/清理，持久WORLD_RESOURCES_CLOSED后释放domain；重复调用返回独立副本，不重复回收。
 - readWorldClose按固定ref重开只读查询；清理失败逐项记录，报告落盘失败不宣称关闭；新会话可重试失败清理。
 - 本轮M2：内部openWorld组合runAgentStep/refresh/explain/strict commit/close；同步停止接收并等待全部已接收操作结束后清理，失败操作不阻断关闭。
-- close重复调用返回独立报告；落盘失败可重试close但不恢复接收；refresh传递agent，重开缺驱动仅新推理failed，查询/复用可用。
 - 未公开API；explain组合结构未符合冻结WorldHandle全部类型/失败查询；未发布候选已中止并按归属清理；初始化中断仍拒绝重开，无自动恢复。
 - 本轮M2：close持久abandon后释放精确自有checkpoint引用并清理fork；保留其他agent引用、历史基线和缺结果/未决key，重开提交拒绝abandoned。
-- 验证：handle/resources/commit共38项及typecheck通过；本轮剩余不足5分钟未跑全量，下一轮第一件事补跑。
+- 验证：world相关38项、causal-checkpoints 85项及typecheck通过；本轮剩余不足5分钟未跑全量，下一轮第一件事补跑。
