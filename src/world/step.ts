@@ -5,7 +5,7 @@ import { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
 import { WorkspaceCausalGraph } from '../workspace/causal-graph.js';
 import type { ObservationEntry } from '../workspace/transactions.js';
-import { restoreWorldRevision, type openWorldState } from './state.js';
+import { fingerprintWorldOutput, restoreWorldRevision, type openWorldState } from './state.js';
 
 type WorldState = Awaited<ReturnType<typeof openWorldState>>;
 const active = new WeakSet<WorldState['domain']>();
@@ -79,7 +79,7 @@ export async function executeWorldStep(world: WorldState, input: AgentData, exec
     const agent = runtime.get(id)!;
     if (agent.status !== 'completed') throw new Error(agent.error ?? agent.reason ?? 'World agent did not complete');
     await restoreWorldRevision(world, version);
-    const outputFingerprint = await new GitShadowSnapshotDriver().fingerprint([workspace.forkRoot], { against: snapshot });
+    const outputFingerprint = await fingerprintWorldOutput(workspace.forkRoot, state.coverage, snapshot);
     const atSeq = append('WORLD_STEP_COMPLETED', { snapshotId: state.snapshotId, outputFingerprint,
       checkpoint: agent.checkpoint, causalHeads: agent.causalHeads, forkRoot: workspace.forkRoot });
     return { status: 'executed' as const, id, txId: id, atSeq, outputFingerprint,

@@ -2,59 +2,35 @@
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约已冻结，统一公开入口待M2实现；M3/M4未完成。
 - 下一轮最小切片：用持久验证version接入既有修复准备，在固定基线上重验复用节点并物化/核验产物；异常阻断，不扩大公开入口。
-- M2 完成标准仍缺：统一句柄、增量refresh、完整explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
-- M1：docs/world-contract.md 冻结六入口状态表、适配器覆盖和六类失败/重试/资源归属；src/world/contract.ts 共享非公开契约，spec重导出，types测试随typecheck检查。
+- M2完成标准仍缺：统一句柄、增量refresh、完整explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
+- M1：docs/world-contract.md冻结六入口状态表、覆盖和六类失败/重试/资源归属；src/world/contract.ts共享非公开契约，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph持久节点、祖先/历史切片/失效闭包；explainRecomputation返回变化源及最短路径，explainCausalRecovery关联checkpoint。
 - prepareWorkspaceRepair拓扑重算与独立结果复用；view(heads)连续修复；共享多分支按源seq去重。
-- validateWorkspaceCausalBranches同一当前基线逐分支隔离重放，首差即停，工具异常不算changed；持久报告可重开查询。
-- prepareWorkspaceCausalRefresh探测→共享修复准备；refreshWorkspaceCausalBranches联合heads完整重放提交；recompute入口完整重算。
-- replayReuse仅复用同基线mutation前同seq纯观测，错误不缓存；最终提交仍完整重放。
-- AgentRuntime create/step原子保存causalHeads/checkpoint，null未跟踪、[]空分支；恢复/分叉不回退累计预算。
+- validateWorkspaceCausalBranches同一基线逐分支隔离重放，首差即停，工具异常不算changed；持久报告可重开查询。
+- 验证/修复支持baseSnapshotId，显式快照属调用方，探测结束/修复失败不误删；修复事件记录实际基线，仍需复用重验及最终OCC。
+- prepareWorkspaceCausalRefresh探测→共享修复；refreshWorkspaceCausalBranches联合heads完整重放提交；recompute入口完整重算。
+- replayReuse只缓存同基线mutation前同seq纯观测，错误不缓存；最终提交完整重放。
+- AgentRuntime原子保存causalHeads/checkpoint；null未跟踪、[]空分支；恢复/分叉不回退累计预算。
 - recoverCausalCheckpoint核验冻结版本并独占绑定宿主重建结果；文件发布与checkpoint绑定非原子。
-- recoverAgentCausalBatch/SharedCausalBatch逐项repaired/skipped/failed，共享计算后独立工作区和上下文分发。
-- refreshAgentSharedCausalBatch冻结checkpoint→当前探测→解释→共享prepare→独立bind；探测失败阻断，checkpoint推进拒绝。
-- resume/retry共享refresh持久repair，仅续pending，按failureSeq显式重试failed；preparation重叠保护，终态幂等。
-- binding attempt分配前可reserveTransaction(txId)，登记不是锁；历史关联计划、准备、尝试、事务、checkpoint。
-- resumeAgentSharedCausalRefreshWithValidation核对共享输出指纹→pending heads重放→matched绑定；stale/validation_failed/output_invalid保留pending。
-- publication提交队列核验coverage、输出指纹、强制重放、实际发布目录只读验收；TX_COMMITTING保存来源指纹，续提交核对。
-- TX_PUBLICATION_REJECTED保存拒绝；宿主完整声明依赖并保持候选静止；docs/workspace-publication.md有边界。
-- WorkspaceCommitReceipt.commitSeq标识domain内TX_COMMITTED；同txId终态重试返回原结果，不重验/重写/再次清理；尚无独立key。
-- getWorkspaceCommitResult重开/候选删除后可取原凭据；undefined不排除部分写入。清理失败后可查询成功；abort不能改写成功。
-- forkAgentCheckpoint固定历史基线与完整确定性前缀逐步哈希；checkpoint/files对照和投机调度后续归宿主/插件。
-- planAgentCausalResourceCleanup冻结截止点、扫描全domain引用；共享/pending/历史/current/committing保留；截止点不是文件系统锁。
-- cleanupAgentCausalFork仅处理登记open/conflicted；保留基线；请求与TX_ABORTED关联，可查pending/aborted/failed。
-- 成本预测/窗口/漂移/恢复策略不再扩展；基准按北极星第5节合并，覆盖前不删样本；benchmark:recovery schemaVersion=6，无真实模型token收益证明。
-- 内部openWorldState保存worldId、适配器/覆盖哈希、固定快照；原子保存WORLD_CREATED/snapshot，重开核对原ref提交/tree/blob/归属/覆盖，不导出openWorld。
-- 精确文件覆盖拒绝越界、重复、symlink、目录和忽略漏收；statePath在工作区外；基线缺失不重抓。初始化中断留意图并拒绝重开，无自动恢复/目录枚举。
-- 内部close仅释放domain，无句柄级资源报告；Git可表示模式不保证完整POSIX权限。
-- executeWorldStep复用固定基线事务和AgentRuntime，保存输入、因果节点、响应checkpoint、输出指纹；仅executed，不表示可发布。
-- null观测单独保存并使heads=null；[]保持空依赖；只接收本步骤节点，执行后record失效。失败留fork/事务/预算，不自动重试；调用者等待执行后close。
-- prepareWorldStep接入WorldAgent，固定version/refresh=null；prepared/unknown候选、覆盖和产物声明持久化，尚无公开句柄。
-- 覆盖hash不符、null依赖、heads遗漏产物依赖/写节点均unknown；伪造依赖、重复id、空hash失败；[]可prepared，不发布。
-- 文本artifact.body随checkpoint/journal保存并验SHA-256；缺正文unknown，格式/哈希错误failed；file由fork指纹固定，无二进制/内容寻址去重。
-- readWorldArtifacts按worldId/id/atSeq只读恢复并重验正文；缺失或损坏拒绝，不调用模型或推进journal。
-- 本轮validateWorldCandidate接入既有隔离重放，按持久候选而非调用方heads/coverage取证；adapter身份核对，unknown不重放并保存原原因。
-- 验证前验正文及候选输出，验证后再验输出；matched/changed/unknown/failed分流，工具异常和篡改不当作changed；不产生新候选或发布许可。
-- WORLD_VALIDATION_STARTED/COMPLETED保存旧候选引用、底层validationSeq及固定计划/路径；readWorldCandidateValidation重开只读恢复，未接通完整explain。
-- 探测回收临时fork，世界验证的固定版本快照保留供修复；失败保留journal证据，无统一资源报告/自动恢复。changed仅首差种子，不是完整变化清单。
-- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev；本轮工具链已可用。
-- 本轮recomputeWorldCandidate按持久旧候选/task显式全量重算；捕获当前固定新版本，复用prepareWorldStep，保存旧候选→新结果关系，不复用旧产物。
-- captureWorldRevision复用精确覆盖/快照校验，原句柄基线不变；版本及重算started/completed/failed持久化。unknown重算仍须新证据完整；失败保留资源。
-- 新候选重开后可重验，再次改输入检出changed；尚无自动策略、重算幂等、断点续跑或统一资源清理，不新增公开入口。
-- 本轮内部refreshWorldCandidate组合validate/recompute：matched复用原身份，unknown拒绝或重算，changed保守全量；工具/产物异常不触发重算。
-- refresh保存原候选、验证引用、路径和结果；readWorldRefresh重开只读查询。仍无增量复用、新matched版本、公开句柄或中断自动续跑。
-- 本轮selected_nodes验证按持久候选各节点祖先建分支，同一当前快照隔离重放；独立变化汇入闭包，独立异常阻断且plan=null。
-- refresh使用selected_nodes；默认prefix保留，报告持久scope且旧报告按prefix读。计划仅属于探测基线，changed仍全量重算；无增量收益承诺。
-- 本轮内部explainWorldPreparation收敛候选/验证/refresh只读查询，固定引用且拒绝越界/错误身份；不读文件、不调用模型、不推进journal。
-- 解释区分旧候选验证计划与新候选及实际full/reuse结果；unknown/异常无计划。关闭重开及后续历史不影响同截止点，返回值隔离。
-- 仍缺发布/绑定/资源事实的完整explain；未导出新公开入口。下一轮仍优先实际修复基线固定与复用重验，不扩成本策略。
-- 本轮固定验证/修复基线：两者支持baseSnapshotId，显式快照属调用方，探测结束/修复失败不误删，修复事件记录实际基线。
-- world验证先captureWorldRevision核验当前覆盖，报告持久version；旧报告读为null。symlink/目录/忽略漏收在工具调用前failed。
-- 固定版本跨主目录后续变化用于修复，失败仍保留；未接通自动增量刷新或免除复用重验/最终OCC。
-- 本轮changed refresh全量重算使用持久validation引用的固定版本；unknown/显式全量默认重新采集，原句柄基线不变。
-- restoreWorldRevision核验版本事件/覆盖/归属及Git ref/commit/tree/blob；缺失或错配failed，不回退当前目录、不调用agent。
-- 新增6项覆盖探测期间再改价、重开后固定重算、快照丢失/错配、候选错配及伪造版本；仍无增量复用或发布许可。
-- 本轮M2版本使用核验：restoreWorldRevision统一初始/后续版本，步骤执行前后及验证重放前后核对持久身份/Git对象，物化后核对fork基线指纹。
-- 篡改/丢失返回failed，阻断agent或prepared/changed结论；5项回归覆盖两类版本及执行/重放期间失效。检查不是引用锁，仍需strict commit。
-- 验证：基线903通过/7跳过；pnpm typecheck及新增5项回归通过；最终全量测试运行中，结束后回填。
+- shared refresh冻结checkpoint→探测→解释→共享prepare→独立bind；resume/retry持久repair只续pending，failed按failureSeq显式重试；终态幂等。
+- reserveTransaction登记不是锁；历史关联计划、准备、尝试、事务、checkpoint；带validation的resume核验输出并重放pending heads后绑定。
+- publication提交队列检查coverage、输出指纹、强制重放、实际发布目录只读验收；TX_COMMITTING保存来源指纹，续提交重验；拒绝持久化。
+- WorkspaceCommitReceipt.commitSeq标识domain内TX_COMMITTED；同txId终态重试返回原结果；getWorkspaceCommitResult支持重开/候选删除后查询，尚无独立key。
+- cleanup扫描全domain引用；共享/pending/历史/current/committing保留；截止点不是文件锁。fork清理仅登记open/conflicted，保留基线，状态可查。
+- 成本预测/窗口/漂移不再扩展；基准按北极星第5节合并，覆盖前不删样本；benchmark:recovery schemaVersion=6，无真实模型token收益证明。
+- 内部openWorldState持久worldId、覆盖哈希及固定快照，重开核对ref/commit/tree/blob/归属；精确文件覆盖拒绝symlink/目录/忽略漏收，statePath在工作区外。
+- 初始化中断留意图并拒绝重开，无自动恢复；close只释放domain，尚无统一资源报告；Git模式不保证完整POSIX权限。
+- executeWorldStep复用固定基线事务和AgentRuntime，保存输入、因果节点、响应checkpoint、输出指纹；执行前后核验版本身份，物化后核验基线指纹。
+- prepareWorldStep接WorldAgent并保存prepared/unknown；缺覆盖/null依赖/heads遗漏产物依赖或写节点均unknown，伪造依赖/重复id/坏hash失败；[]可prepared，不发布。
+- 文本artifact.body持久并验SHA-256；缺正文unknown，格式/hash错误failed；readWorldArtifacts固定引用只读恢复；无二进制或内容寻址去重。
+- validateWorldCandidate只用持久候选取证，核对adapter、候选版本及验证前后产物；matched/changed/unknown/failed分流，异常不冒充changed。
+- world验证先captureWorldRevision核验当前覆盖，保存固定version；重放前后核验版本，缺失/错配failed；旧报告version=null。
+- selected_nodes按每个节点祖先建分支，同一快照隔离重放，独立变化汇入闭包，独立异常阻断且plan=null；默认prefix仍保留。
+- 内部refreshWorldCandidate组合validate/recompute：matched复用原身份，unknown拒绝或重算，changed保守全量；工具/产物异常不触发重算。
+- changed全量重算使用持久validation固定版本；unknown/显式全量默认新采集，原句柄基线不变。restoreWorldRevision缺失/错配不回退当前目录、不调用agent。
+- readWorldRefresh/readWorldCandidateValidation/explainWorldPreparation固定引用只读恢复，重开和后续历史不影响同截止点；解释区分验证计划与实际full/reuse结果。
+- 内部入口均未公开；无增量复用、新matched版本、重算幂等、中断自动续跑或统一资源清理；explain仍缺发布/绑定/资源事实。
+- 本轮候选产物覆盖检查：执行完成及验证前后复用精确路径/Git树核验，拒绝symlink、目录和指纹漏收的忽略文件，failed并保留证据，不发布。
+- 该检查不推断隐性读取或未声明写入，也不是文件系统锁；仍需strict commit。合法写入/删除、声明不存在路径保持可用。
+- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，当前已可用。

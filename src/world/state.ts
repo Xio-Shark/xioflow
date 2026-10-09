@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ExecutionDomain } from '../domain.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
+import type { SnapshotRef } from '../types.js';
 import type { WorldVersion } from './contract.js';
 
 const exec = promisify(execFile);
@@ -75,6 +76,10 @@ async function checkBaseline(root: string, snapshotId: string, fingerprint: stri
   if (commit !== commitHash) throw new Error('World baseline commit identity mismatch');
   const tree = (await git(root, ['rev-parse', '--verify', `${commit}^{tree}`])).trim();
   if (tree !== fingerprint) throw new Error('World baseline fingerprint mismatch');
+  return readCoveredTree(root, tree, coverage);
+}
+
+async function readCoveredTree(root: string, tree: string, coverage: FileCoverage) {
   // Reading the complete tree also detects missing tree objects. Blob existence is checked below.
   const entries = new Map<string, { mode: string; object: string }>();
   for (const entry of (await git(root, ['ls-tree', '-r', '-t', '-z', tree])).split('\0').filter(Boolean)) {
@@ -168,6 +173,14 @@ export async function openWorldState(options: {
 async function captureCoveredSnapshot(root: string, coverage: FileCoverage, snapshotId: string,
   domainId: string, worldId: string) {
   const driver = new GitShadowSnapshotDriver();
+  await checkCoveredPaths(root, coverage);
+  const snapshot = await driver.capture([root], { id: snapshotId, domainId, opId: worldId });
+  const entries = await checkBaseline(root, snapshotId, snapshot.treeFingerprint, coverage, snapshot.commitHash);
+  await checkCoveredPresence(root, coverage, entries);
+  return snapshot;
+}
+
+async function checkCoveredPaths(root: string, coverage: FileCoverage) {
   // Inspect ancestors without following symlinks, including for declared absent paths.
   for (const p of coverage.paths) {
     const parts = p.split('/');
@@ -183,8 +196,10 @@ async function captureCoveredSnapshot(root: string, coverage: FileCoverage, snap
       }
     }
   }
-  const snapshot = await driver.capture([root], { id: snapshotId, domainId, opId: worldId });
-  const entries = await checkBaseline(root, snapshotId, snapshot.treeFingerprint, coverage, snapshot.commitHash);
+}
+
+async function checkCoveredPresence(root: string, coverage: FileCoverage, entries: ReadonlyMap<string, unknown>) {
+  await checkCoveredPaths(root, coverage);
   for (const p of coverage.paths) {
     if (!entries.has(p)) {
       try { await fs.lstat(path.join(root, p)); }
@@ -192,7 +207,17 @@ async function captureCoveredSnapshot(root: string, coverage: FileCoverage, snap
       throw new Error(`Declared file is absent from snapshot coverage: ${p}`);
     }
   }
-  return snapshot;
+}
+
+/** Check the declared output paths as well as the Git fingerprint: ignored new
+ * files and empty directories can be invisible to the fingerprint alone.
+ */
+export async function fingerprintWorldOutput(root: string, coverage: FileCoverage, snapshot: SnapshotRef) {
+  await checkCoveredPaths(root, coverage);
+  const fingerprint = await new GitShadowSnapshotDriver().fingerprint([root], { against: snapshot });
+  const entries = await readCoveredTree(root, fingerprint, coverage);
+  await checkCoveredPresence(root, coverage, entries);
+  return fingerprint;
 }
 
 /** Capture a fresh bounded version without replacing the handle's original baseline. */

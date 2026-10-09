@@ -1,12 +1,11 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ProcessSupervisor } from '../supervisor/supervisor.js';
-import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
 import { WorkspaceCausalGraph, type ExplainedRecomputationPlan } from '../workspace/causal-graph.js';
 import { validateWorkspaceCausalBranches } from '../workspace/causal-validation.js';
 import { readWorldArtifacts } from './artifacts.js';
 import type { FileWorldAdapter, WorldCandidate, WorldRef, WorldVersion } from './contract.js';
-import { captureWorldRevision, restoreWorldRevision, type openWorldState } from './state.js';
+import { fingerprintWorldOutput, captureWorldRevision, restoreWorldRevision, type openWorldState } from './state.js';
 
 type WorldState = Awaited<ReturnType<typeof openWorldState>>;
 export interface WorldCandidateValidation {
@@ -70,8 +69,8 @@ export async function validateWorldCandidate(world: WorldState, ref: WorldRef,
       const snapshot = store.getSnapshot(candidate.version.snapshotId);
       if (!completed || !snapshot) throw new Error('Candidate execution evidence missing');
       const checkOutput = async () => {
-        const actual = await new GitShadowSnapshotDriver().fingerprint(
-          [completed.payload.forkRoot as string], { against: snapshot });
+        const actual = await fingerprintWorldOutput(
+          completed.payload.forkRoot as string, state.coverage, snapshot);
         if (actual !== candidate.outputFingerprint) throw new Error('Candidate output changed');
       };
       await checkOutput();
