@@ -279,6 +279,22 @@ No affected agents means no preparation. Publication and OCC remain separate;
 there is no atomic batch commit or automatic shared-resource reclamation.
 See [batch semantics and integration example](../docs/causal-recovery-batches.md).
 
+`refreshAgentSharedCausalBatch(agents, supervisor, { agentIds, validation, prepare, bind })`
+freezes explicitly selected checkpoint identities and probes their tracked causal
+branches on one current-world baseline. The host asserts compatible branches and
+complete deterministic replay in the supplied root. Failed probes block repair,
+including mixed changed/failed results. Any selected checkpoint advancing during
+probing returns `checkpoint_changed`; no preparation occurs. Untracked agents are
+reported separately, and an entirely untracked selection is not probed.
+The selected recovery preview includes shortest invalidation paths. A durable
+`AGENT_CAUSAL_REFRESH_PLANNED` event links the validation report to checkpoint
+identities before shared preparation. It records intent, not publication.
+No invalidated selected checkpoints returns `unchanged`; otherwise the same frozen
+plan enters shared recovery. `recovered` means the batch ran, so callers must inspect
+its per-agent outcomes. Agent creation after selection does not expand the batch.
+This entry point does not commit workspaces or certify reusable evidence; all shared
+recovery resource ownership and per-binding version checks above still apply.
+
 ## Task scopes
 
 `parentId` defines a structured task tree within a Run. Separate roots in the same

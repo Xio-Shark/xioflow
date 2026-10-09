@@ -35,26 +35,26 @@
 - 适配器须纯文件观测、与 fork 路径 / 内存副作用无关；缓存不跨调用或修复。
 - refresh / prepare refresh 可选 costModel；planWorkspaceCausalRefresh 可纯查询比较成本。
 - 每节点 execute / reuse / replay 同单位有限非负估算；溢出或异常在修复事务前拒绝。
-- 比较增量重算+复用验证+完整提交重放与全部重算+完整提交重放；相等保留增量。
-- full 只重算选中联合祖先，共享节点一次；validateReuse 收到 []，保留强制 OCC。
+- 比较增量重算+复用验证+完整提交重放与全部重算+完整提交重放；相等保留增量。 full 只重算选中联合祖先，共享节点一次；validateReuse 收到 []，保留强制 OCC。
 - 先探测再决策；估算不包含已发生探测和相同固定开销，不声称实测或 token 收益。
 - recomputeWorkspaceCausalBranches：显式跳过探测，完整重算所选联合祖先并强制 OCC 提交。
 - CAUSAL_RECOMPUTATION_PREPARED 记录来源与 full 策略；关联失败回收、未知提交保留资源。
 - benchmark:refresh 七模式 schemaVersion=4；先固定forecast再扰动，命中/失准样本见causal-refresh-policy.sample.json。
 - refreshWorkspaceCausalBranchesWithPolicy：探测前按宿主概率和条件成本选择 probe / recompute。
-- planWorkspaceCausalRefreshPolicy 纯查询；联合节点去重、持平探测、拒绝非法估算与溢出。
-- CAUSAL_REFRESH_POLICY_SELECTED 先记意图，关联源 branches / atSeq / probeTxPrefix / repairTxId。
+- planWorkspaceCausalRefreshPolicy 纯查询；联合节点去重、持平探测、拒绝非法估算与溢出。 CAUSAL_REFRESH_POLICY_SELECTED 先记意图，关联源 branches / atSeq / probeTxPrefix / repairTxId。
 - 预测不授权复用；直接重算沿用 repair 身份、无 validateReuse；两条发布路径均强制 OCC。
-- 策略入口 CAUSAL_REFRESH_MEASURED 返回 telemetrySeq，关联 decisionSeq / validationSeq。
-- listWorkspaceCausalRefreshTelemetry 跨Run/atSeq/重开；计回调次数/异常/耗时；落盘失败不撤销提交。
+- 策略入口 CAUSAL_REFRESH_MEASURED 返回 telemetrySeq，关联 decisionSeq / validationSeq。 listWorkspaceCausalRefreshTelemetry 跨Run/atSeq/重开；计回调次数/异常/耗时；落盘失败不撤销提交。
 - 策略 taskKey 分类；estimateWorkspaceCausalRefreshHistory 跨Run按类别估计回调毫秒成本。
-- 固定 trainingAtSeq；决策和遥测均完成才入训练，迟到只计缺失；须同时有 changed/unchanged。
-- 后续独立探测计算成本MAE；failed/missing/recompute分开统计，宿主显式采用同单位预测。
+- 固定 trainingAtSeq；决策和遥测均完成才入训练，迟到只计缺失；须同时有 changed/unchanged。 后续独立探测计算成本MAE；failed/missing/recompute分开统计，宿主显式采用同单位预测。
 - benchmark:refresh-history：真实journal训练→冻结窗口→独立探测验证→历史/静态策略同扰动对照。
 - 新鲜文件夹具，策略交替顺序；每节点成本仅训练校准；单列训练开销、回调/总耗时与正确性。 强制probe的零预测是控制哨兵；MAE读estimate.evaluation；临时journal序号只在单次报告有效。
-- 历史预测 trainingAfterSeq：按决策序号冻结滑动训练窗口；excludedDecisions 计过时任务。
-- drift：独立验证变化率差值、Brier分数与样本量；单类别仍可统计，不自动改变策略。
+- 历史预测 trainingAfterSeq：按决策序号冻结滑动训练窗口；excludedDecisions 计过时任务。 drift：独立验证变化率差值、Brier分数与样本量；单类别仍可统计，不自动改变策略。
 - 新增 causal-drift 独立基准：冻结旧/近期窗口，多重复成对对照、Brier/MAE与实测成本；见 docs/causal-drift-benchmark.md。下一步：异质工具成本与双向漂移。
 - explainRecomputation(changed, atSeq?, heads?)：逐失效节点列出所有变化源及各自最短依赖路径。
 - explainCausalRecovery：跨agent恢复预览附每个checkpoint的recomputation解释与工具/actor元数据；按checkpoint历史切片筛选变化源，未知全局种子报错；只读且重开可复现。
-- 最新验证：原生构建与typecheck通过，定向38通过，全量717通过/7跳过；环境已补齐gcc/libc开发依赖。下一步：把观测验证changed接到恢复预览，形成探测→解释→共享恢复示例；原有暂存基准改动保留。
+- refreshAgentSharedCausalBatch：显式agentIds→冻结checkpoint→当前基线探测→失效路径preview→一次共享prepare与独立bind。
+- 任一probe失败阻断修复；探测期间任一选中checkpoint推进返回checkpoint_changed；未跟踪单列，未选中不恢复。
+- AGENT_CAUSAL_REFRESH_PLANNED关联validationSeq和checkpoint序号；意图不等于发布，recovered须检查逐项outcomes。
+- 共享恢复复用冻结计划绑定循环；不自动停止/resume/OCC提交，宿主仍负责复用验证、上下文/文件分发与资源回收。
+- 本轮基线717通过/7跳过，typecheck通过、定向43通过；最终全量722通过/7跳过。工作区原先干净，无额外依赖安装。
+- 下一步：恢复计划的持久查询与重开后的解释重建，串联validation→计划→共享修复→各checkpoint发布；补充部分绑定失败示例。

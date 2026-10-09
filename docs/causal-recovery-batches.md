@@ -116,3 +116,59 @@ prepare 等待期间 agent 可能改变；绑定前重新检查原 checkpoint �
 准备资源。共享修复与各次 causal_repaired 分别持久化，批次仍非原子；崩溃恢复时
 核对 journal 中的事务和 checkpoint 引用再回收，不能仅凭缺少内存返回值判断失败。
 仅协调显式选择的兼容分支，不自动推断依赖完整性或复制文件，也不声称减少模型 token。
+
+## 从观测变化自动恢复选中的 agent
+
+`refreshAgentSharedCausalBatch(agents, supervisor, options)` 接通当前世界探测、
+checkpoint 失效解释和共享恢复。`agentIds` 显式选择同一个文件世界内的兼容分支；
+内核读取其最新 checkpoint 的 heads，宿主无需手工构造 `changed`。
+
+```ts
+import { refreshAgentSharedCausalBatch, prepareWorkspaceBranchRepair } from '@xioflow/kernel';
+
+const result = await refreshAgentSharedCausalBatch(agents, supervisor, {
+  agentIds: ['planner', 'reviewer'],
+  validation: {
+    txId: probeId, runId, root: workspaceRoot, forkPath: probeForkPath,
+    closedWorld: true, replayPolicy: 'deterministic', replay,
+  },
+  prepare: (plan) => prepareWorkspaceBranchRepair(supervisor, {
+    txId: sharedTxId, runId, root: workspaceRoot, forkPath: sharedForkPath,
+    atSeq: Math.max(...plan.affected.map(({ checkpoint }) => checkpoint.seq)),
+    changed: plan.changed,
+    branches: plan.affected.map(({ agentId, checkpoint }) => ({
+      id: agentId, heads: checkpoint.causalHeads!,
+    })),
+    execute, validateReuse,
+  }),
+  bind: async (impact, repair) => {
+    const prepared = await materializeAgentContext(impact, repair);
+    return { checkpoint: prepared.context, workspace: prepared.transaction,
+      discard: () => supervisor.abortWorkspaceTransaction(prepared.transaction.txId) };
+  },
+});
+if (result.status === 'recovered') {
+  console.log(result.validation.seq, result.planSeq, result.preview.affected);
+  console.log(result.batch.outcomes); // 逐项 repaired / skipped / failed
+  // 共享事务在 result.batch.repair，仍由宿主管理。
+}
+```
+
+以上变量和 `replay`、`execute`、`validateReuse`、`materializeAgentContext` 由宿主提供，
+约束与前述共享恢复示例相同。完整可运行集成测试见
+`tests/agents/causal-checkpoints.test.ts` 中的 `probes selected agents`。
+
+- 先冻结所有选中 checkpoint 的序号，再在一个当前基线的独立 fork 中重放各跟踪分支。
+  未选中 agent 不恢复；新建 agent 不自动加入批次。多个选中分支可以复用共享观测。
+- 任一分支工具失败返回 `validation_failed`，即使其他分支发现变化也不准备修复。
+  探测期间任一选中 checkpoint 改变返回 `checkpoint_changed` 和对应 agent id；需重新调用。
+- 无失效分支返回 `unchanged`，不调用 prepare/bind。未跟踪 agent 单列在 preview.untracked；
+  全部未跟踪时返回 `untracked`，不创建探测事务。`unchanged` 不代表未跟踪上下文有效。
+- 可恢复结果附 `preview`，包含每个受影响 checkpoint 的最短证据路径。
+  `AGENT_CAUSAL_REFRESH_PLANNED` 用 `planSeq` 关联持久验证报告和被检查的 checkpoint 序号；
+  该事件表达计划，实际发布以每项 `causal_repaired` 为准。
+- 进入共享准备后仍使用同一冻结计划，绑定前检查 checkpoint 版本和停止状态。
+  `recovered` 表示已执行恢复批次；必须检查 outcomes，可能全部跳过或部分失败。
+- 此入口不提交工作区、不停止或 resume agent。当前世界可能继续变化，观测匹配只是修复种子；
+  宿主仍须验证复用、重建上下文和独立文件分支，并通过 OCC 发布文件。
+  `prepare` 抛错由宿主清理资源，之后可从 journal 查询探测和计划；不存在跨 agent 原子提交。

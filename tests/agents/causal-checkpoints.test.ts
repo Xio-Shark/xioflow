@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, prepareWorkspaceBranchRepair } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, prepareWorkspaceBranchRepair } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -39,6 +39,104 @@ describe('agent checkpoint causal branches', () => {
     runtime?.close();
     domain.close();
     fs.rmSync(temp, { recursive: true, force: true });
+  });
+
+  it('probes selected agents, explains shared invalidation and binds one recomputation durably', async () => {
+    const source = node();
+    const derived = node([source.seq]);
+    open();
+    for (const [id, heads] of [['first', [derived.seq]], ['second', [source.seq]], ['excluded', [source.seq]], ['unknown', null]] as const) {
+      runtime.create({ id, runId: 'run', input: null, checkpoint: 'old', maxSteps: 2,
+        causalHeads: heads === null ? null : [...heads] });
+      runtime.pause(id);
+    }
+    const supervisor = new ProcessSupervisor(domain);
+    const usage = runtime.getRunUsage('run');
+    fs.writeFileSync(path.join(temp, 'repo', 'input'), 'new');
+    const executed: number[] = [];
+    const result = await refreshAgentSharedCausalBatch(runtime, supervisor, {
+      agentIds: ['first', 'second', 'unknown'],
+      validation: { txId: 'probe', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'probe'),
+        closedWorld: true, replayPolicy: 'deterministic', replayReuse: 'baseline_observations',
+        replay: async (_, root) => fs.readFileSync(path.join(root, 'input'), 'utf8') },
+      prepare: (plan) => prepareWorkspaceBranchRepair(supervisor, {
+        txId: 'shared', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'shared'),
+        atSeq: Math.max(...plan.affected.map(({ checkpoint }) => checkpoint.seq)), changed: plan.changed,
+        branches: plan.affected.map(({ agentId, checkpoint }) => ({ id: agentId, heads: checkpoint.causalHeads! })),
+        validateReuse: async () => {}, execute: async (entry) => {
+          executed.push(entry.seq);
+          return { actorId: entry.actorId, observation: { ...entry.observation, resultHash: 'new' } };
+        },
+      }),
+      bind: async ({ agentId }) => ({ checkpoint: 'new', workspace: await supervisor.beginWorkspaceTransaction({
+        txId: `bound-${agentId}`, runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, `bound-${agentId}`),
+      }) }),
+    });
+    expect(result.status).toBe('recovered');
+    if (result.status !== 'recovered') throw new Error(result.status);
+    expect(result.validation).toMatchObject({ changed: [source.seq], replayedSteps: 1, reusedSteps: 1 });
+    expect(result.preview.untracked).toEqual(['unknown']);
+    expect(result.preview.affected.map(({ agentId }) => agentId)).toEqual(['first', 'second']);
+    expect(result.preview.affected[0].recomputation.explanations.at(-1)).toEqual({ nodeSeq: derived.seq,
+      causes: [{ changedSeq: source.seq, path: [source.seq, derived.seq] }] });
+    expect(executed).toEqual([source.seq, derived.seq]);
+    expect(result.batch.outcomes.map(({ status }) => status)).toEqual(['repaired', 'repaired']);
+    expect(runtime.get('excluded')!.checkpoint).toBe('old');
+    expect(runtime.getRunUsage('run')).toEqual(usage);
+    expect(fs.existsSync(path.join(temp, 'probe', '0'))).toBe(false);
+    const saved = runtime.checkpoints('first').at(-1);
+    runtime.close(); domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    open();
+    expect(runtime.checkpoints('first').at(-1)).toEqual(saved);
+    expect(domain.getStore().getJournalEvent(domain.domainId, result.planSeq)?.payload).toMatchObject({
+      validationSeq: result.validation.seq, checkpoints: [{ agentId: 'first' }, { agentId: 'second' }, { agentId: 'unknown' }],
+    });
+  });
+
+  it.each(['unchanged', 'validation_failed', 'checkpoint_changed'] as const)(
+    'does not prepare recovery when probing returns %s', async (status) => {
+      const source = node();
+      open(); create([source.seq]); runtime.pause('a');
+      let prepared = 0;
+      const before = runtime.checkpoints('a').at(-1)!;
+      const result = await refreshAgentSharedCausalBatch(runtime, new ProcessSupervisor(domain), {
+        agentIds: ['a'],
+        validation: { txId: 'probe', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'probe'),
+          closedWorld: true, replayPolicy: 'deterministic', replay: async () => {
+            if (status === 'validation_failed') throw new Error('tool unavailable');
+            if (status === 'checkpoint_changed') runtime.restoreCheckpoint('a', before.seq);
+            return status === 'unchanged' ? 'value' : 'new';
+          } },
+        prepare: async () => { prepared++; throw new Error('must not prepare'); }, bind: async () => undefined,
+      });
+      expect(result.status).toBe(status);
+      expect(prepared).toBe(0);
+      if (result.status === 'checkpoint_changed') expect(result.agentIds).toEqual(['a']);
+      if (result.status === 'validation_failed') expect(result.validation.changed).toEqual([]);
+      if (result.status === 'unchanged') expect(result.preview.unaffected).toEqual(['a']);
+      expect(fs.existsSync(path.join(temp, 'probe', '0'))).toBe(false);
+    },
+  );
+
+  it('blocks a mixed changed/failed probe and does not mistake untracked agents for valid evidence', async () => {
+    const source = node();
+    const sibling = node();
+    open(); create([source.seq]); runtime.pause('a');
+    runtime.create({ id: 'b', runId: 'run', input: null, checkpoint: null, maxSteps: 1, causalHeads: [sibling.seq] });
+    runtime.create({ id: 'unknown', runId: 'run', input: null, checkpoint: null, maxSteps: 1 });
+    let calls = 0;
+    const options = { agentIds: ['a', 'b'], validation: { txId: 'probe', runId: 'run',
+      root: path.join(temp, 'repo'), forkPath: path.join(temp, 'probe'), closedWorld: true as const,
+      replayPolicy: 'deterministic' as const, replay: async () => { if (++calls === 2) throw new Error('offline'); return 'new'; } },
+      prepare: async () => { throw new Error('must not prepare'); }, bind: async () => undefined };
+    const result = await refreshAgentSharedCausalBatch(runtime, new ProcessSupervisor(domain), options);
+    expect(result).toMatchObject({ status: 'validation_failed', validation: { changed: [source.seq] } });
+    expect(await refreshAgentSharedCausalBatch(runtime, new ProcessSupervisor(domain), { ...options, agentIds: ['unknown'] }))
+      .toEqual({ status: 'untracked', untracked: ['unknown'] });
+    await expect(refreshAgentSharedCausalBatch(runtime, new ProcessSupervisor(domain), { ...options, agentIds: ['a', 'a'] }))
+      .rejects.toThrow('unique');
+    expect(calls).toBe(2);
   });
 
   it('compares reconstructed files after source disposal without changing agents or live files', async () => {

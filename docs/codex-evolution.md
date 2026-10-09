@@ -396,3 +396,12 @@
 - 补充恢复预览示例与 runtime 契约，交接摘要保持60行；保留原有暂存基准改动。
 - 基线因缺cc有3个文件失败；补齐gcc/libc开发依赖后原生构建成功，typecheck通过、定向38通过、全量717通过/7跳过。
 - 下一步：将观测验证changed接入恢复预览，提供探测→解释→共享恢复的完整示例。
+
+## 2026-10-09 — 从观测探测到共享 checkpoint 恢复
+- 新增 refreshAgentSharedCausalBatch：显式选中 agent，自动读取 heads、重放探测变化、生成失效路径并共享恢复。
+- 探测前冻结 checkpoint；任一工具失败阻断整批，探测期间版本变化返回 checkpoint_changed，不用旧证据修复新上下文。
+- 复用共享恢复的冻结计划与独立事务绑定；未选中不恢复，未跟踪单列，recovered 须检查逐项 outcomes。
+- AGENT_CAUSAL_REFRESH_PLANNED 持久关联 validationSeq 与 checkpoint 序号；实际发布仍由 causal_repaired 记录。
+- 补充自动恢复示例、runtime 契约与定位入口；保持宿主复用验证、上下文分发、OCC 和资源管理职责。
+- 验证：基线717通过/7跳过；新增5例，定向43通过；pnpm typecheck通过；pnpm test最终722通过/7跳过；diff检查通过。
+- 下一步：持久恢复计划查询与重开后的解释重建，串联探测、共享修复及逐项发布历史。
