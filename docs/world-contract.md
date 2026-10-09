@@ -217,3 +217,13 @@ agent、不生成 prepared/changed 结论，已有执行证据和预算保留。
 均返回 failed，保留失败证据，不进入 prepared/matched/changed。合法的普通文件写入、
 删除及声明不存在的路径仍可通过。检查仅覆盖声明路径，不推断隐藏依赖，不替代最终 strict
 commit，也不构成文件系统锁。
+
+内部 `src/world/repair.ts` 的 `prepareWorldRepair` 将持久的 changed / selected_nodes 验证报告
+接到既有 prepareWorkspaceRepair；从报告恢复固定版本和原候选证据，不重新采集当前目录。
+复用节点按拓扑顺序在修复事务中完整重放，逐个比较观测及写入结果哈希，写入重放同时物化
+复用产物；首差或异常阻断重算。修复前、复用后及完成后核验原候选产物和两个固定版本，
+最终核验新产物覆盖与指纹。失败中止隔离事务并记录 WORLD_REPAIR_FAILED，验证基线保留。
+WORLD_REPAIR_PREPARED 记录验证引用、版本、复用/替换节点、输出指纹及事务身份。
+本切片只返回内部 open 事务；未绑定 WorldAgent 上下文、未产生新的 WorldCandidate，
+尚未接入 refresh 自动增量路径。工具结果哈希依赖适配器声明，不代替最终 OCC、业务验收或
+独立 oracle；非确定性模型响应仍须由后续 agent 适配层选择持久产物，不能作为工具重放。
