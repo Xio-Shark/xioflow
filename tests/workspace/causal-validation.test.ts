@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, validateWorkspaceCausalBranches, prepareWorkspaceBranchRepair, listWorkspaceCausalValidations, prepareWorkspaceCausalRefresh, refreshWorkspaceCausalBranches, recomputeWorkspaceCausalBranches, planWorkspaceCausalRefresh, refreshWorkspaceCausalBranchesWithPolicy, planWorkspaceCausalRefreshPolicy } from '../../src/index.js';
+import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, validateWorkspaceCausalBranches, prepareWorkspaceBranchRepair, listWorkspaceCausalValidations, prepareWorkspaceCausalRefresh, refreshWorkspaceCausalBranches, recomputeWorkspaceCausalBranches, planWorkspaceCausalRefresh, refreshWorkspaceCausalBranchesWithPolicy, planWorkspaceCausalRefreshPolicy, listWorkspaceCausalRefreshTelemetry } from '../../src/index.js';
 import type { CausalStep } from '../../src/index.js';
 
 describe('workspace causal validation', () => {
@@ -88,10 +88,76 @@ describe('workspace causal validation', () => {
       type: 'CAUSAL_REFRESH_POLICY_SELECTED', payload: { policy: result.policy,
         sourceBranches: [{ id: 'a', heads: [input.seq] }], repairTxId: 'policy-repair', probeTxPrefix: 'validate' },
     });
+    const reports = listWorkspaceCausalRefreshTelemetry(domain, { runId: 'run' });
+    expect(reports).toHaveLength(1);
+    const report = reports[0];
+    expect(report).toMatchObject({ seq: result.telemetrySeq, decisionSeq: result.decisionSeq,
+      strategy: scenario.strategy, status: scenario.status, callbacks: {
+        probe: { calls: scenario.strategy === 'probe' ? 1 : 0, errors: 0 },
+        reuse: { calls: scenario.strategy === 'probe' && scenario.status !== 'unchanged' ? 1 : 0, errors: 0 },
+        execute: { calls: scenario.status === 'unchanged' ? 0 : 1, errors: 0 },
+        commitReplay: { calls: scenario.status === 'unchanged' ? 0 : 1, errors: 0 },
+      } });
+    expect(report.durationMs).toBeGreaterThanOrEqual(0);
+    for (const metric of Object.values(report.callbacks)) {
+      expect(metric.durationMs).toBeGreaterThanOrEqual(0);
+      expect(metric.durationMs).toBeLessThanOrEqual(report.durationMs);
+    }
+    expect(listWorkspaceCausalRefreshTelemetry(domain, { atSeq: result.telemetrySeq - 1 })).toEqual([]);
+    expect(listWorkspaceCausalRefreshTelemetry(domain, { runId: 'another' })).toEqual([]);
+    report.callbacks.probe.calls = 999;
+    expect(listWorkspaceCausalRefreshTelemetry(domain)[0].callbacks.probe.calls).not.toBe(999);
     expect(events.filter(event => event.type === 'TX_BEGUN' && event.seq > result.decisionSeq)
       .map(event => event.payload.txId)).toEqual(scenario.strategy === 'recompute' ? ['policy-repair']
       : scenario.status === 'unchanged' ? ['validate-0'] : ['validate-0', 'policy-repair']);
   });
+
+  it.each(['probe', 'reuse', 'execute', 'commitReplay', 'journal', 'doubleFailure'])(
+    'persists failures without masking execution or commit state: %s', async (phase) => {
+      const input = graph.record(step('a'));
+      fs.writeFileSync(path.join(root, 'input.txt'), 'new');
+      const failure = new Error('callback failed');
+      let replayCalls = 0;
+      if (phase === 'journal' || phase === 'doubleFailure') {
+        const store = domain.getStore();
+        const record = store.recordJournalEvent.bind(store);
+        vi.spyOn(store, 'recordJournalEvent').mockImplementation(event => {
+          if (event.type === 'CAUSAL_REFRESH_MEASURED') throw new Error('telemetry disk failure');
+          return record(event);
+        });
+      }
+      const pending = refreshWorkspaceCausalBranchesWithPolicy(supervisor, {
+        ...options([{ id: 'a', heads: [input.seq] }]),
+        forecast: { changeProbability: 0, probeUnchanged: 1, probeChanged: 1, refreshChanged: 2 },
+        costModel: () => ({ execute: 1, reuse: 1, replay: 1 }),
+        replay: async () => {
+          replayCalls++;
+          if (phase === 'probe' || (phase === 'commitReplay' && replayCalls === 2)) throw failure;
+          return 'new';
+        },
+        repair: { txId: 'measured', forkPath: path.join(temp, 'measured'),
+          validateReuse: async () => { if (phase === 'reuse') throw failure; },
+          execute: async node => {
+            if (phase === 'execute' || phase === 'doubleFailure') throw failure;
+            return { actorId: node.actorId, observation: { ...node.observation, resultHash: 'new' } };
+          },
+        },
+      });
+      if (phase === 'journal') await expect(pending).rejects.toThrow('telemetry failed after committed');
+      else if (phase === 'doubleFailure') await expect(pending).rejects.toMatchObject({ errors: [failure, expect.any(Error)] });
+      else if (phase === 'reuse' || phase === 'execute') await expect(pending).rejects.toBe(failure);
+      else await expect(pending).resolves.toMatchObject({ result: { status: phase === 'probe' ? 'failed' : 'conflict' } });
+      const reports = listWorkspaceCausalRefreshTelemetry(domain);
+      if (phase === 'journal' || phase === 'doubleFailure') {
+        expect(reports).toEqual([]);
+        if (phase === 'journal') expect(domain.getStore().getJournalEvents(domain.domainId)
+          .some(event => event.type === 'TX_COMMITTED' && event.payload.txId === 'measured')).toBe(true);
+      } else {
+        expect(reports).toHaveLength(1);
+        expect(reports[0].status).toBe(phase === 'probe' ? 'failed' : phase === 'commitReplay' ? 'conflict' : 'threw');
+        expect(reports[0].callbacks[phase as 'probe' | 'reuse' | 'execute' | 'commitReplay']).toMatchObject({ calls: 1, errors: 1 });
+      }
+    });
 
   it('deduplicates cost estimates and preserves probing on expected-cost ties', () => {
     const node = graph.record(step('a'));

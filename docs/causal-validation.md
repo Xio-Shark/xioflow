@@ -222,4 +222,31 @@ console.log(outcome.policy, outcome.result.status, outcome.decisionSeq);
 
 `CAUSAL_REFRESH_POLICY_SELECTED` 在执行前记录预测、选择、源分支、历史序号、探测事务前缀和修复事务 ID。日志写入失败时不会分配工作区。该事件仅证明执行意图，不能证明完成；按事务 ID 关联后续验证、准备和提交事件。失败不自动切换另一条路径，资源回收及未知提交保留规则沿用底层入口。
 
-预测错误可能增加成本，但概率为零仍实际探测，概率为一也仍强制重放提交；不会仅因预测返回 `unchanged` 或跳过 OCC。当前未测量真实模型 token 收益；下一步在六模式基准中增加独立预测与失准场景。
+预测错误可能增加成本，但概率为零仍实际探测，概率为一也仍强制重放提交；不会仅因预测返回 `unchanged` 或跳过 OCC。七模式基准已覆盖独立预测与失准场景；当前未测量真实模型 token 收益。
+
+### 持久刷新遥测
+
+`refreshWorkspaceCausalBranchesWithPolicy` 现在返回 `telemetrySeq`，并在执行结束或抛错时追加
+`CAUSAL_REFRESH_MEASURED`（version 1），通过 `decisionSeq` 关联预测、源分支和事务身份。
+
+```ts
+import { listWorkspaceCausalRefreshTelemetry } from '@xioflow/kernel';
+const reports = listWorkspaceCausalRefreshTelemetry(domain, { runId: 'run' });
+for (const report of reports) {
+  console.log(report.decisionSeq, report.status, report.durationMs, report.callbacks);
+}
+// 可选 atSeq 按遥测事件序号截取历史；不传 runId 可查询同 domain 的多个 Run。
+```
+
+`callbacks.probe / reuse / execute / commitReplay` 分别统计实际探测重放、宿主复用校验、
+节点重算、OCC 重放的 `calls / errors / durationMs`。计数包括失败尝试，探测缓存命中不计调用；
+`reuse.calls` 是批次回调次数，不是内部文件读取或工具次数。每类耗时是回调累计耗时；
+顶层 `durationMs` 是决策落盘后到执行及清理结束的单调时钟耗时，包含快照和事务开销，
+不含预测计算及遥测自身落盘。它们不能直接与任意单位的 `costModel` 相减，也不代表 token 用量。
+
+`status` 保留 `unchanged / failed / committed / conflict`，抛错记为 `threw` 并重新抛出原异常；
+存在验证报告时记录 `validationSeq`。`threw` 可能包含提交结果未知或清理失败，必须沿决策中的
+事务 ID 检查 journal，不能据此断言未提交。进程中断可能仅留下决策，没有遥测，缺失不能按零成本统计。
+遥测写入失败会抛错并说明已观察到的执行状态、决策和事务 ID；不会重试执行或撤销成功提交；
+执行和遥测均失败时用 `AggregateError` 保留两者。记录不包含回调参数、结果或异常文本。
+当前只覆盖策略包装器，不自动学习概率，也不测量直接调用其他刷新入口的执行。

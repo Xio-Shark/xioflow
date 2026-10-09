@@ -1,3 +1,4 @@
+import { measureCausalRefreshCallbacks, type CausalRefreshTelemetry } from './causal-refresh-telemetry.js';
 import type { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { WorkspaceCausalGraph, type CausalNode } from './causal-graph.js';
 import { planWorkspaceCausalRefresh, type CausalRefreshCostModel } from './causal-refresh-cost.js';
@@ -52,6 +53,7 @@ export interface WorkspaceCausalRefreshPolicyOptions extends WorkspaceCausalRefr
 
 export type WorkspaceCausalRefreshPolicyResult = {
   decisionSeq: number;
+  telemetrySeq: number;
   policy: CausalRefreshPolicyDecision;
 } & (
   | { strategy: 'probe'; result: WorkspaceCausalRefreshCommitResult }
@@ -87,11 +89,43 @@ export async function refreshWorkspaceCausalBranchesWithPolicy(
       probeTxPrefix: options.txId, repairTxId: options.repair.txId },
     timestamp: new Date().toISOString(),
   });
-  if (policy.strategy === 'recompute') {
-    const result = await recomputeWorkspaceCausalBranches(supervisor, {
-      ...options, txId: options.repair.txId, forkPath: options.repair.forkPath, execute: options.repair.execute,
-    });
-    return { decisionSeq, policy, strategy: 'recompute', result };
+  const started = performance.now();
+  const measured = measureCausalRefreshCallbacks(options, policy.strategy);
+  let outcome: Omit<WorkspaceCausalRefreshPolicyResult, 'telemetrySeq'> | undefined;
+  let failed = false;
+  let failure: unknown;
+  try {
+    if (policy.strategy === 'recompute') {
+      const result = await recomputeWorkspaceCausalBranches(supervisor, {
+        ...measured.options, txId: options.repair.txId, forkPath: options.repair.forkPath,
+        execute: measured.options.repair.execute,
+      });
+      outcome = { decisionSeq, policy, strategy: 'recompute', result };
+    } else {
+      outcome = { decisionSeq, policy, strategy: 'probe',
+        result: await refreshWorkspaceCausalBranches(supervisor, measured.options) };
+    }
+  } catch (error) {
+    failed = true;
+    failure = error;
   }
-  return { decisionSeq, policy, strategy: 'probe', result: await refreshWorkspaceCausalBranches(supervisor, options) };
+  const report: Omit<CausalRefreshTelemetry, 'seq'> = {
+    runId: options.runId, decisionSeq, strategy: policy.strategy,
+    status: outcome?.result.status ?? 'threw', durationMs: performance.now() - started,
+    callbacks: measured.callbacks,
+    ...(outcome && 'validation' in outcome.result ? { validationSeq: outcome.result.validation.seq } : {}),
+  };
+  let telemetrySeq: number;
+  try {
+    telemetrySeq = domain.getStore().recordJournalEvent({
+      domainId: domain.domainId, runId: options.runId, type: 'CAUSAL_REFRESH_MEASURED',
+      payload: { version: 1, report }, timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    const message = `Causal refresh telemetry failed after ${report.status}; inspect decision ${decisionSeq} and transaction ${options.repair.txId} before retrying`;
+    if (failed) throw new AggregateError([failure, error], message);
+    throw new Error(message, { cause: error });
+  }
+  if (failed) throw failure;
+  return { ...outcome!, telemetrySeq } as WorkspaceCausalRefreshPolicyResult;
 }

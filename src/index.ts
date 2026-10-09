@@ -43,4 +43,6 @@ export * from './workspace/causal-validation.js';
 export * from './workspace/causal-refresh.js';
 export * from './workspace/causal-refresh-cost.js';
 export * from './workspace/causal-refresh-policy.js';
+export { listWorkspaceCausalRefreshTelemetry } from './workspace/causal-refresh-telemetry.js';
+export type { CausalRefreshTelemetry, CausalRefreshCallbackMeasurement } from './workspace/causal-refresh-telemetry.js';
 export * from './workspace/speculation.js';

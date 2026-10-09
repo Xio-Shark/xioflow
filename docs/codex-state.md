@@ -45,16 +45,16 @@
 - 先探测再决策；估算不包含已发生探测和相同固定开销，不声称实测或 token 收益。
 - recomputeWorkspaceCausalBranches：显式跳过探测，完整重算所选联合祖先并强制 OCC 提交。
 - CAUSAL_RECOMPUTATION_PREPARED 记录来源与 full 策略；关联失败回收、未知提交保留资源。
-- benchmark:refresh 七模式 schemaVersion=4；完整阶段成本及因果/验证/重算/策略 journal 计数。
-- 历史六模式样本 causal-recompute.sample.json；直接重算与手工重跑工具数相同。
+- benchmark:refresh 七模式 schemaVersion=4；先固定forecast再扰动，命中/失准样本见causal-refresh-policy.sample.json。
 - refreshWorkspaceCausalBranchesWithPolicy：探测前按宿主概率和条件成本选择 probe / recompute。
 - planWorkspaceCausalRefreshPolicy 纯查询；联合节点去重、持平探测、拒绝非法估算与溢出。
 - CAUSAL_REFRESH_POLICY_SELECTED 先记意图，关联源 branches / atSeq / probeTxPrefix / repairTxId。
 - 预测不授权复用；直接重算沿用 repair 身份、无 validateReuse；两条发布路径均强制 OCC。
 - 概率不自动学习；forecast 与 costModel 同单位，条件刷新成本含复用和完整提交重放。
-- 策略基准先固定 forecast，再注入变化；CLI --forecast=JSON，默认先验独立于实际扰动。
-- policyDecision / policyCostPrediction 报告探测前总成本；原 decision / costPrediction 仍为探测后成本。
-- 四组先验命中/失准各三轮：72/72受验证结果正确，causal-refresh-policy.sample.json。
-- 局部变化选重算26→18次；无变化误判重算9→18次；成本预测准确不代表策略最优。
-- 下一步：持久化真实刷新阶段遥测，为跨运行成本估计提供证据；不从本轮真值反推先验。
-- 最新验证：typecheck/build通过；针对性30项；pnpm test 677通过/7跳过（140.76秒）。
+- 策略入口 CAUSAL_REFRESH_MEASURED 返回 telemetrySeq，关联 decisionSeq / validationSeq。
+- listWorkspaceCausalRefreshTelemetry 支持跨 Run / atSeq / 重开；四类回调分别计次数、异常、耗时。
+- probe / reuse / execute / commitReplay：缓存命中不计调用，复用批次回调次数不是工具数。
+- 总耗时含快照/OCC/清理；保留 unchanged/failed/committed/conflict/threw，未知提交查事务journal。
+- 遥测落盘失败报告执行状态，双失败AggregateError；缺失不算零成本；仅覆盖策略入口，不自动学习。
+- 下一步：按任务特征聚合历史遥测，独立保留验证集评估成本估计，区分失败和缺失样本。
+- 最新验证：typecheck/build通过；针对性56项；pnpm test 683通过/7跳过（146.55秒）。
