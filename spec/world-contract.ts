@@ -15,14 +15,8 @@ export interface WorldVersion extends WorldRef {
   readonly fingerprint: string;
 }
 
-export interface FileCoverage {
-  /** Exact normalized root-relative paths, including declared absent paths. */
-  readonly paths: readonly string[];
-  readonly excluded: readonly string[];
-  readonly symlinks: 'reject';
-  readonly externalReads: 'unsupported';
-  readonly externalWrites: 'unsupported';
-}
+export type { FileCoverage } from '../src/world/state.js';
+import type { FileCoverage } from '../src/world/state.js';
 
 export type DependencyCoverage =
   | { readonly status: 'complete'; readonly manifestHash: string }

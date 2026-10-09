@@ -2,7 +2,7 @@
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；以 docs/NORTH_STAR.md 为最高方向，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环），尚未完成；M1 的设计交付物已齐备，不代表统一入口已实现。
 - M1：docs/world-contract.md 冻结六入口状态表、适配器覆盖及六类失败/重试/资源归属；spec/world-contract.ts 是非公开类型草案，tests/world-contract.types.ts 随 typecheck 检查。
-- 下一轮最小切片：实现 openWorld 的持久世界身份与覆盖清单校验（含重开相同身份、缺失基线拒绝），复用 snapshot/journal；再连接 AgentRuntime 与事务，不再扩成本策略。
+- 下一轮最小切片：在内部 openWorldState 基础上接通隔离 runAgentStep，复用 AgentRuntime/WorkspaceTransactions，记录依赖与产物；不再扩成本策略。
 - M2 缺口：统一句柄运行实现、独立key绑定与close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。M3/M4均未完成。
 - 基础能力：WorkspaceTransactions 文件读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph 持久节点、祖先/历史切片/失效闭包；explainRecomputation 列变化源与最短依赖路径，explainCausalRecovery关联checkpoint。
@@ -29,6 +29,8 @@
 - cleanupAgentCausalFork只处理登记open/conflicted；保留基线；请求与TX_ABORTED精确关联，可查pending/aborted/failed。截止点不是文件系统锁。
 - 历史成本策略/窗口/漂移/恢复预测已有实现，北极星要求降级插件，当前不扩展；统一基准按第5节逐项合并，覆盖前不删样本。
 - benchmark:recovery schemaVersion=6：真实SIGKILL、输入/输出扰动、多文件规模、验证/直接续跑/全量重算；无真实模型token收益证明。
-- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生测试需要gcc/libc6-dev（当前已安装）。
-- 本轮仅冻结契约，不导出 openWorld；编译检查覆盖接入调用、结果穷尽、非成功无receipt与严格observations验证方式。
-- 本轮验证：基线与最终pnpm test均811通过/7跳过；pnpm typecheck（含契约编译检查）与git diff --check通过。
+- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；新会话未必保留gcc/libc6-dev，本轮缺失导致基线3套件加载失败，已补装。
+- 内部 src/world/state.ts 已持久化 worldId、适配器/覆盖哈希与快照；原子保存 WORLD_CREATED/snapshot，重开核对原ref/tree/blob及固定截止点，不导出 openWorld。
+- 精确文件覆盖拒绝越界、重复、symlink、目录及忽略漏收；statePath须在工作区外；基线缺失不重抓。初始化中断保留意图并拒绝重开，自动恢复及目录枚举尚未实现。
+- 内部 close 仅释放domain，尚无句柄级资源报告；覆盖模式仅Git可表示的模式，不保证完整POSIX权限。
+- 本轮验证：新增17项世界状态测试与pnpm typecheck通过；补齐原生编译环境后正在运行最终全量测试。
