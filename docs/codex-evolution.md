@@ -548,3 +548,11 @@
 - 新增7项行为测试与接入/故障表，更新VISION及60行交接；不是完整openWorld，也未承诺终态key幂等或跨checkpoint原子性。
 - 验证：初始708通过/7跳过，3套件缺cc；已安装gcc/libc6-dev。pnpm typecheck、定向27项和git diff --check通过；全量结果待下行记录。
 - 下一步：冻结统一世界句柄类型/状态表，接通终态发布身份与重试查询；宿主仍须保持fork静止并完整声明依赖。
+
+## 2026-10-09 — 持久提交凭据与终态幂等
+- 推进M1发布契约缺口：复用TX_COMMITTED，WorkspaceCommitReceipt携带domain内commitSeq，同txId重试返回原发布事实。
+- 新增只读getWorkspaceCommitResult；重开与候选已删除仍可查询，不重新验收、应用或清理；undefined不冒充未写入。
+- 清理失败前移除终态活动缓存，避免abort改写已提交状态；成功凭据不证明资源回收或checkpoint绑定完成。
+- 新增并发/重开/主目录后续修改、清理失败、未知/中止事务测试；更新既有恢复重试预期与发布契约文档。
+- 下一步仍为M1：统一世界句柄类型、状态表、覆盖清单与六类故障资源归属；独立key与close尚未实现。
+- 验证：基线808通过/7跳过；pnpm typecheck、最终pnpm test（811通过/7跳过）与git diff --check通过。

@@ -36,6 +36,7 @@ import { ReadTracker, evaluateReadEvidence } from './read-evidence.js';
 import {
   CommitOptions,
   CommitResult,
+  WorkspaceCommitReceipt,
   TransactionEffects,
   WorkspaceTransaction,
   WorkspaceTransactions,
@@ -158,6 +159,11 @@ export class ProcessSupervisor {
 
   public async commitWorkspaceTransaction(txId: string, options?: CommitOptions): Promise<CommitResult> {
     return this.workspaceTransactions().commit(txId, options);
+  }
+
+  /** Historical file publication only; independent of cleanup and current workspace contents. */
+  public getWorkspaceCommitResult(txId: string): WorkspaceCommitReceipt | undefined {
+    return this.workspaceTransactions().getCommitResult(txId);
   }
 
   public async abortWorkspaceTransaction(txId: string, reason?: string): Promise<void> {

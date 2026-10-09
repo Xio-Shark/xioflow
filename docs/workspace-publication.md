@@ -1,7 +1,7 @@
 # 工作区发布验证
 
 `commitWorkspaceTransaction` 的可选 `publication` 将成果有效性检查接到已有串行提交队列，
-是 [北极星](NORTH_STAR.md) 统一发布契约的实现切片。尚未实现 `openWorld`、提交 key 幂等查询或跨 checkpoint 原子发布。
+是 [北极星](NORTH_STAR.md) 统一发布契约的实现切片。尚未实现 `openWorld`、独立提交 key 或跨 checkpoint 原子发布。
 
 ```ts
 const base = domain.getStore().getSnapshot(tx.baseSnapshotId);
@@ -47,4 +47,30 @@ const result = await supervisor.commitWorkspaceTransaction(tx.txId, {
 缺失来源或指纹读取故障沿用抛错语义，不代表事务已回滚。
 
 已处于 committing 的旧事务不能靠新传入 publication 升级保证；只有准备新提交时启用才会保存证据。
-不传 publication 的既有调用保持原契约。本切片不提供终态 key 重试、资源自动关闭或完整 M1/M2 验收。
+不传 publication 的既有调用保持原发布校验规则。本切片不提供独立 key、资源自动关闭或完整 M1/M2 验收。
+
+## 终态提交身份与重试
+
+事务 `txId` 是 domain 内不可复用的提交身份。成功结果携带 `commitSeq`（`TX_COMMITTED`
+的 journal 序号）；同一 `txId` 再次 commit 直接返回持久结果，不重新验收、应用文件或清理资源。
+即使主目录随后改变，重试仍返回历史发布事实，不能据此断言当前文件仍有效。
+
+```ts
+const receipt = supervisor.getWorkspaceCommitResult(tx.txId);
+// undefined 表示没有持久成功记录，不代表没有写入：TX_COMMITTING 可能已部分应用。
+if (receipt) console.log(receipt.txId, receipt.commitSeq);
+```
+
+查询只读，不依赖候选、快照或主目录仍存在，domain 关闭重开后身份不变。
+已有 journal 从 TX_COMMITTED 与 TX_BEGUN 恢复原验证方式、读写集和读追踪声明。
+已中止事务不能提交，已冲突事务仍需从当前世界重新准备。
+
+| 状态 / 输入 | 返回与重试 | 资源归属 |
+| --- | --- | --- |
+| 尚无 TX_COMMITTED 的查询 | undefined；不得推断未发布 | 保留事务及恢复来源，按现有 committing 协议处理 |
+| 已持久提交后同 txId 重试 | 原结果和相同 commitSeq；忽略新传回调 | 不再触碰文件，不自动重新清理 |
+| 文件发布成功、随后清理抛错 | 首次调用仍抛清理异常；查询或重试可取成功凭据 | 遗留 fork 由宿主核对引用后回收，基线继续保留 |
+| 已中止后提交 | 拒绝，不生成提交凭据 | 沿用中止后的资源记录 |
+
+成功凭据只证明文件发布已落盘记录，不等于 checkpoint 绑定成功或资源已回收。
+统一 close 的可查询清理状态与独立 key 绑定属于后续 M1 契约，不用重复文件发布补偿清理失败。

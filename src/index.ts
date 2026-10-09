@@ -25,6 +25,7 @@ export * from './agents/workspace-resources.js';
 export * from './snapshot/git-shadow.js';
 export type {
   WorkspacePublicationValidation,
+  WorkspaceCommitReceipt,
   CommitOptions,
   CommitResult,
   CommitValidation,

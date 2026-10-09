@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -253,7 +253,57 @@ describe('workspace transactions (optimistic parallel agents)', () => {
     const res = await supervisor.commitWorkspaceTransaction('tx-a');
     expect(res.status).toBe('committed');
     expect(fs.readFileSync(path.join(repoDir, 'src/a.ts'), 'utf8')).toBe('export const a = 9;\n');
-    await expect(supervisor.commitWorkspaceTransaction('tx-a')).rejects.toThrow(/already closed/);
+    expect(await supervisor.commitWorkspaceTransaction('tx-a')).toEqual(res);
+  });
+
+  it('returns one durable receipt for concurrent retries and after reopening without a fork', async () => {
+    const tx = await begin('receipt', 'run-a');
+    expect(supervisor.getWorkspaceCommitResult(tx.txId)).toBeUndefined();
+    fs.writeFileSync(path.join(tx.forkRoot, 'shared.txt'), 'published');
+    const [first, second] = await Promise.all([
+      supervisor.commitWorkspaceTransaction(tx.txId), supervisor.commitWorkspaceTransaction(tx.txId),
+    ]);
+    expect(first).toEqual(second);
+    expect(first).toMatchObject({ commitSeq: expect.any(Number) });
+    expect(fs.existsSync(tx.forkRoot)).toBe(false);
+    fs.writeFileSync(path.join(repoDir, 'shared.txt'), 'later world');
+    domain.close();
+    domain = ExecutionDomain.acquire(path.join(tempDir, 'domain'), 'tx-domain');
+    supervisor = new ProcessSupervisor(domain);
+    const before = domain.getStore().getJournalEvents(domain.domainId);
+    expect(supervisor.getWorkspaceCommitResult(tx.txId)).toEqual(first);
+    const accept = vi.fn(async () => { throw new Error('must not validate historical receipt'); });
+    expect(await supervisor.commitWorkspaceTransaction(tx.txId, {
+      publication: { coverage: 'unknown', outputFingerprint: 'different', accept },
+    })).toEqual(first);
+    expect(accept).not.toHaveBeenCalled();
+    expect(domain.getStore().getJournalEvents(domain.domainId)).toEqual(before);
+    expect(before.filter(e => e.type === 'TX_COMMITTED')).toHaveLength(1);
+    expect(fs.readFileSync(path.join(repoDir, 'shared.txt'), 'utf8')).toBe('later world');
+  });
+
+  it('preserves publication identity when post-commit cleanup fails', async () => {
+    const tx = await begin('cleanup-failure', 'run-a');
+    fs.writeFileSync(path.join(tx.forkRoot, 'shared.txt'), 'published');
+    const cleanup = vi.spyOn(supervisor, 'dematerialize').mockRejectedValueOnce(new Error('cleanup unavailable'));
+    await expect(supervisor.commitWorkspaceTransaction(tx.txId)).rejects.toThrow('cleanup unavailable');
+    const receipt = supervisor.getWorkspaceCommitResult(tx.txId);
+    expect(receipt).toMatchObject({ status: 'committed', commitSeq: expect.any(Number) });
+    expect(fs.existsSync(tx.forkRoot)).toBe(true);
+    fs.writeFileSync(path.join(repoDir, 'shared.txt'), 'later world');
+    expect(await supervisor.commitWorkspaceTransaction(tx.txId)).toEqual(receipt);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    await expect(supervisor.abortWorkspaceTransaction(tx.txId)).rejects.toThrow('already closed');
+    expect(fs.readFileSync(path.join(repoDir, 'shared.txt'), 'utf8')).toBe('later world');
+    cleanup.mockRestore();
+  });
+
+  it('does not invent a receipt for an aborted or unknown transaction', async () => {
+    const tx = await begin('aborted', 'run-a');
+    await supervisor.abortWorkspaceTransaction(tx.txId);
+    expect(supervisor.getWorkspaceCommitResult(tx.txId)).toBeUndefined();
+    expect(supervisor.getWorkspaceCommitResult('unknown')).toBeUndefined();
+    await expect(supervisor.commitWorkspaceTransaction(tx.txId)).rejects.toThrow('already closed');
   });
 
   it('refuses to reuse a transaction id', async () => {

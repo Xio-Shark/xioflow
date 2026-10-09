@@ -85,8 +85,13 @@ export type ObservationOutcome =
   /** 重放通过了，但重放期间主工作区又被改动：结论作废，不应用。 */
   | { attempted: true; reason: 'workspace_changed' };
 
+/** Durable file-publication receipt; commitSeq is scoped to the owning domain. */
+export type WorkspaceCommitReceipt = {
+  status: 'committed'; txId: string; commitSeq: number; validation: CommitValidation;
+} & TransactionEffects;
+
 export type CommitResult =
-  | ({ status: 'committed'; txId: string; validation: CommitValidation } & TransactionEffects)
+  | WorkspaceCommitReceipt
   | ({ status: 'conflict'; txId: string; conflicts: TransactionConflict[]; observation?: ObservationOutcome } & TransactionEffects);
 
 export class WorkspacePublicationError extends Error {
@@ -210,6 +215,23 @@ export class WorkspaceTransactions {
     return run;
   }
 
+  /** Read-only historical publication fact; undefined does not rule out partial application. */
+  public getCommitResult(txId: string): WorkspaceCommitReceipt | undefined {
+    const events = this.journal(txId);
+    const committed = events.find((event) => event.type === 'TX_COMMITTED');
+    if (!committed) return undefined;
+    const begun = events.find((event) => event.type === 'TX_BEGUN');
+    if (!begun) throw new Error(`Committed workspace transaction "${txId}" has no beginning`);
+    const payload = committed.payload;
+    const readSet = payload.readSet as string[] | null;
+    return {
+      status: 'committed', txId, commitSeq: committed.seq,
+      validation: (payload.validation ?? (readSet === null ? 'write_only' : 'files')) as CommitValidation,
+      readTracking: begun.payload.readTracking as ReadTracking,
+      readSet, writeSet: payload.writeSet as WriteEntry[],
+    };
+  }
+
   public async abort(txId: string, reason = 'aborted by host'): Promise<void> {
     const tx = await this.require(txId);
     if (tx.status === 'committing') {
@@ -228,6 +250,8 @@ export class WorkspaceTransactions {
   }
 
   private async commitSerialized(txId: string, options?: CommitOptions): Promise<CommitResult> {
+    const recorded = this.getCommitResult(txId);
+    if (recorded) return recorded;
     const tx = await this.require(txId);
     if (tx.status === 'conflicted') {
       throw new Error(`Workspace transaction "${txId}" has conflicts; abort it and start again from the current workspace`);
@@ -310,6 +334,7 @@ export class WorkspaceTransactions {
     const { effects, validation } = plan;
     const leaseOwner = `${txId}:apply`;
     this.host.domain.allocateResources(leaseOwner, [`workspace:write:${tx.root}`]);
+    let commitSeq: number;
     try {
       if (!committing && plan.replay && !(await this.unchangedSince(tx, plan.replay.snapshotId))) {
         // 重放用的是拍快照那一刻的工作区；拿到写租约时它已经不是那个状态，重放的结论与写集都不再成立
@@ -324,7 +349,7 @@ export class WorkspaceTransactions {
         this.record(tx.runId, 'TX_COMMITTING', { txId, ...plan });
       }
       this.apply(tx, effects.writeSet, plan.sourceRoot);
-      this.record(tx.runId, 'TX_COMMITTED', {
+      commitSeq = this.record(tx.runId, 'TX_COMMITTED', {
         txId,
         root: tx.root,
         writeSet: effects.writeSet,
@@ -335,13 +360,13 @@ export class WorkspaceTransactions {
       this.host.domain.internalReleaseResources(leaseOwner);
     }
     tx.status = 'committed';
+    this.open.delete(txId);
     await this.host.dematerialize(tx.forkPath);
     if (plan.replay) {
       await this.host.dematerialize(plan.replay.forkPath);
       await this.host.pruneSnapshot(plan.replay.snapshotId, tx.runId);
     }
-    this.open.delete(txId);
-    return { status: 'committed', txId, validation, ...effects };
+    return { status: 'committed', txId, commitSeq, validation, ...effects };
   }
 
   private rejectPublication(tx: OpenTransaction, reason: WorkspacePublicationError['reason']): never {
