@@ -368,3 +368,11 @@ explainWorldPublication.bindings 独立报告 pending/bound/failed；TX_COMMITTE
 内部发布结果直接复用 `WorldCommitResult`，rejected 明确包含 candidate_abandoned；
 首次发布、清理后恢复及历史回执均核验 validation=observations，不能将较弱回执标成 strict 成功。
 工具异常仍返回 validation_failed，输出与业务拒绝仅返回契约列明的原因。
+
+### 刷新结果的固定解释引用
+
+内部 `world.refresh` 返回 `WorldRefreshResult`，在原准备结果上显式提供 `ref`。
+成功及 unknown 结果的 `ref` 指向持久刷新完成报告，使用 `world.explain(refreshed.ref)`
+可在提交前查询验证计划、变化路径与实际复用映射；失败仍使用原失败引用及其截止点。
+提交和再次刷新继续使用 `refreshed.candidate`，其准备身份与 `atSeq` 不变。
+直接解释候选不包含它的截止点之后才产生的刷新报告。各引用均可序列化并在重开后只读查询。

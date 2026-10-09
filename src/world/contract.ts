@@ -81,6 +81,9 @@ export type PreparationResult =
   | { readonly status: 'unknown'; readonly candidate: WorldCandidate; readonly reasons: readonly string[] }
   | { readonly status: 'failed'; readonly ref: WorldRef; readonly reason: string };
 
+/** Explicit refresh evidence cutoff; candidate.atSeq remains its preparation identity. */
+export type WorldRefreshResult = PreparationResult & { readonly ref: WorldRef };
+
 export interface CommitIdentity {
   readonly worldId: string;
   readonly candidateId: string;
@@ -125,7 +128,7 @@ export interface WorldCloseResult {
 export interface WorldHandle {
   readonly worldId: string;
   runAgentStep(agent: WorldAgent, input: { task: string }): Promise<PreparationResult>;
-  refresh(candidate: WorldCandidate, options: { onUnknown: 'reject' | 'recompute' }): Promise<PreparationResult>;
+  refresh(candidate: WorldCandidate, options: { onUnknown: 'reject' | 'recompute' }): Promise<WorldRefreshResult>;
   /** An omitted cutoff captures the current head once and returns it in ref.atSeq. */
   explain(target: WorldRef | { identity: CommitIdentity; atSeq?: number }): Promise<WorldExplanation>;
   commit(candidate: WorldCandidate, options: { validation: 'strict'; key: string }): Promise<WorldCommitResult>;

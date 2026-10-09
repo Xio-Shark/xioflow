@@ -46,7 +46,9 @@ export async function openWorld(options: { root: string; statePath: string; adap
           async execute() { throw new Error('World agent is not attached after reopening'); },
         }, policy);
         if (report.result.status !== 'failed' && agent) agents.set(report.result.candidate.id, agent);
-        return report.result;
+        // Successful/unknown refreshes expose the completed report separately
+        // from the older candidate identity. Failed results keep their failure cutoff.
+        return report.result.status === 'failed' ? report.result : { ...report.result, ref: report.ref };
       });
     },
     explain(target: WorldRef | { identity: CommitIdentity; atSeq?: number }) {

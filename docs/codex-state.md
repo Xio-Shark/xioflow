@@ -1,9 +1,8 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
-- 下一步最小切片：修复refresh返回候选的explain缺少刷新计划/变化路径；保留固定截止点语义，再汇总M2不变式证据。
+- 下一步最小切片：汇总北极星第3节M2不变式的统一证据索引，定位未覆盖项，未验收前不启动M3。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约冻结，M3/M4待推进。
-- M2完成标准仍缺：全部不变式的统一证据索引及发布前刷新解释收口；六场景各10次统一验收见docs/world-acceptance.md。
-- 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
+- M2完成标准仍缺：全部不变式的统一证据索引与逐项核验；六场景各10次统一验收见docs/world-acceptance.md。
 - WorkspaceCausalGraph持久节点、祖先/历史切片/失效闭包；explainRecomputation返回变化源及最短路径，explainCausalRecovery关联checkpoint。
 - prepareWorkspaceRepair拓扑重算与独立结果复用；view(heads)连续修复；共享多分支按源seq去重。
 - validateWorkspaceCausalBranches同一基线逐分支隔离重放，首差即停，工具异常不算changed；持久报告可重开查询。
@@ -56,5 +55,6 @@
 - 本轮M2：close持久abandon后释放精确自有checkpoint引用并清理fork；保留其他agent引用、历史基线和缺结果/未决key，重开提交拒绝abandoned。
 - 本轮M2：失败step/refresh/recompute引用可explain，返回阶段/原因、空候选或旧候选、验证与资源；固定截止点只读且重开一致。
 - 本轮M2：新增统一句柄六场景60例，独立BigInt oracle核对发布正文，检查隔离、生成次数、重开固定解释与终态key。
-- 已知缺口：候选atSeq早于WORLD_REFRESH_COMPLETED，直接explain无plan；发布身份解释有完整计划，不应扩大历史截止点冒充原证据。
-- 验证：相关测试/typecheck结果见演进日志；不足5分钟未跑全量，下一轮优先安排补跑（不作开发基线）。
+- 本轮M2：refresh返回WorldRefreshResult.ref，成功/unknown指向完成报告，失败保留原失败ref；explain(refreshed.ref)在发布前给出计划与变化路径。
+- candidate.atSeq不变，直接explain(candidate)仍只含准备时刻证据；六场景60例检查刷新引用的固定截止点与重开一致。
+- 验证：handle/acceptance最终68项、refresh专项20项、typecheck、diff --check通过；不足5分钟未跑全量，下一轮优先安排补跑（不作开发基线）。

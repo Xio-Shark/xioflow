@@ -83,7 +83,7 @@ it.each(cases)('M2 $scenario trial $trial: publication, isolation and frozen his
     const refreshed = await world.refresh(initial.candidate, { onUnknown: 'reject' });
     expect(await outputs(root)).toEqual(['unpublished a', 'unpublished b']);
     expect(generated).toBe(scenario === 'all' ? 4 : ['local', 'stale'].includes(scenario) ? 3 : 2);
-    const ref = refreshed.status === 'failed' ? refreshed.ref : refreshed.candidate;
+    const ref = refreshed.ref;
     const evidence = await world.explain(ref);
     if (scenario === 'tool_error') {
       expect(refreshed.status).toBe('failed');
@@ -95,6 +95,15 @@ it.each(cases)('M2 $scenario trial $trial: publication, isolation and frozen his
       expect(replays).toBe(0);
     } else {
       expect(refreshed.status).toBe('prepared');
+      expect(evidence.plan?.invalidated).toHaveLength(scenario === 'stable' ? 0 : scenario === 'all' ? 4 : 2);
+      expect(evidence.preparation.refresh?.strategy).toBe(scenario === 'stable' ? 'reuse' : 'incremental');
+      for (const node of evidence.plan!.invalidated.filter(node => node.observation.kind === 'mutate')) {
+        expect(evidence.plan!.explanations).toContainEqual({ nodeSeq: node.seq,
+          causes: [{ changedSeq: node.dependsOn![0], path: [node.dependsOn![0], node.seq] }] });
+      }
+      if (refreshed.status !== 'prepared') throw new Error('expected preparation');
+      expect(ref.atSeq).toBeGreaterThan(refreshed.candidate.atSeq);
+      expect((await world.explain(refreshed.candidate)).plan).toBeNull();
     }
     if (scenario === 'stale') await fs.writeFile(path.join(root, 'a'), String(150 + trial));
     expected = await oracle(root);

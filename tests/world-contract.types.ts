@@ -8,7 +8,8 @@ export async function contractExample(openWorld: OpenWorld, agent: WorldAgent,
     const step = await world.runAgentStep(agent, { task: 'Generate quotes' });
     if (step.status === 'failed') return await world.explain(step.ref);
     const refreshed = await world.refresh(step.candidate, { onUnknown: 'recompute' });
-    if (refreshed.status === 'failed') return await world.explain(refreshed.ref);
+    const explanation = await world.explain(refreshed.ref);
+    if (refreshed.status === 'failed') return explanation;
     const result = await world.commit(refreshed.candidate, { validation: 'strict', key: refreshed.candidate.id });
     if (result.status === 'committed') return result.receipt.commitSeq;
     return result.status;

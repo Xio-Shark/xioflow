@@ -115,7 +115,14 @@ it('carries the agent across refreshes and fails new inference honestly after re
   expect(execute).toHaveBeenCalledTimes(3);
   await world.close();
   world = await openWorld(options());
-  expect(await world.refresh(third.candidate, { onUnknown: 'reject' })).toMatchObject({ status: 'unknown' });
+  const rejected = await world.refresh(third.candidate, { onUnknown: 'reject' });
+  expect(rejected.status).toBe('unknown');
+  const evidence = await world.explain(rejected.ref);
+  expect(evidence.preparation).toMatchObject({ candidate: third.candidate, plan: null,
+    refresh: { strategy: 'reject' }, validation: { status: 'unknown' } });
+  const repeated = await world.refresh(third.candidate, { onUnknown: 'reject' });
+  expect(repeated.ref.id).not.toBe(rejected.ref.id);
+  expect(await world.explain(rejected.ref)).toEqual(evidence);
   expect(await world.refresh(third.candidate, { onUnknown: 'recompute' })).toMatchObject({
     status: 'failed', reason: expect.stringContaining('not attached'),
   });

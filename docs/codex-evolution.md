@@ -805,3 +805,11 @@
 - 验证：acceptance.test.ts 60/60通过（47.63s），pnpm typecheck及git diff --check通过。
 - 发现候选截止点早于刷新报告，直接explain候选无plan；发布身份有完整计划，下一轮优先收口，不提前宣告M2完成。
 - M2仍缺全部不变式的统一证据索引；剩余不足5分钟未跑全量，下一轮优先安排补跑。
+
+### 2026-10-09 — M2 frozen refresh explanation reference
+- world.refresh保留并返回显式WorldRefreshResult.ref，复用既有刷新报告读取；失败保持原失败截止点。
+- world.explain(refreshed.ref)发布前可查计划、变化路径及复用证据，candidate.atSeq与提交身份不变。
+- 六场景60例增加发布前失效集合/输入到输出路径/刷新策略断言，旧候选截止点不混入后续证据。
+- 补充同一unknown候选多次拒绝刷新引用独立、旧解释不变的句柄回归；同步类型示例和契约文档。
+- 验证：handle/acceptance最终68/68通过（56.57s），refresh专项20/20通过，typecheck及diff --check通过。
+- M2仍缺不变式统一证据索引；本轮剩余不足5分钟未跑全量，下一轮优先安排补跑。
