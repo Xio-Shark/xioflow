@@ -24,3 +24,28 @@ it.each(['stable', 'input-changed'] as const)('recovers an actually killed worke
       rootCorrect: true, transactionHistoryVerified: true });
   }
 }, 30_000);
+
+it.each(['stable', 'input-changed'] as const)('validates pending recovery after SIGKILL before distribution: %s', async recoveryInput => {
+  const report = await runCausalRecoveryBenchmark({ trials: 1, branches: 2, hashRounds: 2,
+    interruption: 'sigkill', publication: 'input-changed', recoveryInput });
+  expect(report.schemaVersion).toBe(4);
+  expect(report.samples).toHaveLength(3);
+  for (const sample of report.samples) {
+    expect(sample.success).toBe(true);
+    expect(sample.preservedPublications).toBe(true);
+    expect(sample).toMatchObject({ processCrash: { signal: 'SIGKILL', gracefulClose: false } });
+    expect(sample.publication).toMatchObject({ firstStatus: 'conflict', finalStatus: 'committed',
+      checkpointsCurrent: true, rootCorrect: true, transactionHistoryVerified: true });
+    const changed = recoveryInput === 'input-changed';
+    expect(sample.recoveryExecutionToolCalls).toBe(changed || sample.mode === 'rerun-unfinished' ? 2 : 0);
+    expect(sample.recoveryEvidence.bindingCalls).toBe(changed && sample.mode === 'durable-recovery' ? 2 : 1);
+    expect(sample.recoveryEvidence.rejectedBindings).toBe(changed && sample.mode === 'durable-recovery' ? 1 : 0);
+    expect(sample.recoveryEvidence.distributionValidationReads).toBe(sample.recoveryEvidence.bindingCalls);
+    if (sample.mode === 'validated-recovery') {
+      expect(sample.recoveryEvidence.resumeStatus).toBe(changed ? 'stale' : 'resumed');
+      expect(sample.recoveryEvidence.resumeValidationSeq).toBeGreaterThan(0);
+      expect(sample.recoveryEvidence.validationRecorded).toBe(true);
+      expect(sample.recoveryEvidence.probeCalls).toBe(2);
+    }
+  }
+}, 30_000);

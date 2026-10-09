@@ -56,5 +56,5 @@
 - listAgentCausalForkCleanups：runId/txId/atSeq/重开查询pending/aborted/failed；精确关联TX_ABORTED reason，失败持久记录；双重故障抛AggregateError，未决不推断磁盘。
 - benchmark:recovery schemaVersion=3：第四参数stable/input-changed接恢复→强制OCC→变化拒绝→全批刷新→代表输出提交；第五参数close/sigkill新增真实worker终止，failed/pending边界保持domain打开，核对SIGKILL后接管遗留锁并从journal恢复。12变化样本正确，执行8→4；crash.sample记录进程开销，非多事务原子提交/断电/模型测试。真实进程基准保留，用于后续恢复验证成本对比。
 - resumeAgentSharedCausalRefreshWithValidation：当前同基线重放pending的修复后heads（含复用祖先），matched才续跑；stale/validation_failed保留pending，无bind/重算。completed无pending不探测，resumed仍需检查batch.outcomes。
-- 验证与绑定共用preparation重叠保护；探测后重查共享事务开放，checkpoint推进逐项skipped。AGENT_CAUSAL_RESUME_VALIDATED关联plan/preparation/validation；返回validationSeq为关联事件，validation.seq为报告。
-- 限制：只验证声明行为，不能证明共享fork磁盘/上下文未变；宿主仍负责输出一致性和强制OCC。下一步：将验证续跑接入真实进程恢复基准，对比过时绑定分发成本，并处理共享输出完整性。
+- resume验证与绑定共用preparation重叠保护；探测后重查共享事务，checkpoint推进逐项skipped；AGENT_CAUSAL_RESUME_VALIDATED关联plan/preparation/validation。仅验证声明行为，不证明共享fork/上下文完整，仍需强制OCC。
+- benchmark:recovery schemaVersion=4：第六参数recoveryInput(stable/input-changed)启用pending三策略对照（直接续跑/验证续跑/重跑）；恢复前扰动与第四参数发布前扰动独立。recoveryEvidence计绑定/探测/拒绝/分发校验，验证事件核对；恢复保留已发布历史，发布后核对全批新鲜度。下一步：共享输出完整性证据，避免输入有效却分发被篡改的持久结果。

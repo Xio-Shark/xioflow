@@ -8,7 +8,7 @@ import { performance } from 'node:perf_hooks';
 import { ExecutionDomain } from '../domain.js';
 import { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { AgentRuntime } from '../agents/runtime.js';
-import { refreshAgentSharedCausalBatch, resumeAgentSharedCausalRefresh, retryAgentSharedCausalRefresh,
+import { refreshAgentSharedCausalBatch, resumeAgentSharedCausalRefresh, resumeAgentSharedCausalRefreshWithValidation, retryAgentSharedCausalRefresh,
   type AgentSharedCausalRecoveryOptions } from '../agents/causal-recovery.js';
 import { listAgentCausalRefreshExecutions } from '../agents/causal-recovery-history.js';
 import { planAgentCausalResourceCleanup, cleanupAgentCausalFork } from '../agents/workspace-resources.js';
@@ -18,41 +18,48 @@ import type { WorkspaceTransaction } from '../workspace/transactions.js';
 
 const exec = promisify(execFile);
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
-const modes = ['durable-recovery', 'rerun-unfinished'] as const;
+const modes = ['durable-recovery', 'rerun-unfinished', 'validated-recovery'] as const;
 const faults = ['binding-failure', 'outcome-interruption'] as const;
 
 type Counters = { executionToolCalls: number; probeCalls: number; bindingCalls: number;
   distributionReads: number; distributionWrites: number; distributionValidationReads: number; injectedFaults: number };
 type Boundary = { before: ReturnType<typeof listAgentCausalRefreshExecutions>[number]; settled: number[];
   counters: Counters; abandonedTxId: string; elapsedBeforeRecovery: number };
-type SampleConfig = { branches: number; hashRounds: number };
+type SampleConfig = { branches: number; hashRounds: number; recoveryInput?: 'stable' | 'input-changed' };
 
 /** Measures durable recovery, with optional OCC publication after a second input change. */
-export async function runCausalRecoveryBenchmark(options: { trials?: number; branches?: number; hashRounds?: number; publication?: 'stable' | 'input-changed'; interruption?: 'close' | 'sigkill' } = {}) {
+export async function runCausalRecoveryBenchmark(options: { trials?: number; branches?: number; hashRounds?: number; publication?: 'stable' | 'input-changed'; interruption?: 'close' | 'sigkill'; recoveryInput?: 'stable' | 'input-changed' } = {}) {
   if (options.publication !== undefined && !['stable', 'input-changed'].includes(options.publication)) throw new Error('Invalid publication');
   if (options.interruption !== undefined && !['close', 'sigkill'].includes(options.interruption)) throw new Error('Invalid interruption');
   const config = { trials: options.trials ?? 3, branches: options.branches ?? 4, hashRounds: options.hashRounds ?? 1000 };
   for (const [key, value] of Object.entries(config)) {
     if (!Number.isSafeInteger(value) || value < (key === 'branches' ? 2 : 1)) throw new Error(`Invalid ${key}`);
   }
+  if (options.recoveryInput !== undefined && !['stable', 'input-changed'].includes(options.recoveryInput)) throw new Error('Invalid recoveryInput');
+  const selectedModes = options.recoveryInput ? modes : modes.slice(0, 2);
+  const selectedFaults = options.recoveryInput ? ['outcome-interruption'] as const : faults;
+  const sampleConfig = { ...config, recoveryInput: options.recoveryInput };
   const samples: (Awaited<ReturnType<typeof runSample>> | Awaited<ReturnType<typeof runKilledSample>>)[] = [];
   for (let trial = 0; trial < config.trials; trial++) {
-    for (const fault of faults) {
-      for (let offset = 0; offset < modes.length; offset++) {
-        samples.push(await (options.interruption === 'sigkill' ? runKilledSample : runSample)(modes[(trial + offset) % modes.length], fault, trial, config, options.publication));
+    for (const fault of selectedFaults) {
+      for (let offset = 0; offset < selectedModes.length; offset++) {
+        samples.push(await (options.interruption === 'sigkill' ? runKilledSample : runSample)(selectedModes[(trial + offset) % selectedModes.length], fault, trial, sampleConfig, options.publication));
       }
     }
   }
-  return { schemaVersion: 3, config, interruption: options.interruption ?? 'close', publication: options.publication ?? null, modelTokens: null,
+  return { schemaVersion: 4, config, recoveryInput: options.recoveryInput ?? null, interruption: options.interruption ?? 'close', publication: options.publication ?? null, modelTokens: null,
     scope: options.publication ? 'recovery-through-occ-publication' : 'checkpoint-and-isolated-workspace-recovery',
     environment: { node: process.version, platform: process.platform, arch: process.arch }, samples,
-    summary: faults.flatMap(fault => modes.map(mode => {
+    summary: selectedFaults.flatMap(fault => selectedModes.map(mode => {
       const rows = samples.filter(row => row.mode === mode && row.fault === fault);
       const mean = (key: 'executionToolCalls' | 'probeCalls' | 'recoveryMs' | 'elapsedMs') =>
         rows.reduce((sum, row) => sum + row[key], 0) / rows.length;
       return { fault, mode, successRate: rows.filter(row => row.success).length / rows.length,
         meanExecutionToolCalls: mean('executionToolCalls'), meanProbeCalls: mean('probeCalls'),
-        meanRecoveryMs: mean('recoveryMs'), meanElapsedMs: mean('elapsedMs') };
+        meanRecoveryMs: mean('recoveryMs'), meanElapsedMs: mean('elapsedMs'),
+        meanRecoveryBindingCalls: rows.reduce((sum, row) => sum + row.recoveryEvidence.bindingCalls, 0) / rows.length,
+        meanRecoveryProbeCalls: rows.reduce((sum, row) => sum + row.recoveryEvidence.probeCalls, 0) / rows.length,
+        meanRejectedBindings: rows.reduce((sum, row) => sum + row.recoveryEvidence.rejectedBindings, 0) / rows.length };
     })) };
 }
 
@@ -136,16 +143,17 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
       }
       return { checkpoint: value, workspace: tx };
     };
-    const refresh = (prefix: string, agentIds: string[]) => refreshAgentSharedCausalBatch(runtime!, supervisor, {
-      agentIds, validation: { ...txOptions(`${prefix}-probe`), closedWorld: true, replayPolicy: 'deterministic',
-        replay: async (entry, context) => {
+    const validation = (prefix: string) => ({ ...txOptions(`${prefix}-probe`), closedWorld: true as const, replayPolicy: 'deterministic' as const,
+        replay: async (entry: CausalNode['observation'], context: string) => {
           counters.probeCalls++;
           const value = fs.readFileSync(path.join(context, 'input.txt'), 'utf8');
           if (entry.call.tool === 'read') return hash(value);
           const result = derive(value);
           fs.writeFileSync(path.join(context, 'derived.txt'), result);
           return hash(result);
-        } },
+        } });
+    const refresh = (prefix: string, agentIds: string[]) => refreshAgentSharedCausalBatch(runtime!, supervisor, {
+      agentIds, validation: validation(prefix),
       prepare: plan => prepareWorkspaceBranchRepair(supervisor, { ...txOptions(`${prefix}-shared`),
         changed: plan.changed, atSeq: Math.max(...plan.affected.map(row => row.checkpoint.seq)),
         branches: plan.affected.map(row => ({ id: row.agentId, heads: row.checkpoint.causalHeads! })),
@@ -183,9 +191,28 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
     }
     const historySurvived = JSON.stringify(listAgentCausalRefreshExecutions(domain)[0]) === JSON.stringify(before);
     inject = false;
-    if (mode === 'rerun-unfinished') await refresh('rerun', [ids.at(-1)!]);
-    else if (fault === 'outcome-interruption') await resumeAgentSharedCausalRefresh(runtime, before.seq, bind);
-    else {
+    const recoveryInput = config.recoveryInput === 'input-changed' ? `recovery-change-${trial}` : updated;
+    fs.writeFileSync(path.join(root, 'input.txt'), recoveryInput);
+    const bindingsBefore = counters.bindingCalls;
+    const probesBeforeRecovery = counters.probeCalls;
+    const validationReadsBefore = counters.distributionValidationReads;
+    let resumeStatus: string | null = null;
+    let resumeValidationSeq: number | null = null;
+    let rejectedBindings = 0;
+    if (mode === 'validated-recovery') {
+      const result = await resumeAgentSharedCausalRefreshWithValidation(runtime, supervisor, before.seq, {
+        validation: validation('resume'), bind,
+      });
+      resumeStatus = result.status;
+      if ('validationSeq' in result) resumeValidationSeq = result.validationSeq;
+      if (result.status === 'stale') await refresh('stale-rerun', [ids.at(-1)!]);
+      else if (result.status !== 'resumed') throw new Error(`Unexpected resume validation: ${result.status}`);
+    } else if (mode === 'rerun-unfinished') await refresh('rerun', [ids.at(-1)!]);
+    else if (fault === 'outcome-interruption') {
+      const batch = await resumeAgentSharedCausalRefresh(runtime, before.seq, bind);
+      rejectedBindings = batch.outcomes.filter(row => row.status === 'failed').length;
+      if (rejectedBindings) await refresh('rejected-rerun', [ids.at(-1)!]);
+    } else {
       const failed = before.publications.at(-1)!;
       if (failed.status !== 'failed') throw new Error('Expected durable failed publication');
       await retryAgentSharedCausalRefresh(runtime, before.seq, { agentId: failed.agentId, failureSeq: failed.seq }, bind);
@@ -202,14 +229,20 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
       cleanedForks++;
     }
     const cleanupMs = performance.now() - cleanupStarted;
-    const expected = derive(updated);
     const correctOutputs = ids.filter(id => {
+      const expected = derive(id === ids.at(-1) ? recoveryInput : updated);
       const agent = runtime!.get(id)!;
       return agent.checkpoint === expected && !!agent.workspace
         && fs.readFileSync(path.join(agent.workspace.forkRoot, 'derived.txt'), 'utf8') === expected;
     }).length;
     const preservedPublications = ids.slice(0, -1).every((id, i) => runtime!.checkpoints(id).at(-1)!.seq === settled[i]);
     const recoveryExecutionToolCalls = counters.executionToolCalls - executionBeforeRecovery;
+    const recoveryEvidence = { resumeStatus, resumeValidationSeq, rejectedBindings,
+      bindingCalls: counters.bindingCalls - bindingsBefore, probeCalls: counters.probeCalls - probesBeforeRecovery,
+      distributionValidationReads: counters.distributionValidationReads - validationReadsBefore,
+      validationRecorded: resumeValidationSeq === null || domain.getStore().getJournalEvents(domain.domainId).some(event =>
+        event.seq === resumeValidationSeq && event.type === 'AGENT_CAUSAL_RESUME_VALIDATED'
+          && event.payload.planSeq === before.seq && event.payload.status === resumeStatus) };
     let publicationResult: {
       scenario: string; firstStatus: string; finalStatus: string; conflictReason: string | null;
       staleOutputBlocked: boolean; checkpointsCurrent: boolean; rootCorrect: boolean;
@@ -223,7 +256,7 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
       const probesBefore = counters.probeCalls;
       let commitReplayToolCalls = 0;
       let commitAttempts = 0;
-      const currentInput = publication === 'input-changed' ? `changed-again-${trial}` : updated;
+      const currentInput = publication === 'input-changed' ? `changed-again-${trial}` : recoveryInput;
       fs.writeFileSync(path.join(root, 'input.txt'), currentInput);
       const publish = async () => {
         const agent = runtime!.get(ids.at(-1)!)!;
@@ -241,6 +274,9 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
             } },
         });
       };
+      if (publication === 'stable' && config.recoveryInput === 'input-changed') {
+        await refresh('publication-current', ids.slice(0, -1));
+      }
       const first = await publish();
       const staleOutputBlocked = publication === 'stable' || (first.status === 'conflict'
         && first.observation?.reason === 'observation_changed' && !fs.existsSync(path.join(root, 'derived.txt')));
@@ -268,11 +304,11 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
     }
     const elapsedMs = performance.now() - started;
     return { mode, fault, trial, ...counters, executionBeforeRecovery, publication: publicationResult,
-      recoveryExecutionToolCalls,
+      recoveryExecutionToolCalls, recoveryEvidence,
       recoveryMs, cleanupMs, elapsedMs, historySurvived, preservedPublications, correctOutputs,
       totalOutputs: ids.length, cleanedForks, abandonedForkDisposition: abandoned.fork?.disposition,
       retainedForks: planAgentCausalResourceCleanup(domain).resources.filter(row => row.state === 'open' && row.fork?.disposition === 'retain').length,
-      success: correctOutputs === ids.length && historySurvived && preservedPublications && counters.injectedFaults === 1
+      success: recoveryEvidence.validationRecorded && correctOutputs === ids.length && historySurvived && preservedPublications && counters.injectedFaults === 1
         && (!publicationResult || (publicationResult.finalStatus === 'committed' && publicationResult.staleOutputBlocked
           && publicationResult.rootCorrect && publicationResult.checkpointsCurrent
           && publicationResult.validation === 'observations' && publicationResult.transactionHistoryVerified)) };

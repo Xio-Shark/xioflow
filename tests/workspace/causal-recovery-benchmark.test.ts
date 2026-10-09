@@ -45,3 +45,16 @@ describe('causal recovery fault benchmark', () => {
     await expect(runCausalRecoveryBenchmark({ hashRounds: NaN })).rejects.toThrow('Invalid hashRounds');
   });
 });
+
+it.each(['stable', 'input-changed'] as const)('compares resume validation before stable OCC publication: %s', async recoveryInput => {
+  const report = await runCausalRecoveryBenchmark({ trials: 1, branches: 2, hashRounds: 2,
+    recoveryInput, publication: 'stable' });
+  expect(report.samples).toHaveLength(3);
+  for (const sample of report.samples) {
+    expect(sample.success).toBe(true);
+    expect(sample.preservedPublications).toBe(true);
+    expect(sample.publication).toMatchObject({ firstStatus: 'committed', finalStatus: 'committed',
+      checkpointsCurrent: true, rootCorrect: true });
+  }
+  await expect(runCausalRecoveryBenchmark({ recoveryInput: 'invalid' as 'stable' })).rejects.toThrow('Invalid recoveryInput');
+});

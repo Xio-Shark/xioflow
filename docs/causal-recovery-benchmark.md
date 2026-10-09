@@ -50,7 +50,7 @@
 | 结果记录中断 | 持久续跑 | 2 | 4 | 55.74 | 393.71 |
 | 结果记录中断 | 重跑未完成分支 | 4 | 5 | 153.00 | 481.63 |
 
-这些是确定性合成负载的小样本，不是生产收益保证。进程终止模式见下文；恢复过程中输入再次改变仍待覆盖。
+这些是确定性合成负载的小样本，不是生产收益保证。进程终止与恢复前输入变化对照见下文。
 
 ## 恢复到 OCC 发布的闭环
 
@@ -67,7 +67,7 @@ JSON 升级为 schemaVersion 2，`publication` 标明场景，旧的隔离恢复
 
 这衡量的是共享、相同文件输出的一次发布，不是多个独立事务的原子提交。
 成功提交会回收该绑定 fork；checkpoint 历史保留，不能假定其旧 fork 仍存在。
-输入扰动发生在恢复之后、提交之前，尚未覆盖恢复过程中输入变化；真正的进程退出可叠加下文模式。
+上述第四参数只在恢复后、提交前扰动输入；恢复前输入变化由下文第六参数控制，真正的进程退出可叠加下文模式。
 
 `publication` 子对象单列提交尝试、提交重放、额外重算、探测与阶段耗时。
 顶层执行/分发计数及 `elapsedMs` 包含发布阶段；`recoveryExecutionToolCalls` 和
@@ -104,7 +104,53 @@ worker 不调用 runtime.close / domain.close，也不执行 finally 清理；�
 该模式的 `elapsedMs` 包含上述开销及完整恢复与发布，不能直接与旧模式总耗时比较。
 `recoveryMs` 从新实例首次获取 domain 前开始，计入遗留锁处理与 journal 重开。
 业务恢复只读取持久 journal / 工作区；IPC 内容只用于基准计数、故障定位和历史对照。
-`stable` 与 `input-changed` 均覆盖两类故障和两种恢复策略；输入扰动仍在恢复后发生。
+省略第六参数时，`stable` 与 `input-changed` 均覆盖两类故障和两种恢复策略；第四参数的输入扰动仍在恢复后发生。
 
 [进程终止原始报告](causal-recovery-crash.sample.json) 提供可复现的成对样本，
 工具调用与正确性独立于进程启动耗时统计，不运行模型或推算 token 收益。
+
+## 恢复前输入变化与验证成本
+
+```sh
+pnpm benchmark:recovery 3 4 1000 input-changed sigkill input-changed
+pnpm benchmark:recovery 3 4 1000 input-changed sigkill stable
+```
+
+第六参数 `recoveryInput` 开启 pending 绑定的三策略对照；省略时保持原来的两类故障、
+两策略矩阵。此参数独立于第四参数：第六参数在 domain 重开后、恢复前改变输入，
+第四参数仍在恢复完成后、OCC 发布前改变输入。也支持 `close` 作为正常关闭对照。
+
+| 策略 | 恢复前输入已变化时的行为 |
+| --- | --- |
+| `durable-recovery` | 直接 resume，独立事务分配后的输入校验拒绝绑定，再刷新未完成分支 |
+| `validated-recovery` | 重放 pending 修复后 heads，得到 stale 后直接刷新未完成分支，避免一次无效绑定 |
+| `rerun-unfinished` | 直接刷新未完成分支，重新探测并重算 |
+
+schemaVersion 4 的 `recoveryEvidence` 单列恢复阶段的绑定、探测、分发输入校验次数与
+拒绝绑定次数；`resumeStatus / resumeValidationSeq / validationRecorded` 核对验证关联事件。
+summary 同时报告恢复绑定、探测和拒绝次数均值。稳定输入下验证要重放读取与派生两个节点，
+直接续跑无需探测；变化输入下先验证增加一次读取探测，却避免一次事务分配及分发输入校验。
+不能只以绑定次数判断耗时收益：探测本身也创建隔离 fork，真实阶段耗时一并报告。
+
+恢复仅更新最后一个 agent。`correctOutputs` 检查它对应恢复时的输入，其他已发布结果
+仍对应各自历史输入；`preservedPublications` 检查它们未被推进。这不等于全批结果新鲜。
+如果第四参数为 stable 且恢复前输入已变化，发布阶段先刷新其余 agent；若为 input-changed，
+则保留先 OCC 拒绝、再刷新全批的流程。最终 `checkpointsCurrent` 检查全批最新状态。
+
+stale 验证保留旧 pending 计划，新刷新不会伪造它完成；直接续跑的拒绝会留下 failed 记录。
+资源保留差异因此属于真实结果，指标之后才清理整个夹具。此基准没有篡改共享输出，
+不能证明磁盘完整性，也不包含模型/token 测量。
+
+本机各3次重复、4 agent、1000轮哈希，18个SIGKILL样本全部正确；
+[变化输入报告](causal-recovery-validation-changed.sample.json)、[稳定输入报告](causal-recovery-validation-stable.sample.json)。
+
+| 恢复前输入 | 策略 | 恢复绑定 | 恢复探测 | 恢复均值 ms |
+| --- | --- | ---: | ---: | ---: |
+| changed | durable-recovery | 2 | 1 | 208.16 |
+| changed | rerun-unfinished | 1 | 1 | 152.82 |
+| changed | validated-recovery | 1 | 2 | 223.22 |
+| stable | durable-recovery | 1 | 0 | 64.04 |
+| stable | rerun-unfinished | 1 | 1 | 162.17 |
+| stable | validated-recovery | 1 | 2 | 120.87 |
+
+均值仅代表此合成负载；验证避免过时绑定，但稳定输入会增加重放成本。
