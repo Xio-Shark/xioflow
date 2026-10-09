@@ -1,8 +1,8 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
-- 下一步最小切片：以统一WorldHandle组织M2六场景各10次验收，复用已有fixture与独立oracle。
+- 下一步最小切片：修复refresh返回候选的explain缺少刷新计划/变化路径；保留固定截止点语义，再汇总M2不变式证据。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约冻结，M3/M4待推进。
-- M2完成标准仍缺：六类场景各10次、独立oracle、全部不变式及重开验收；句柄冻结类型已收口。
+- M2完成标准仍缺：全部不变式的统一证据索引及发布前刷新解释收口；六场景各10次统一验收见docs/world-acceptance.md。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph持久节点、祖先/历史切片/失效闭包；explainRecomputation返回变化源及最短路径，explainCausalRecovery关联checkpoint。
 - prepareWorkspaceRepair拓扑重算与独立结果复用；view(heads)连续修复；共享多分支按源seq去重。
@@ -53,8 +53,8 @@
 - 本轮M2：内部closeWorldResources复用共享规划/清理，持久WORLD_RESOURCES_CLOSED后释放domain；重复调用返回独立副本，不重复回收。
 - readWorldClose按固定ref重开只读查询；清理失败逐项记录，报告落盘失败不宣称关闭；新会话可重试失败清理。
 - 本轮M2：内部openWorld组合runAgentStep/refresh/explain/strict commit/close；同步停止接收并等待全部已接收操作结束后清理，失败操作不阻断关闭。
-- 未公开API；openWorld通过WorldHandle/OpenWorld类型验收，explain顶层投影coverage/plan并保留详细证据；初始化中断仍拒绝重开，无自动恢复。
 - 本轮M2：close持久abandon后释放精确自有checkpoint引用并清理fork；保留其他agent引用、历史基线和缺结果/未决key，重开提交拒绝abandoned。
 - 本轮M2：失败step/refresh/recompute引用可explain，返回阶段/原因、空候选或旧候选、验证与资源；固定截止点只读且重开一致。
-- 本轮M2：发布结果统一冻结类型，candidate_abandoned明确为rejected；恢复及历史回执核验observations，不伪装strict成功。
-- 验证：本轮相关测试与typecheck结果见演进日志；全量待本轮末尾执行并更新。
+- 本轮M2：新增统一句柄六场景60例，独立BigInt oracle核对发布正文，检查隔离、生成次数、重开固定解释与终态key。
+- 已知缺口：候选atSeq早于WORLD_REFRESH_COMPLETED，直接explain无plan；发布身份解释有完整计划，不应扩大历史截止点冒充原证据。
+- 验证：相关测试/typecheck结果见演进日志；不足5分钟未跑全量，下一轮优先安排补跑（不作开发基线）。

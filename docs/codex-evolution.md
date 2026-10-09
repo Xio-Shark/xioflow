@@ -797,3 +797,11 @@
 - 新增较弱回执拒绝测试，补充句柄字段、失败覆盖与重开一致性断言；未新增公开入口。
 - 验证：handle/commit共30项、typecheck及git diff --check通过；补齐gcc/libc6-dev，全量待本轮末尾执行。
 - M2仍缺六场景各10次、独立oracle及全部不变式的统一验收；下一轮优先此项。
+
+### 2026-10-09 — M2 unified handle acceptance matrix
+- 新增统一openWorld句柄六场景各10次验收，独立Git目录、不同输入，BigInt oracle逐字节核对实际发布结果。
+- 检查局部/全部失效节点数及生成次数，unknown与工具异常分流、拒绝不写输出、刷新后变化冲突。
+- 验证关闭重开固定解释/发布身份一致及终态同key不重放；测试和范围说明见docs/world-acceptance.md。
+- 验证：acceptance.test.ts 60/60通过（47.63s），pnpm typecheck及git diff --check通过。
+- 发现候选截止点早于刷新报告，直接explain候选无plan；发布身份有完整计划，下一轮优先收口，不提前宣告M2完成。
+- M2仍缺全部不变式的统一证据索引；剩余不足5分钟未跑全量，下一轮优先安排补跑。
