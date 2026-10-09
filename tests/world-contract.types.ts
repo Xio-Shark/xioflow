@@ -42,3 +42,7 @@ export function requireStrictPublication(result: Extract<WorldCommitResult, { st
   const validation: 'observations' = result.receipt.validation;
   return validation;
 }
+
+// The callable implementation must satisfy the frozen contract, including strict receipts.
+import { openWorld as implementedOpenWorld } from '../src/world/handle.js';
+export const implementedContract: OpenWorld = implementedOpenWorld;

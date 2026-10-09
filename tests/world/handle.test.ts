@@ -72,6 +72,9 @@ it('composes refresh and strict commit, drains immediately accepted publication,
   expect(committed.status).toBe('committed');
   const explanation = await world.explain({ identity: committed.identity });
   expect(explanation.publication).toEqual(committed);
+  expect(explanation.coverage).toEqual(refreshed.candidate.coverage);
+  expect(explanation.plan).toEqual(explanation.preparation.plan);
+  if (committed.status === 'committed') expect(committed.receipt.validation).toBe('observations');
   const retry = world.commit(refreshed.candidate, { validation: 'strict', key: 'stable' });
   await world.close();
   expect(await retry).toEqual(committed);
@@ -141,6 +144,7 @@ it('explains failed agent execution at a frozen cutoff after later work and reop
   const explanation = await world.explain(failed.ref);
   expect(explanation).toMatchObject({ ref: failed.ref,
     failure: { ref: failed.ref, stage: 'step', reason: failed.reason },
+    coverage: { status: 'unknown', reasons: ['preparation_failed'] }, plan: null,
     preparation: { candidate: null, coverage: { status: 'unknown' }, plan: null },
     publication: null, bindings: [],
   });

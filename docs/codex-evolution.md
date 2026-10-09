@@ -790,3 +790,10 @@
 - 验证：handle/commit/baseline-integrity/recompute/refresh共66项及typecheck通过，git diff --check通过。
 - 剩余不足5分钟未跑全量；下一轮安排补跑，环境缺cc需先补gcc/libc6-dev。
 - M2仍缺句柄冻结类型投影及六场景各10次完整验收；未新增公开入口。
+
+### 2026-10-09 — M2 align the world handle with the frozen contract
+- openWorld通过WorldHandle/OpenWorld编译验收；explain投影固定截止点coverage/plan，保留完整失败与复用证据。
+- 内部提交结果复用冻结联合类型，补齐candidate_abandoned；发布/恢复/查询均核验observations回执。
+- 新增较弱回执拒绝测试，补充句柄字段、失败覆盖与重开一致性断言；未新增公开入口。
+- 验证：handle/commit共30项、typecheck及git diff --check通过；补齐gcc/libc6-dev，全量待本轮末尾执行。
+- M2仍缺六场景各10次、独立oracle及全部不变式的统一验收；下一轮优先此项。

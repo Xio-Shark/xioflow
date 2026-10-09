@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { commitWorldCandidate, readWorldPublication } from '../../src/world/commit.js';
+import { ProcessSupervisor } from '../../src/supervisor/supervisor.js';
 import { explainWorldPublication } from '../../src/world/explain.js';
 import { openWorldState } from '../../src/world/state.js';
 import { prepareWorldStep } from '../../src/world/prepare.js';
@@ -348,4 +349,20 @@ it('records a changed checkpoint as binding failure while retaining publication 
   const events = store.getJournalEvents('world');
   expect(await commitWorldCandidate(world, candidate, adapter)).toEqual(published);
   expect(store.getJournalEvents('world')).toEqual(events);
+});
+
+it('does not present a weaker transaction receipt as a strict world publication', async () => {
+  const candidate = await prepare();
+  const result = await commitWorldCandidate(world, candidate, adapter, { key: 'strict-receipt' });
+  if (result.status !== 'committed') throw new Error('expected committed');
+  const events = world.domain.getStore().getJournalEvents('world');
+  const weaker = vi.spyOn(ProcessSupervisor.prototype, 'getWorkspaceCommitResult')
+    .mockReturnValue({ ...result.receipt, validation: 'files' });
+  try {
+    expect(() => readWorldPublication(world, 'strict-receipt')).toThrow('observation-validated receipt');
+    await expect(commitWorldCandidate(world, candidate, adapter, { key: 'strict-receipt' }))
+      .rejects.toThrow('observation-validated receipt');
+    expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+  } finally { weaker.mockRestore(); }
+  expect(readWorldPublication(world, 'strict-receipt').result).toEqual(result);
 });

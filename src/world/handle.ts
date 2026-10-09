@@ -1,4 +1,4 @@
-import type { CommitIdentity, FileWorldAdapter, WorldAgent, WorldCandidate, WorldRef } from './contract.js';
+import type { CommitIdentity, FileWorldAdapter, WorldAgent, WorldCandidate, WorldHandle, WorldRef } from './contract.js';
 import { closeWorldResources, type WorldCloseReport } from './close.js';
 import { commitWorldCandidate } from './commit.js';
 import { explainWorldPublication } from './explain.js';
@@ -6,7 +6,7 @@ import { prepareWorldStep } from './prepare.js';
 import { refreshWorldCandidate } from './refresh.js';
 import { openWorldState } from './state.js';
 
-/** Internal integration handle, not yet the public frozen WorldHandle contract.
+/** Internal implementation of the frozen WorldHandle contract; not a package export.
  * close drains accepted work before abandoning unpublished candidates.
  */
 export async function openWorld(options: { root: string; statePath: string; adapter: FileWorldAdapter }) {
@@ -51,7 +51,10 @@ export async function openWorld(options: { root: string; statePath: string; adap
     },
     explain(target: WorldRef | { identity: CommitIdentity; atSeq?: number }) {
       const ref = structuredClone(target);
-      return accept(() => explainWorldPublication(world, ref));
+      return accept(() => {
+        const explanation = explainWorldPublication(world, ref);
+        return { ...explanation, coverage: explanation.preparation.coverage, plan: explanation.preparation.plan };
+      });
     },
     commit(candidate: WorldCandidate, options: { validation: 'strict'; key: string }) {
       const ref = structuredClone(candidate);
@@ -70,5 +73,5 @@ export async function openWorld(options: { root: string; statePath: string; adap
       }
       return closure.then(report => structuredClone(report));
     },
-  };
+  } satisfies WorldHandle;
 }

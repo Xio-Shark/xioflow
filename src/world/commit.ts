@@ -3,13 +3,19 @@ import { WorkspaceCausalGraph } from '../workspace/causal-graph.js';
 import { WorkspacePublicationError, type WorkspaceCommitReceipt } from '../workspace/transactions.js';
 import { bindWorldCheckpoint } from './binding.js';
 import { readWorldArtifacts } from './artifacts.js';
-import type { CommitIdentity, FileWorldAdapter, WorldCandidate, WorldRef } from './contract.js';
+import type { CommitIdentity, FileWorldAdapter, WorldCandidate, WorldCommitResult, WorldRef } from './contract.js';
 import { fingerprintWorldOutput, restoreWorldRevision, type openWorldState } from './state.js';
 
 type WorldState = Awaited<ReturnType<typeof openWorldState>>;
-export type StrictWorldPublication =
-  | { status: 'committed'; receipt: WorkspaceCommitReceipt }
-  | { status: 'unknown' | 'conflict' | 'rejected' | 'validation_failed' | 'undetermined'; reason: string };
+type PublicationStatus = Exclude<WorldCommitResult['status'], 'key_conflict'>;
+export type StrictWorldPublication = {
+  [Status in PublicationStatus]: Omit<Extract<WorldCommitResult, { status: Status }>, 'identity'>
+}[PublicationStatus];
+
+function strictReceipt(receipt: WorkspaceCommitReceipt): Extract<WorldCommitResult, { status: 'committed' }>['receipt'] {
+  if (receipt.validation !== 'observations') throw new Error('World publication requires an observation-validated receipt');
+  return { ...receipt, validation: 'observations' };
+}
 const supervisors = new WeakMap<WorldState['domain'], ProcessSupervisor>();
 
 /** Strict publication implementation; the key coordinator serializes calls. */
@@ -31,7 +37,7 @@ async function publishWorldCandidate(world: WorldState, ref: WorldRef,
   let supervisor = supervisors.get(domain);
   if (!supervisor) { supervisor = new ProcessSupervisor(domain); supervisors.set(domain, supervisor); }
   const prior = supervisor.getWorkspaceCommitResult(candidate.txId);
-  if (prior) return { status: 'committed', receipt: prior };
+  if (prior) return { status: 'committed', receipt: strictReceipt(prior) };
   const finish = (result: StrictWorldPublication) => {
     store.recordJournalEvent({ domainId: domain.domainId, runId: candidate.id,
       type: 'WORLD_PUBLICATION_RESULT', payload: { worldId: state.worldId, id: candidate.id,
@@ -81,25 +87,26 @@ async function publishWorldCandidate(world: WorldState, ref: WorldRef,
         } },
     });
     if (replayError !== undefined) return finish({ status: 'validation_failed', reason: replayError });
-    return finish(result.status === 'committed' ? { status: 'committed', receipt: result }
+    return finish(result.status === 'committed' ? { status: 'committed', receipt: strictReceipt(result) }
       : { status: 'conflict', reason: result.observation?.reason ?? 'workspace_conflict' });
   } catch (error) {
     // Cleanup can fail after publication; the durable receipt takes precedence.
     const receipt = supervisor.getWorkspaceCommitResult(candidate.txId);
-    if (receipt) return finish({ status: 'committed', receipt });
+    if (receipt) return finish({ status: 'committed', receipt: strictReceipt(receipt) });
     const pending = store.getJournalEvents(domain.domainId).some(e => e.type === 'TX_COMMITTING'
       && e.payload.txId === candidate.txId);
     if (pending) return finish({ status: 'undetermined', reason: error instanceof Error ? error.message : String(error) });
-    if (error instanceof WorkspacePublicationError) return finish({
-      status: error.reason === 'output_changed' || error.reason === 'acceptance_rejected' ? 'rejected' : 'validation_failed',
-      reason: replayError ?? error.reason,
-    });
+    if (error instanceof WorkspacePublicationError) {
+      if (replayError === undefined && (error.reason === 'output_changed' || error.reason === 'acceptance_rejected')) {
+        return finish({ status: 'rejected', reason: error.reason });
+      }
+      return finish({ status: 'validation_failed', reason: replayError ?? error.reason });
+    }
     return finish({ status: 'validation_failed', reason: error instanceof Error ? error.message : String(error) });
   }
 }
 
-export type KeyedWorldPublication = (StrictWorldPublication & { identity: CommitIdentity })
-  | { status: 'key_conflict'; identity: CommitIdentity; requestedCandidateId: string; reason: string };
+export type KeyedWorldPublication = WorldCommitResult;
 const publicationQueues = new WeakMap<WorldState['domain'], Promise<unknown>>();
 
 /** Read a fixed journal prefix without replaying tools or touching candidate files. */
@@ -121,7 +128,7 @@ export function readWorldPublication(world: WorldState, key: string, atSeq?: num
   // A crash after TX_COMMITTED but before the world result must still report publication.
   const receipt = new ProcessSupervisor(domain).getWorkspaceCommitResult(identity.txId);
   if (receipt && receipt.commitSeq <= cutoff) return { atSeq: cutoff,
-    result: { status: 'committed', identity, receipt } };
+    result: { status: 'committed', identity, receipt: strictReceipt(receipt) } };
   const result = history.filter(e => e.type === 'WORLD_PUBLICATION_KEY_RESULT'
     && e.payload.worldId === state.worldId && e.payload.key === key).at(-1);
   return { atSeq: cutoff, result: result

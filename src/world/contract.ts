@@ -94,7 +94,7 @@ export type WorldCommitResult =
       readonly receipt: WorkspaceCommitReceipt & { readonly validation: 'observations' } }
   | { readonly status: 'unknown'; readonly identity: CommitIdentity; readonly reason: 'coverage_unknown' }
   | { readonly status: 'conflict'; readonly identity: CommitIdentity; readonly reason: string }
-  | { readonly status: 'rejected'; readonly identity: CommitIdentity; readonly reason: 'output_changed' | 'acceptance_rejected' }
+  | { readonly status: 'rejected'; readonly identity: CommitIdentity; readonly reason: 'output_changed' | 'acceptance_rejected' | 'candidate_abandoned' }
   | { readonly status: 'validation_failed'; readonly identity: CommitIdentity; readonly reason: string }
   | { readonly status: 'undetermined'; readonly identity: CommitIdentity; readonly reason: string }
   | { readonly status: 'key_conflict'; readonly identity: CommitIdentity; readonly requestedCandidateId: string; readonly reason: string };

@@ -337,7 +337,7 @@ explainWorldPublication.bindings 独立报告 pending/bound/failed；TX_COMMITTE
 失败允许再次close，但不重新开放接收。句柄不暴露底层domain，避免绕过排空调度。
 候选关联本进程agent，刷新后传递关联；重开查询、同key续发布和无变化复用无需agent，
 确需新推理但缺宿主驱动时明确failed，不猜测或重放模型。
-这仍是内部集成入口：explain沿用现有完整组合结构，冻结类型投影尚未收口，失败准备查询见下节；
+这仍是内部集成入口：explain保留完整组合结构并投影冻结契约字段，失败准备查询见下节；
 未发布候选的持久中止及引用释放见下节；冻结类型仍待收口。
 不得将其视为完整WorldHandle或M2验收通过；包导出保持不变。
 
@@ -360,4 +360,11 @@ explainWorldPublication.bindings 独立报告 pending/bound/failed；TX_COMMITTE
 未创建事务的失败也保留分配意图、历史基线及 journal 的资源解释；不声明已发布。
 查询只读，不重放工具、不核验当前文件、不推进 journal；固定截止点不会混入
 后续完成或清理事件，关闭重开后结果相同。完整 refresh 报告仍保留原有解释结构。
-句柄到冻结 `WorldExplanation` 的类型投影和六场景验收仍未完成。
+句柄到冻结 `WorldExplanation` 的类型投影已完成；六场景验收仍未完成。
+
+### M2 句柄与冻结契约收口
+内部 `openWorld` 通过 `satisfies WorldHandle` 与 `OpenWorld` 编译验收；仍未从包导出。
+`explain` 顶层 coverage/plan 来自同一固定截止点的 preparation，保留 failure、reuse 等详细证据。
+内部发布结果直接复用 `WorldCommitResult`，rejected 明确包含 candidate_abandoned；
+首次发布、清理后恢复及历史回执均核验 validation=observations，不能将较弱回执标成 strict 成功。
+工具异常仍返回 validation_failed，输出与业务拒绝仅返回契约列明的原因。

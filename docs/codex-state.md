@@ -1,9 +1,8 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
-- 下一步最小切片：收口句柄与冻结类型（含candidate_abandoned返回类型、explain投影）；随后六场景完整验收。
+- 下一步最小切片：以统一WorldHandle组织M2六场景各10次验收，复用已有fixture与独立oracle。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约冻结，M3/M4待推进。
-- M2完成标准仍缺：句柄与冻结类型收口；六类场景各10次、独立oracle、全部不变式及重开验收。
-- M1：docs/world-contract.md冻结六入口状态表、覆盖和六类失败/重试/资源归属；src/world/contract.ts共享非公开契约，types测试随typecheck检查。
+- M2完成标准仍缺：六类场景各10次、独立oracle、全部不变式及重开验收；句柄冻结类型已收口。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph持久节点、祖先/历史切片/失效闭包；explainRecomputation返回变化源及最短路径，explainCausalRecovery关联checkpoint。
 - prepareWorkspaceRepair拓扑重算与独立结果复用；view(heads)连续修复；共享多分支按源seq去重。
@@ -30,7 +29,7 @@
 - readWorldRefresh/readWorldCandidateValidation/explainWorldPreparation固定引用只读恢复，重开和后续历史不影响同截止点；解释区分验证计划与实际full/reuse/incremental结果。
 - 候选产物覆盖检查：执行完成及验证前后复用精确路径/Git树核验，拒绝symlink、目录和指纹漏收的忽略文件，failed并保留证据，不发布。
 - 该检查不推断隐性读取或未声明写入，也不是文件系统锁；最终由内部strict commit重验。合法写入/删除、声明不存在路径保持可用。
-- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，每轮先确认cc；本轮环境无cc，全量前需补齐gcc/libc6-dev。
+- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，本轮已补齐，后续先确认cc。
 - 内部prepareWorldRepair消费changed/selected_nodes持久报告，接既有prepareWorkspaceRepair；固定基线拓扑重放复用节点并验全部hash，物化复用写入后才重算闭包。
 - 修复前/复用后/完成后重验原产物及版本，最终覆盖/指纹检查；失败abort并留WORLD_REPAIR_FAILED与验证基线；成功记录事务、复用/替换及指纹。
 - matched刷新接prepareWorldStep：固定验证版本上完整重放/物化，映射节点、heads与已保存产物依赖，保存新候选及checkpoint，不调用模型。
@@ -54,7 +53,8 @@
 - 本轮M2：内部closeWorldResources复用共享规划/清理，持久WORLD_RESOURCES_CLOSED后释放domain；重复调用返回独立副本，不重复回收。
 - readWorldClose按固定ref重开只读查询；清理失败逐项记录，报告落盘失败不宣称关闭；新会话可重试失败清理。
 - 本轮M2：内部openWorld组合runAgentStep/refresh/explain/strict commit/close；同步停止接收并等待全部已接收操作结束后清理，失败操作不阻断关闭。
-- 未公开API；explain组合结构未符合冻结WorldHandle全部类型；未发布候选已中止并按归属清理；初始化中断仍拒绝重开，无自动恢复。
+- 未公开API；openWorld通过WorldHandle/OpenWorld类型验收，explain顶层投影coverage/plan并保留详细证据；初始化中断仍拒绝重开，无自动恢复。
 - 本轮M2：close持久abandon后释放精确自有checkpoint引用并清理fork；保留其他agent引用、历史基线和缺结果/未决key，重开提交拒绝abandoned。
 - 本轮M2：失败step/refresh/recompute引用可explain，返回阶段/原因、空候选或旧候选、验证与资源；固定截止点只读且重开一致。
-- 验证：本轮相关测试及typecheck通过（详情见演进日志）；剩余不足5分钟未跑全量，下一轮安排补跑（先补cc）。
+- 本轮M2：发布结果统一冻结类型，candidate_abandoned明确为rejected；恢复及历史回执核验observations，不伪装strict成功。
+- 验证：本轮相关测试与typecheck结果见演进日志；全量待本轮末尾执行并更新。
