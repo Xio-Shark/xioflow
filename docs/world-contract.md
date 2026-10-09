@@ -318,3 +318,13 @@ explainWorldPublication.bindings 独立报告 pending/bound/failed；TX_COMMITTE
 仅有 `TX_COMMITTED` 不能证明其后尽力清理完成，无回收记录时仍报告保留证据。
 这是journal事实视图，不检查今天的文件是否存在、不执行清理，也不修改预算；
 固定截止点在重开后保持一致。基线及journal始终保留，close调度仍待接入。
+
+### 内部关闭资源终结器（M2，未接句柄调度）
+`closeWorldResources` 要求调用者先等待所有操作结束并排除并发写者；
+复用共享规划/清理器回收可回收的 open/conflicted fork，保留基线、journal、
+待发布候选、current checkpoint 及 committing 来源，不将发布成功当作回收成功。
+逐资源结果保存为 `WORLD_RESOURCES_CLOSED` 后释放 domain，返回带固定 ref 的报告；
+同一 state 对象重复调用返回报告副本，不重新清理。清理异常仅在失败记录落盘后
+报告 cleanup_failed；报告持久化异常抛出，domain 保持打开，不宣称关闭成功。
+`readWorldClose` 用固定 ref 重开只读恢复报告；新 state 可重新关闭以重试失败清理。
+尚未接入统一句柄的接收/等待调度或未发布候选中止，因此不是完整 WorldHandle.close。

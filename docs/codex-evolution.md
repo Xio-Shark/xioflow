@@ -761,3 +761,10 @@
 - 不以TX_COMMITTED推断后续清理成功；查询只读，失败重试与重开后历史一致。
 - 验证：resources/commit共26项及typecheck通过；剩余不足5分钟未跑全量，后续需补齐cc并补跑。
 - M2仍缺统一句柄/close持久报告及六类场景完整验收，未新增公开API。
+
+### 2026-10-09 — M2 durable resource closure reports
+- 内部closeWorldResources复用共享清理器，持久逐资源报告后释放domain；重复关闭不重复回收。
+- readWorldClose支持固定ref重开只读查询；失败回收可在新会话重试，报告落盘失败不宣称关闭。
+- 验证：resources共8项及typecheck通过；覆盖回收、未决保留、清理失败/重试、重复关闭和落盘异常。
+- 已补齐gcc/libc6-dev；本轮不足5分钟未跑全量，下一轮补跑。
+- M2仍缺统一句柄调度、未发布候选中止及六场景完整验收；终结器要求调用方先排空操作。

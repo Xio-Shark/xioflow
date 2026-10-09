@@ -4,6 +4,7 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { closeWorldResources, readWorldClose } from '../../src/world/close.js';
 import { openWorldState } from '../../src/world/state.js';
 import { explainWorldResources } from '../../src/world/resources.js';
 import { executeWorldStep } from '../../src/world/step.js';
@@ -119,4 +120,74 @@ it('reports allocation uncertainty and rejects references outside the frozen wor
   expect(() => explainWorldResources(world, { ...ref, atSeq: atSeq + 100 })).toThrow('cutoff');
   world.close();
   expect(() => explainWorldResources(world, ref)).toThrow('closed');
+});
+
+it('closes with durable reclamation facts, deduplicates calls and reopens read-only history', async () => {
+  record('WORLD_STEP_STARTED', 'failed');
+  const tx = await new ProcessSupervisor(world.domain).beginWorkspaceTransaction({ txId: 'failed',
+    runId: 'owner', root: world.state.root, baseSnapshotId: world.state.snapshotId,
+    forkPath: path.join(temp, 'failed') });
+  record('WORLD_STEP_FAILED', 'failed');
+  record('WORLD_REPAIR_STARTED', 'reserved');
+  const root = world.state.root;
+  const [report, duplicate] = await Promise.all([closeWorldResources(world), closeWorldResources(world)]);
+  expect(duplicate).toEqual(report);
+  expect(world.domain.isClosed()).toBe(true);
+  expect(report.resources).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'failed', status: 'reclaimed' }),
+    expect.objectContaining({ id: 'reserved', status: 'retained' }),
+  ]));
+  await expect(fs.stat(tx.forkRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(await closeWorldResources(world)).toEqual(report);
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  record('LATER', 'other');
+  const events = world.domain.getStore().getJournalEvents('world');
+  expect(readWorldClose(world, report.ref)).toEqual(report);
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+  expect(events.filter(e => e.type === 'WORLD_RESOURCES_CLOSED')).toHaveLength(1);
+  expect(() => readWorldClose(world, { ...report.ref, id: 'other' })).toThrow('reference mismatch');
+  expect(await fs.readFile(path.join(root, 'input'), 'utf8')).toBe('original');
+});
+
+it('persists cleanup failure, retains unresolved commits and retries only after reopening', async () => {
+  const supervisor = new ProcessSupervisor(world.domain);
+  for (const id of ['failed', 'pending']) {
+    record('WORLD_STEP_STARTED', id);
+    await supervisor.beginWorkspaceTransaction({ txId: id, runId: 'owner', root: world.state.root,
+      baseSnapshotId: world.state.snapshotId, forkPath: path.join(temp, id) });
+    record('WORLD_STEP_FAILED', id);
+  }
+  record('TX_COMMITTING', 'pending');
+  const fail = vi.spyOn(ProcessSupervisor.prototype, 'abortWorkspaceTransaction')
+    .mockRejectedValueOnce(new Error('cleanup unavailable'));
+  const root = world.state.root;
+  const report = await closeWorldResources(world);
+  expect(report.resources).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'failed', status: 'cleanup_failed', reason: 'cleanup unavailable' }),
+    expect.objectContaining({ id: 'pending', status: 'retained', reason: 'commit_in_progress' }),
+  ]));
+  await closeWorldResources(world);
+  expect(fail).toHaveBeenCalledTimes(1);
+  fail.mockRestore();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(readWorldClose(world, report.ref)).toEqual(report);
+  const retry = await closeWorldResources(world);
+  expect(retry.resources.find(r => r.id === 'failed')).toMatchObject({ status: 'reclaimed' });
+  await expect(fs.stat(path.join(temp, 'pending'))).resolves.toBeDefined();
+});
+
+it('does not confirm closure when report persistence fails, and preserves an empty world baseline', async () => {
+  const store = world.domain.getStore();
+  const original = store.recordJournalEvent.bind(store);
+  const fail = vi.spyOn(store, 'recordJournalEvent').mockImplementation(event => {
+    if (event.type === 'WORLD_RESOURCES_CLOSED') throw new Error('journal unavailable');
+    return original(event);
+  });
+  await expect(closeWorldResources(world)).rejects.toThrow('journal unavailable');
+  expect(world.domain.isClosed()).toBe(false);
+  fail.mockRestore();
+  const report = await closeWorldResources(world);
+  expect(report.resources.map(r => [r.kind, r.status])).toEqual([
+    ['snapshot', 'retained'], ['journal', 'retained'],
+  ]);
 });
