@@ -1,6 +1,7 @@
 import type { AgentData } from '../agents/runtime.js';
 import type { AgentExecution, DependencyCoverage, PreparationResult, WorldAgent, WorldVersion } from './contract.js';
 import { executeWorldStep } from './step.js';
+import { verifyWorldArtifactBody } from './artifacts.js';
 import type { openWorldState } from './state.js';
 
 type WorldState = Awaited<ReturnType<typeof openWorldState>>;
@@ -54,6 +55,7 @@ export async function prepareWorldStep(world: WorldState, agent: WorldAgent,
           || !['model_response', 'tool_result', 'file'].includes(artifact.kind)
           || typeof artifact.hash !== 'string' || !artifact.hash.trim()) throw new Error('Invalid artifact declaration');
       ids.add(artifact.id);
+      if (!verifyWorldArtifactBody(artifact)) reasons.push('artifact_body_missing');
       checkDependencies(artifact.dependsOn);
       if (artifact.dependsOn?.some((seq: number) => !reachable.has(seq))) reasons.push('artifact_dependency_outside_heads');
     }

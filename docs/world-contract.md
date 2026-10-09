@@ -132,5 +132,9 @@ manifestHash 不匹配、宿主 unknown、null 依赖、产物依赖或 mutation
 均返回 unknown；伪造节点、重复产物 id、空 hash 等格式错误返回 failed，保留执行证据。
 明确的 [] 仍可 prepared；未跟踪的观测序号作为 head 时保留 null，不误报为伪造节点。
 prepared 仅表示声明和隔离产物已准备，不表示通过重放、业务验收或允许发布；本入口不写主目录。
-产物声明是宿主提供的内容引用，当前不读取模型响应正文或验证引用内容的 hash；宿主仍须保存
-响应正文，文件输出由 fork 树指纹固定。内容存储/恢复、refresh、strict commit 和资源报告仍待接通。
+模型响应和工具结果通过 artifact.body 提供 UTF-8 正文，hash 必须等于其 SHA-256 小写十六进制摘要；
+正文随 checkpoint 和候选 journal 持久化，缺失正文返回 unknown/artifact_body_missing，类型错误或
+哈希不匹配返回 failed。空正文有效。文件产物可不提供 body，文件输出仍由 fork 树指纹固定。
+内部 readWorldArtifacts 按 worldId/id/atSeq 读取准确的候选事件，重验正文哈希；证据缺失或损坏
+直接失败，不重跑模型，不推进 journal。关闭重开后仍可读；返回值与后续宿主修改相互隔离。
+这仅覆盖文本产物，尚无二进制正文或内容寻址去重；refresh、strict commit 和资源报告仍待接通。

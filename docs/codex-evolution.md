@@ -585,3 +585,10 @@
 - checkpoint与候选事件保存覆盖/产物引用、固定版本、输出指纹及身份；重开保持原journal。
 - 产物正文仍由宿主保存，未声称内容引用已验真；M2还缺统一句柄、正文恢复、refresh/strict commit/explain/close及完整验收。
 - 验证：基线840通过/7跳过；最终typecheck与全量测试结果待回填。
+
+## 2026-10-09 — M2 文本产物证据持久化
+- 先补齐刷新复用前提：model_response/tool_result正文保存至既有checkpoint/journal，SHA-256验真；缺正文unknown，格式或哈希错误failed。
+- 内部readWorldArtifacts按固定worldId/id/atSeq只读恢复，再验正文哈希；不重跑模型，不新增公开入口，file继续由fork指纹固定。
+- 新增6项测试覆盖空正文/中文/工具结果、宿主修改、重开身份、错误历史引用、数据库正文损坏及缺失/无效正文。
+- M2尚缺refresh/explain/strict commit/close统一状态机、独立key与六场景完整验收；下一轮接入已有观测验证及持久刷新关系。
+- 验证：基线因缺gcc有3个原生套件失败；已修复工具链；针对性24项及typecheck通过，全量复验运行中。

@@ -3,7 +3,7 @@
 - 当前里程碑：M2（单世界正确性闭环），尚未完成；M1 的设计交付物已齐备，不代表统一入口已实现。
 - M1：docs/world-contract.md 冻结六入口状态表、适配器覆盖及六类失败/重试/资源归属；src/world/contract.ts 是共享非公开契约，spec/world-contract.ts 重导出草案，tests/world-contract.types.ts 随 typecheck 检查。
 - 下一轮最小切片：将 prepared/unknown 候选接入既有观测验证/refresh，持久保存刷新关系与未知原因；不扩成本策略。
-- M2 缺口：统一句柄、产物正文存储/恢复、refresh/explain/strict commit、独立key绑定与close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。M3/M4均未完成。
+- M2 缺口：统一句柄、refresh/explain/strict commit、独立key绑定与close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。M3/M4均未完成。
 - 基础能力：WorkspaceTransactions 文件读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph 持久节点、祖先/历史切片/失效闭包；explainRecomputation 列变化源与最短依赖路径，explainCausalRecovery关联checkpoint。
 - prepareWorkspaceRepair 拓扑重算与独立结果复用；view(heads)支持连续修复；共享多分支按源seq去重。
@@ -40,5 +40,7 @@
 - 失败持久记录并保留fork/事务/预算，不自动重试；重开可读原journal。内部调用必须等待执行后close，句柄资源状态机尚未接通。
 - 内部 prepareWorldStep 复用 executeWorldStep 接入 WorldAgent，固定version/refresh=null；声明保存checkpoint，prepared/unknown候选与产物引用持久留证。
 - 覆盖hash不匹配、null依赖、heads遗漏产物依赖/写节点均unknown；伪造依赖、重复产物id、空hash失败；[]可prepared，不发布。
-- 产物仍是宿主id/hash引用，未存储或读取模型响应正文验证其hash；正文恢复、刷新提交及资源状态机仍属M2缺口。
-- 本轮验证：基线840通过/7跳过；准备层针对性测试通过，最终全量及typecheck结果待回填。
+- 内部文本产物已复用checkpoint/journal保存body并验证SHA-256；model_response/tool_result缺正文unknown，正文格式/哈希错误failed；file仍由fork指纹固定。
+- readWorldArtifacts按worldId/id/atSeq只读恢复并重验正文；缺失或篡改拒绝，不调用模型、不推进journal；空正文/中文、宿主修改、重开及持久损坏已覆盖。
+- 正文目前重复内联于checkpoint/journal，无二进制正文或内容寻址去重；仍未接通刷新复用及公开句柄。
+- 本轮验证：初始环境缺gcc导致3个原生套件失败（760通过/7跳过）；已安装gcc/libc6-dev；正文针对性24项与typecheck通过，全量复验运行中。

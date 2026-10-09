@@ -1,6 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { readWorldArtifacts } from '../../src/world/artifacts.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, expect, it } from 'vitest';
@@ -101,13 +104,13 @@ it('prepares WorldAgent declarations and retains identical evidence after reopen
     await fs.writeFile(path.join(forkRoot, 'output'), 'original');
     const write = await record({ kind: 'mutate', call: { tool: 'write', args: {} }, resultHash: 'original' }, [read]);
     return { coverage: { status: 'complete', manifestHash: version.manifestHash }, heads: [write],
-      artifacts: [{ id: 'response', kind: 'model_response', hash: 'saved-response-hash', dependsOn: [read] }] };
+      artifacts: [{ id: 'response', kind: 'model_response', hash: createHash('sha256').update('响应\n').digest('hex'), body: '响应\n', dependsOn: [read] }] };
   } }, { task: 'copy' });
   expect(result.status).toBe('prepared');
   if (result.status !== 'prepared') throw new Error('not prepared');
   const events = world.domain.getStore().getJournalEvents('world');
   expect(events.find(e => e.seq === result.candidate.atSeq)).toMatchObject({ type: 'WORLD_STEP_PREPARED',
-    payload: { id: result.candidate.id, artifacts: [{ id: 'response', hash: 'saved-response-hash' }] } });
+    payload: { id: result.candidate.id, artifacts: [{ id: 'response', hash: createHash('sha256').update('响应\n').digest('hex'), body: '响应\n' }] } });
   await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
   const root = world.state.root;
   world.close();
@@ -149,4 +152,45 @@ it('accepts explicitly empty dependencies', async () => {
     coverage: { status: 'complete', manifestHash: version.manifestHash }, heads: [], artifacts: [],
   }) }, { task: 'no-op' });
   expect(result).toMatchObject({ status: 'prepared', candidate: { heads: [], coverage: { status: 'complete' } } });
+});
+
+it.each(['', '响应\n', 'tool output'])('restores verified artifact body %j without changing history', async body => {
+  const artifact = { id: 'response', kind: body === 'tool output' ? 'tool_result' as const : 'model_response' as const,
+    hash: createHash('sha256').update(body).digest('hex'), body, dependsOn: [] };
+  const result = await prepareWorldStep(world, { execute: async ({ version }) => ({
+    coverage: { status: 'complete', manifestHash: version.manifestHash }, heads: [], artifacts: [artifact],
+  }) }, { task: 'save' });
+  if (result.status !== 'prepared') throw new Error('not prepared');
+  const events = world.domain.getStore().getJournalEvents('world');
+  artifact.body = 'host changed its response';
+  const root = world.state.root;
+  world.close();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(readWorldArtifacts(world, result.candidate)[0].body).toBe(body);
+  expect(() => readWorldArtifacts(world, { ...result.candidate, worldId: 'other' })).toThrow('world mismatch');
+  expect(() => readWorldArtifacts(world, { ...result.candidate, id: 'other' })).toThrow('reference mismatch');
+  expect(() => readWorldArtifacts(world, { ...result.candidate, atSeq: result.candidate.atSeq - 1 })).toThrow('reference mismatch');
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+  const db = new DatabaseSync(path.join(world.domain.domainPath, 'domain.db'));
+  try {
+    const event = events.find(e => e.seq === result.candidate.atSeq)!;
+    const payload = structuredClone(event.payload);
+    (payload.artifacts as { body: string }[])[0].body = 'corrupt';
+    db.prepare('UPDATE journal_events SET payload = ? WHERE seq = ?').run(JSON.stringify(payload), event.seq);
+  } finally { db.close(); }
+  expect(() => readWorldArtifacts(world, result.candidate)).toThrow('hash mismatch');
+});
+
+it.each(['missing', 'mismatch', 'invalid'])('refuses unverified response bodies: %s', async mode => {
+  const result = await prepareWorldStep(world, { execute: async ({ version }) => ({
+    coverage: { status: 'complete', manifestHash: version.manifestHash }, heads: [],
+    artifacts: [{ id: 'response', kind: 'tool_result', hash: 'wrong', dependsOn: [],
+      ...(mode === 'missing' ? {} : { body: mode === 'invalid' ? 123 as unknown as string : 'response' }) }],
+  }) }, { task: 'invalid body' });
+  expect(result.status).toBe(mode === 'missing' ? 'unknown' : 'failed');
+  if (result.status === 'unknown') {
+    expect(result.reasons).toContain('artifact_body_missing');
+    expect(() => readWorldArtifacts(world, result.candidate)).toThrow('body missing');
+  }
+  await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
 });

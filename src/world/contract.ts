@@ -27,6 +27,8 @@ export interface WorldArtifact {
   /** Model responses are saved artifacts; they are never deterministic replay calls. */
   readonly kind: 'model_response' | 'tool_result' | 'file';
   readonly hash: string;
+  /** UTF-8 text, hashed with SHA-256. Required evidence for non-file artifacts. */
+  readonly body?: string;
   /** null means untracked; [] explicitly declares no causal inputs. */
   readonly dependsOn: readonly number[] | null;
 }
