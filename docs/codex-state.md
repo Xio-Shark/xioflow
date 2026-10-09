@@ -47,14 +47,14 @@
 - 包含复用祖先；成功回收基线，冲突中止回收；提交抛错保留恢复资源并报告 txId。
 - 依已有 validationSeq→txId→TX_COMMITTED 追溯；不分发独立事务、不绑定 checkpoint。
 - 环境需 C 编译器（cc）与 libc 开发包；原生 reaper 测试必须实际构建。
-- pnpm benchmark:refresh：完整重跑 / 自动刷新 / 不校验复用，均使用真实文件工具。
-- 支持零 / 局部 / 全部输入变化；默认生成 8→2，总工具 16→23，耗时约 188→296 ms。
 - validate / prepare refresh / refresh 支持 replayReuse: baseline_observations（默认 none）。
-- 单次基线内按节点 seq 复用首次 mutation 前的纯观测；mutation 后不读写缓存。
-- 哈希差异可共享；工具错误不缓存，不同节点不合并；提交仍完整重放。
+- 单次基线按 seq 复用 mutation 前纯观测；错误不缓存、不同节点不合并；提交完整重放。
 - 适配器须纯文件观测、与 fork 路径 / 内存副作用无关；缓存不跨调用或修复。
-- 持久报告新增 replayReuse / reusedSteps；旧 v1 报告查询补 none / 0。
-- pnpm benchmark:probe-reuse：四分支探测 8→5（未变）/ 4→1（变化），12/12 正确。
-- 该基准仅探测，非端到端；原始 JSON docs/benchmarks/causal-probe-reuse.sample.json。
-- 下一步：共享祖先场景接入端到端刷新成本基准；或独立输出 / checkpoint 发布协调。
-- 最新验证：pnpm typecheck / benchmark:probe-reuse 通过；pnpm test 626 通过 / 7 跳过（106.85 秒）。
+- 持久报告新增 replayReuse / reusedSteps；旧 v1 查询补 none / 0。
+- benchmark:probe-reuse 仅探测；benchmark:refresh 四模式计入修复 / 复用 / 强制提交。
+- refresh 新增 --shared / --change-shared，共享祖先加独立输入，支持四种变化场景。
+- 四分支总调用普通→缓存：无变化 12→9，局部 29→26，全部独立 26→23，共享变化 22→19。
+- 受验证模式 36/36 正确；有变化时仍多于完整重跑 18 次，无稳定耗时收益，无模型 token。
+- 原始数据 docs/benchmarks/causal-refresh-shared.sample.json；协议 docs/causal-refresh-benchmark.md。
+- 下一步：基于完整验证成本选择重跑 / 增量修复；或独立输出 / checkpoint 发布协调。
+- 最新验证：pnpm typecheck / build / 基准 CLI 通过；pnpm test 631 通过 / 7 跳过（112.21 秒）。

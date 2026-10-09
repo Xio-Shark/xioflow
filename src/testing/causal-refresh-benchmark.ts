@@ -15,9 +15,13 @@ import type { CausalBenchmarkOptions } from './causal-repair-benchmark.js';
 export interface CausalRefreshBenchmarkOptions extends CausalBenchmarkOptions {
   /** Number of independent inputs changed per trial; zero measures the unchanged fast path. */
   changedBranches?: number;
+  /** Add one pure observation shared by every branch. */
+  sharedInput?: boolean;
+  /** Change the shared input, invalidating every dependent branch. */
+  changeSharedInput?: boolean;
 }
 const exec = promisify(execFile);
-const modes = ['full-rerun', 'causal-refresh', 'unchecked-reuse'] as const;
+const modes = ['full-rerun', 'causal-refresh', 'causal-refresh-reuse', 'unchecked-reuse'] as const;
 type Mode = typeof modes[number];
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 function output(value: string, rounds: number): string {
@@ -25,15 +29,20 @@ function output(value: string, rounds: number): string {
   return value;
 }
 
-/** End-to-end validation cost, with identical mandatory replay for both publishing modes. */
+/** End-to-end validation cost, with identical mandatory replay for all publishing modes. */
 export async function runCausalRefreshBenchmark(options: CausalRefreshBenchmarkOptions = {}) {
   const config = { trials: options.trials ?? 3, branches: options.branches ?? 4,
-    hashRounds: options.hashRounds ?? 1000, changedBranches: options.changedBranches ?? 1 };
+    hashRounds: options.hashRounds ?? 1000, changedBranches: options.changedBranches ?? 1,
+    sharedInput: options.sharedInput ?? false, changeSharedInput: options.changeSharedInput ?? false };
   for (const key of ['trials', 'branches', 'hashRounds'] as const) {
     if (!Number.isSafeInteger(config[key]) || config[key] < 1) throw new Error(`${key} must be a positive safe integer`);
   }
   if (!Number.isSafeInteger(config.changedBranches) || config.changedBranches < 0 || config.changedBranches > config.branches) {
     throw new Error('changedBranches must be an integer between zero and branches');
+  }
+  if (typeof config.sharedInput !== 'boolean' || typeof config.changeSharedInput !== 'boolean'
+    || (config.changeSharedInput && !config.sharedInput)) {
+    throw new Error('shared input flags must be booleans; changeSharedInput requires sharedInput');
   }
   const samples: Awaited<ReturnType<typeof runSample>>[] = [];
   for (let trial = 0; trial < config.trials; trial++) {
@@ -46,14 +55,14 @@ export async function runCausalRefreshBenchmark(options: CausalRefreshBenchmarkO
       git: (await exec('git', ['--version'])).stdout.trim() },
     samples, summary: modes.map((mode) => {
       const selected = samples.filter((sample) => sample.mode === mode);
-      const mean = (key: 'executionToolCalls' | 'probeToolCalls' | 'reuseToolCalls' | 'commitReplayToolCalls' | 'totalToolCalls') =>
+      const mean = (key: 'executionToolCalls' | 'probeToolCalls' | 'reuseToolCalls' | 'commitReplayToolCalls' | 'totalToolCalls' | 'reusedProbeSteps') =>
         selected.reduce((sum, sample) => sum + sample[key], 0) / selected.length;
       const times = selected.map((sample) => sample.elapsedMs).sort((a, b) => a - b);
       const middle = Math.floor(times.length / 2);
       return { mode, successRate: selected.filter((sample) => sample.success).length / selected.length,
         meanExecutionToolCalls: mean('executionToolCalls'), meanProbeToolCalls: mean('probeToolCalls'),
         meanReuseToolCalls: mean('reuseToolCalls'), meanCommitReplayToolCalls: mean('commitReplayToolCalls'),
-        meanTotalToolCalls: mean('totalToolCalls'),
+        meanTotalToolCalls: mean('totalToolCalls'), meanReusedProbeSteps: mean('reusedProbeSteps'),
         medianElapsedMs: times.length % 2 ? times[middle] : (times[middle - 1] + times[middle]) / 2 };
     }) };
 }
@@ -66,6 +75,7 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
     fs.mkdirSync(root);
     await exec('git', ['init', '-q', '-b', 'main', root]);
     for (let branch = 0; branch < config.branches; branch++) fs.writeFileSync(path.join(root, `input-${branch}.txt`), `initial-${branch}`);
+    if (config.sharedInput) fs.writeFileSync(path.join(root, 'shared.txt'), 'shared-initial');
     await exec('git', ['add', '.'], { cwd: root });
     await exec('git', ['-c', 'user.name=Benchmark', '-c', 'user.email=benchmark@example.invalid', 'commit', '-qm', 'fixture'], { cwd: root });
     domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'benchmark');
@@ -77,22 +87,30 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
     const graph = new WorkspaceCausalGraph(domain);
     const counters = { executionToolCalls: 0, probeToolCalls: 0, reuseToolCalls: 0, commitReplayToolCalls: 0 };
     type Phase = keyof typeof counters;
-    // No cross-fork cache: each tool reads its actual workspace and reproduces its effects.
+    // The adapter has no cache: each invocation reads its workspace and reproduces effects.
     const perform = async (entry: ObservationEntry, dir: string, phase: Phase): Promise<string> => {
       counters[phase]++;
+      if (entry.call.tool === 'read-shared') return hash(fs.readFileSync(path.join(dir, 'shared.txt'), 'utf8'));
       const branch = entry.call.args.branch;
       const value = fs.readFileSync(path.join(dir, `input-${branch}.txt`), 'utf8');
       if (entry.call.tool === 'read') return hash(value);
       if (entry.call.tool !== 'write') throw new Error(`Unknown benchmark tool: ${entry.call.tool}`);
-      const derived = output(value, config.hashRounds);
+      const shared = config.sharedInput ? `${fs.readFileSync(path.join(dir, 'shared.txt'), 'utf8')}\n` : '';
+      const derived = output(shared + value, config.hashRounds);
       fs.writeFileSync(path.join(dir, `output-${branch}.txt`), derived);
       return hash(derived);
     };
     const txOptions = (txId: string) => ({ txId, runId: 'run', root, forkPath: path.join(temp, txId) });
     const initial = await supervisor.beginWorkspaceTransaction(txOptions('initial'));
+    const sharedHeads: number[] = [];
+    if (config.sharedInput) {
+      const entry: ObservationEntry = { kind: 'observe', call: { tool: 'read-shared', args: {} } };
+      sharedHeads.push(graph.record({ txId: initial.txId, actorId: 'shared-reader', dependsOn: [],
+        observation: { ...entry, resultHash: await perform(entry, initial.forkRoot, 'executionToolCalls') } }).seq);
+    }
     const branches = [];
     for (let branch = 0; branch < config.branches; branch++) {
-      let heads: number[] = [];
+      let heads: number[] = [...sharedHeads];
       for (const tool of ['read', 'write']) {
         const entry: ObservationEntry = { kind: tool === 'read' ? 'observe' : 'mutate', call: { tool, args: { branch } } };
         const resultHash = await perform(entry, initial.forkRoot, 'executionToolCalls');
@@ -108,10 +126,12 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
     const view = graph.view(heads);
     const changed = Array.from({ length: config.changedBranches }, (_, i) => (trial + i) % config.branches);
     for (const branch of changed) fs.writeFileSync(path.join(root, `input-${branch}.txt`), `changed-${trial}-${branch}`);
+    if (config.changeSharedInput) fs.writeFileSync(path.join(root, 'shared.txt'), `shared-changed-${trial}`);
     counters.executionToolCalls = 0;
     const journalStart = store.getJournalEvents(domain.domainId).at(-1)!.seq;
     const start = performance.now();
     let status: string = 'reused';
+    let reusedProbeSteps = 0;
     let commitValidation: CommitValidation | null = null;
     if (mode === 'full-rerun') {
       const tx = await supervisor.beginWorkspaceTransaction(txOptions('rerun'));
@@ -124,11 +144,12 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
       if (result.status === 'committed') commitValidation = result.validation;
       else await supervisor.abortWorkspaceTransaction(tx.txId, 'benchmark conflict');
       await supervisor.pruneSnapshots([tx.baseSnapshotId], { runId: 'run' });
-    } else if (mode === 'causal-refresh') {
+    } else if (mode === 'causal-refresh' || mode === 'causal-refresh-reuse') {
       let repairing = false;
       const result = await refreshWorkspaceCausalBranches(supervisor, {
         ...txOptions('probe'), atSeq: view.nodes.at(-1)!.seq, branches,
         closedWorld: true, replayPolicy: 'deterministic',
+        replayReuse: mode === 'causal-refresh-reuse' ? 'baseline_observations' : 'none',
         replay: (entry, dir) => perform(entry, dir, repairing ? 'commitReplayToolCalls' : 'probeToolCalls'),
         repair: { txId: 'repair', forkPath: path.join(temp, 'repair'),
           validateReuse: async (tx, unaffected) => {
@@ -145,6 +166,7 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
         },
       });
       status = result.status;
+      reusedProbeSteps = result.validation.reusedSteps;
       if (result.status === 'committed' && result.commit.status === 'committed') commitValidation = result.commit.validation;
     }
     const elapsedMs = performance.now() - start;
@@ -155,9 +177,10 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
       const actual = fs.readFileSync(path.join(root, `output-${branch}.txt`), 'utf8');
       outputHashes.push(hash(actual));
       const expectedInput = changed.includes(branch) ? `changed-${trial}-${branch}` : `initial-${branch}`;
-      if (actual === output(expectedInput, config.hashRounds)) correctOutputs++;
+      const expectedShared = config.sharedInput ? `${config.changeSharedInput ? `shared-changed-${trial}` : 'shared-initial'}\n` : '';
+      if (actual === output(expectedShared + expectedInput, config.hashRounds)) correctOutputs++;
     }
-    return { mode, trial, changedBranches: changed, status, ...counters,
+    return { mode, trial, changedBranches: changed, status, ...counters, reusedProbeSteps,
       totalToolCalls: Object.values(counters).reduce((a, b) => a + b, 0), elapsedMs,
       transactionsStarted: events.filter((event) => event.type === 'TX_BEGUN').length,
       snapshotsCaptured: events.filter((event) => event.type === 'SNAPSHOT_CAPTURED').length,
