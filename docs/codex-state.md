@@ -45,7 +45,6 @@
 - validate / prepare refresh / refresh 支持 replayReuse: baseline_observations（默认 none）。
 - 单次基线按 seq 复用 mutation 前纯观测；错误不缓存、不同节点不合并；提交完整重放。
 - 适配器须纯文件观测、与 fork 路径 / 内存副作用无关；缓存不跨调用或修复。
-- benchmark:probe-reuse 仅探测；benchmark:refresh 五模式计入修复 / 复用 / 强制提交。
 - refresh 新增 --shared / --change-shared，共享祖先加独立输入，支持四种变化场景。
 - refresh / prepare refresh 可选 costModel；planWorkspaceCausalRefresh 可纯查询比较成本。
 - 每节点 execute / reuse / replay 同单位有限非负估算；溢出或异常在修复事务前拒绝。
@@ -54,7 +53,8 @@
 - 返回 decision；关联事件可选 decision 持久保存策略及成本，旧行为 / 事件兼容。
 - 先探测再决策；估算不包含已发生探测和相同固定开销，不声称实测或 token 收益。
 - benchmark:refresh 新增 adaptive；实际 reusePasses 与估算可独立配置，schemaVersion=2。
-- 原始数据 causal-refresh-adaptive.sample.json：48/48 正确；三轮校验 40→26 调用，完整重跑 18。
-- 低估校验时误差 14、仍 40 次；重复校验仅敏感性负载，耗时与测试争用，不声称稳定加速。
-- 下一步：探索探测前选择策略，减少全失效时的探测开销；或独立输出 / checkpoint 发布协调。
-- 最新验证：typecheck / build / CLI 通过；pnpm test 647 通过 / 7 跳过（142.86 秒）。
+- recomputeWorkspaceCausalBranches：显式跳过探测，完整重算所选联合祖先并强制 OCC 提交。
+- 共用刷新发布路径；共享节点一次、无复用；返回 preparationSeq / repair / commit，无 validation。
+- CAUSAL_RECOMPUTATION_PREPARED 记录来源与 full 策略；关联失败回收、未知提交保留资源。
+- 下一步：将直接重算接入 benchmark:refresh，再探索探测前成本选择或 checkpoint 发布协调。
+- 最新验证：typecheck 通过；pnpm test 657 通过 / 7 跳过（124.73 秒），新增10项。

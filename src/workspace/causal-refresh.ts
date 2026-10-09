@@ -34,7 +34,66 @@ export async function refreshWorkspaceCausalBranches(
   options = { ...options, repair: { ...options.repair } };
   const prepared = await prepareWorkspaceCausalRefresh(supervisor, options);
   if (prepared.status !== 'prepared') return prepared;
-  const { validation, repair } = prepared;
+  const published = await publishCausalRepair(supervisor, prepared.repair, prepared.validation.runId, options.replay);
+  return { ...published, validation: prepared.validation,
+    ...(prepared.decision ? { decision: prepared.decision } : {}) };
+}
+
+export interface WorkspaceCausalRecomputationOptions extends Pick<CausalValidationOptions,
+  'txId' | 'runId' | 'root' | 'forkPath' | 'atSeq' | 'branches' | 'closedWorld' | 'replayPolicy' | 'replay'> {
+  execute: WorkspaceBranchRepairOptions['execute'];
+}
+
+export interface WorkspaceCausalRecomputationResult {
+  status: 'committed' | 'conflict';
+  preparationSeq: number;
+  repair: WorkspaceBranchRepairResult;
+  commit: CommitResult;
+}
+
+/** Recompute the selected union without probing old evidence. Shared ancestors run
+ * once; publication still requires complete deterministic replay and OCC.
+ * This explicit strategy does not diagnose changed observations or bind checkpoints.
+ */
+export async function recomputeWorkspaceCausalBranches(
+  supervisor: ProcessSupervisor, options: WorkspaceCausalRecomputationOptions,
+): Promise<WorkspaceCausalRecomputationResult> {
+  options = { ...options, branches: structuredClone(options.branches) };
+  if (options.closedWorld !== true || options.replayPolicy !== 'deterministic') {
+    throw new Error('Causal recomputation requires closed-world deterministic replay');
+  }
+  const domain = supervisor.getDomain();
+  const graph = new WorkspaceCausalGraph(domain);
+  const heads = options.branches.flatMap(branch => [...branch.heads]);
+  const changed = graph.view(heads, options.atSeq).nodes.map(node => node.seq);
+  const repair = await prepareWorkspaceBranchRepair(supervisor, {
+    ...options, changed, validateReuse: async () => {},
+  });
+  let preparationSeq: number;
+  try {
+    preparationSeq = domain.getStore().recordJournalEvent({
+      domainId: domain.domainId, runId: options.runId, type: 'CAUSAL_RECOMPUTATION_PREPARED',
+      payload: { version: 1, strategy: 'full', txId: repair.transaction.txId,
+        atSeq: options.atSeq, sourceBranches: repair.branches.map(branch => ({
+          id: branch.id, heads: branch.sourceHeads,
+        })) }, timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    try {
+      await supervisor.abortWorkspaceTransaction(repair.transaction.txId, 'causal recomputation linkage failed');
+      await supervisor.pruneSnapshots([repair.transaction.baseSnapshotId], { runId: options.runId });
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Causal recomputation linkage failed; cleanup incomplete');
+    }
+    throw error;
+  }
+  return { ...await publishCausalRepair(supervisor, repair, options.runId, options.replay), preparationSeq };
+}
+
+async function publishCausalRepair(
+  supervisor: ProcessSupervisor, repair: WorkspaceBranchRepairResult, runId: string,
+  replay: CausalValidationOptions['replay'],
+): Promise<Omit<WorkspaceCausalRecomputationResult, 'preparationSeq'>> {
   const tx = repair.transaction;
   let commitStarted = false;
   let commit: CommitResult;
@@ -43,7 +102,7 @@ export async function refreshWorkspaceCausalBranches(
       .nodes.map((node) => node.observation);
     commitStarted = true;
     commit = await supervisor.commitWorkspaceTransaction(tx.txId, {
-      observationPolicy: 'always', observations: { closedWorld: true, log, replay: options.replay },
+      observationPolicy: 'always', observations: { closedWorld: true, log, replay },
     });
   } catch (error) {
     if (commitStarted) {
@@ -52,7 +111,7 @@ export async function refreshWorkspaceCausalBranches(
     }
     try {
       await supervisor.abortWorkspaceTransaction(tx.txId, 'causal refresh evidence failed');
-      await supervisor.pruneSnapshots([tx.baseSnapshotId], { runId: validation.runId });
+      await supervisor.pruneSnapshots([tx.baseSnapshotId], { runId });
     } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], 'Causal refresh evidence failed; cleanup incomplete');
     }
@@ -60,11 +119,11 @@ export async function refreshWorkspaceCausalBranches(
   }
   try {
     if (commit.status === 'conflict') await supervisor.abortWorkspaceTransaction(tx.txId, 'causal refresh conflict');
-    await supervisor.pruneSnapshots([tx.baseSnapshotId], { runId: validation.runId });
+    await supervisor.pruneSnapshots([tx.baseSnapshotId], { runId });
   } catch (error) {
     throw new Error(`Causal refresh ${tx.txId} ${commit.status}; cleanup incomplete`, { cause: error });
   }
-  return { status: commit.status, validation, ...(prepared.decision ? { decision: prepared.decision } : {}), repair: {
+  return { status: commit.status, repair: {
     ...repair, transaction: { ...tx, status: commit.status === 'committed' ? 'committed' : 'aborted' },
   }, commit };
 }

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, validateWorkspaceCausalBranches, prepareWorkspaceBranchRepair, listWorkspaceCausalValidations, prepareWorkspaceCausalRefresh, refreshWorkspaceCausalBranches, planWorkspaceCausalRefresh } from '../../src/index.js';
+import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, validateWorkspaceCausalBranches, prepareWorkspaceBranchRepair, listWorkspaceCausalValidations, prepareWorkspaceCausalRefresh, refreshWorkspaceCausalBranches, recomputeWorkspaceCausalBranches, planWorkspaceCausalRefresh } from '../../src/index.js';
 import type { CausalStep } from '../../src/index.js';
 
 describe('workspace causal validation', () => {
@@ -257,6 +257,93 @@ describe('workspace causal validation', () => {
     queried.sourceBranches[0].heads.length = 0;
     expect(listWorkspaceCausalValidations(domain)[0]).toEqual(result);
   });
+
+  it.each(['old', 'new', 'conflict', 'commit_error', 'execute_error', 'link_error'] as const)(
+    'recomputes without probing and preserves publication guarantees: %s', async (mode) => {
+      const input = graph.record(step('a'));
+      const outputs = ['a', 'b'].map(txId => graph.record({ ...step(txId, [input.seq]),
+        observation: { kind: 'mutate', call: { tool: 'write', args: { path: `${txId}.txt` } }, resultHash: 'old' },
+      }));
+      const sibling = graph.record(step('b'));
+      const value = mode === 'old' ? 'old' : 'new';
+      fs.writeFileSync(path.join(root, 'input.txt'), value);
+      const apply = async (entry: CausalStep['observation'], dir: string) => {
+        const current = fs.readFileSync(path.join(dir, 'input.txt'), 'utf8');
+        if (entry.kind === 'mutate') fs.writeFileSync(path.join(dir, String(entry.call.args.path)), current);
+        return current;
+      };
+      const replay = vi.fn(apply);
+      const executed: number[] = [];
+      const settings = { ...options(outputs.map((node, i) => ({ id: String(i), heads: [node.seq] }))),
+        txId: 'direct', forkPath: path.join(temp, 'direct'), replay,
+        execute: async (source: { seq: number } & CausalStep, tx: { forkRoot: string }, deps: readonly CausalStep[]) => {
+          executed.push(source.seq);
+          if (mode === 'execute_error') throw new Error('execution failed');
+          if (source.observation.kind === 'mutate') expect(deps[0].observation.resultHash).toBe(value);
+          const resultHash = await apply(source.observation, tx.forkRoot);
+          if (mode === 'conflict') fs.writeFileSync(path.join(root, 'input.txt'), 'raced');
+          return { actorId: source.actorId, observation: { ...source.observation, resultHash } };
+        },
+      };
+      if (mode === 'commit_error') vi.spyOn(supervisor, 'commitWorkspaceTransaction').mockRejectedValueOnce(new Error('disk error'));
+      if (mode === 'link_error') {
+        const store = domain.getStore();
+        const original = store.recordJournalEvent.bind(store);
+        vi.spyOn(store, 'recordJournalEvent').mockImplementation(event => {
+          if (event.type === 'CAUSAL_RECOMPUTATION_PREPARED') throw new Error('link failed');
+          return original(event);
+        });
+      }
+      if (mode.endsWith('_error')) {
+        await expect(recomputeWorkspaceCausalBranches(supervisor, settings)).rejects.toThrow(
+          mode === 'commit_error' ? 'retain its fork' : mode === 'execute_error' ? 'execution failed' : 'link failed');
+        expect(replay).not.toHaveBeenCalled();
+        expect(fs.existsSync(path.join(temp, 'direct'))).toBe(mode === 'commit_error');
+        const begun = domain.getStore().getJournalEvents(domain.domainId)
+          .find(event => event.type === 'TX_BEGUN' && event.payload.txId === 'direct')!;
+        expect(domain.getStore().getSnapshot(String(begun.payload.baseSnapshotId)) !== null).toBe(mode === 'commit_error');
+        expect(fs.existsSync(path.join(root, 'a.txt'))).toBe(false);
+        return;
+      }
+      const result = await recomputeWorkspaceCausalBranches(supervisor, settings);
+      expect(result.status).toBe(mode === 'conflict' ? 'conflict' : 'committed');
+      expect(executed).toEqual([input.seq, ...outputs.map(node => node.seq)]);
+      expect(executed).not.toContain(sibling.seq);
+      expect(result.repair.reused).toEqual([]);
+      expect(replay).toHaveBeenCalledTimes(mode === 'conflict' ? 1 : 3);
+      expect(fs.existsSync(path.join(temp, 'direct'))).toBe(false);
+      expect(domain.getStore().getSnapshot(result.repair.transaction.baseSnapshotId)).toBeNull();
+      if (mode === 'conflict') {
+        expect(result.repair.transaction.status).toBe('aborted');
+        expect(fs.existsSync(path.join(root, 'a.txt'))).toBe(false);
+      } else {
+        expect(result.commit).toMatchObject({ validation: 'observations' });
+        for (const file of ['a.txt', 'b.txt']) expect(fs.readFileSync(path.join(root, file), 'utf8')).toBe(value);
+      }
+      domain.close();
+      domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal');
+      const events = domain.getStore().getJournalEvents(domain.domainId);
+      expect(events.find(event => event.seq === result.preparationSeq)).toMatchObject({
+        type: 'CAUSAL_RECOMPUTATION_PREPARED', payload: { strategy: 'full', txId: 'direct',
+          sourceBranches: settings.branches, atSeq: sibling.seq },
+      });
+      expect(events.some(event => event.type === 'CAUSAL_VALIDATION_COMPLETED')).toBe(false);
+      expect(events.filter(event => event.type === 'TX_BEGUN').map(event => event.payload.txId)).toEqual(['a', 'b', 'direct']);
+    });
+
+  it.each(['contract', 'empty', 'duplicate', 'unknown'] as const)(
+    'rejects invalid direct recomputation before allocating a transaction: %s', async (mode) => {
+      const input = graph.record(step('a'));
+      const branches = mode === 'empty' ? [] : mode === 'duplicate'
+        ? [{ id: 'a', heads: [input.seq] }, { id: 'a', heads: [input.seq] }]
+        : [{ id: 'a', heads: [mode === 'unknown' ? input.seq + 1000 : input.seq] }];
+      const execute = vi.fn();
+      await expect(recomputeWorkspaceCausalBranches(supervisor, {
+        ...options(branches), closedWorld: (mode !== 'contract') as true, execute,
+      })).rejects.toThrow();
+      expect(execute).not.toHaveBeenCalled();
+      expect(domain.getStore().getJournalEvents(domain.domainId).filter(event => event.type === 'TX_BEGUN')).toHaveLength(2);
+    });
 
   it.each([0, 1, 4])('selects and publishes using reuse cost %s', async (reuseCost) => {
     fs.writeFileSync(path.join(root, 'stable.txt'), 'stable');

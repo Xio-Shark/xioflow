@@ -177,3 +177,22 @@ if (result.status === 'committed' || result.status === 'conflict') {
 `full` 在新事务中拓扑重算所选 heads 的整个联合祖先视图，不包含未选中的兄弟分支，共享节点仍只执行一次。`validateReuse` 收到空数组；宿主应能处理没有复用结果的情况。分支 heads 和替代关系继续通过既有修复 journal 保存；原始探测的 `changed` 仍仅表示实际发现的变化。两种策略发布时都完整重放观测并执行 OCC。
 
 准备成功的 `CAUSAL_VALIDATION_REPAIR_PREPARED` 事件新增可选 `decision`，保存所选策略及两种预计成本，可在重开 domain 后沿 `validationSeq → txId` 审计。旧事件无需迁移；未提供成本模型时仍写入原格式。准备失败不会写入该关联事件。
+
+## 跳过探测，直接完整重算并发布
+
+当宿主已决定全部重算（例如已知共享输入失效），可调用 `recomputeWorkspaceCausalBranches`。它不创建探测事务，也不声称发现了哪些观测变化；在一个新事务中重算选中 heads 的联合祖先，共享节点一次，然后强制重放完整新日志并执行 OCC。
+
+```ts
+const result = await recomputeWorkspaceCausalBranches(supervisor, {
+  txId: 'recompute-all', runId, root, forkPath: '/tmp/xio-recompute-all',
+  atSeq, branches, closedWorld: true, replayPolicy: 'deterministic',
+  execute: adapter.execute, replay: adapter.replay,
+});
+console.log(result.status, result.repair.branches);
+```
+
+`execute` 沿用共享修复回调，收到源节点、工作事务和已重算的依赖；没有复用节点，因此无需提供 `validateReuse`。来源不能为空且分支身份必须唯一。来源冻结在 `atSeq`，未选中的兄弟节点不执行。联合操作日志仍必须完整且确定性；适配器声明与已有刷新入口相同。
+
+返回 `committed` / `conflict`、`repair`、`commit` 和持久关联事件的 `preparationSeq`，没有探测报告。即使世界未变化也重算，不能返回 `unchanged`。`CAUSAL_RECOMPUTATION_PREPARED` 记录来源分支、历史序号、策略及事务 ID，可沿 `txId` 查询最终提交状态；修复中的全部种子表示计划重算范围，不是探测出的失效证据。冲突回收资源，未知提交错误保留恢复资源，规则与刷新入口一致。不会更新 agent checkpoint。
+
+这是显式策略入口，尚不自动预测失效率或选择探测前策略；省去探测调用不等于保证端到端提速。
