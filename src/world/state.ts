@@ -137,21 +137,6 @@ export async function openWorldState(options: {
       await checkBaseline(root, record.snapshotId, record.fingerprint, coverage, snapshot.commitHash);
     } else {
       if (events.length) throw new Error('World initialization incomplete; retained evidence requires recovery');
-      // Inspect ancestors without following symlinks, including for declared absent paths.
-      for (const p of coverage.paths) {
-        const parts = p.split('/');
-        for (let i = 1; i <= parts.length; i++) {
-          try {
-            const stat = await fs.lstat(path.join(root, ...parts.slice(0, i)));
-            if (stat.isSymbolicLink() || (i < parts.length ? !stat.isDirectory() : !stat.isFile())) {
-              throw new Error(`Coverage requires regular files without symlink ancestors: ${p}`);
-            }
-          } catch (error: any) {
-            if (error.code !== 'ENOENT') throw error;
-            break;
-          }
-        }
-      }
       const worldId = randomUUID();
       const snapshotId = `world-${worldId}-base`;
       const append = (type: string, payload: Record<string, unknown>) => store.recordJournalEvent({
@@ -159,15 +144,7 @@ export async function openWorldState(options: {
       });
       // An interrupted capture must never silently allocate a different world on reopen.
       append('WORLD_INITIALIZING', { worldId, snapshotId, root, adapter, coverage, manifestHash });
-      const snapshot = await driver.capture([root], { id: snapshotId, domainId: domain.domainId, opId: worldId });
-      const entries = await checkBaseline(root, snapshotId, snapshot.treeFingerprint, coverage, snapshot.commitHash);
-      for (const p of coverage.paths) {
-        if (!entries.has(p)) {
-          try { await fs.lstat(path.join(root, p)); }
-          catch (error: any) { if (error.code === 'ENOENT') continue; throw error; }
-          throw new Error(`Declared file is absent from snapshot coverage: ${p}`);
-        }
-      }
+      const snapshot = await captureCoveredSnapshot(root, coverage, snapshotId, domain.domainId, worldId);
       record = { schemaVersion: 1, worldId, root, adapter, coverage, manifestHash,
         snapshotId, fingerprint: snapshot.treeFingerprint };
       atSeq = store.transaction(() => {
@@ -183,6 +160,61 @@ export async function openWorldState(options: {
     return { domain, state: Object.freeze({ ...record, atSeq }), close: () => domain.close() };
   } catch (error) {
     domain.close();
+    throw error;
+  }
+}
+
+async function captureCoveredSnapshot(root: string, coverage: FileCoverage, snapshotId: string,
+  domainId: string, worldId: string) {
+  const driver = new GitShadowSnapshotDriver();
+  // Inspect ancestors without following symlinks, including for declared absent paths.
+  for (const p of coverage.paths) {
+    const parts = p.split('/');
+    for (let i = 1; i <= parts.length; i++) {
+      try {
+        const stat = await fs.lstat(path.join(root, ...parts.slice(0, i)));
+        if (stat.isSymbolicLink() || (i < parts.length ? !stat.isDirectory() : !stat.isFile())) {
+          throw new Error(`Coverage requires regular files without symlink ancestors: ${p}`);
+        }
+      } catch (error: any) {
+        if (error.code !== 'ENOENT') throw error;
+        break;
+      }
+    }
+  }
+  const snapshot = await driver.capture([root], { id: snapshotId, domainId, opId: worldId });
+  const entries = await checkBaseline(root, snapshotId, snapshot.treeFingerprint, coverage, snapshot.commitHash);
+  for (const p of coverage.paths) {
+    if (!entries.has(p)) {
+      try { await fs.lstat(path.join(root, p)); }
+      catch (error: any) { if (error.code === 'ENOENT') continue; throw error; }
+      throw new Error(`Declared file is absent from snapshot coverage: ${p}`);
+    }
+  }
+  return snapshot;
+}
+
+/** Capture a fresh bounded version without replacing the handle's original baseline. */
+export async function captureWorldRevision(world: Awaited<ReturnType<typeof openWorldState>>) {
+  const { domain, state } = world;
+  if (domain.isClosed()) throw new Error('World is closed');
+  const snapshotId = `world-${state.worldId}-${randomUUID()}`;
+  const store = domain.getStore();
+  const append = (type: string, payload: Record<string, unknown>) => store.recordJournalEvent({
+    domainId: domain.domainId, type, payload: { worldId: state.worldId, snapshotId, ...payload },
+    timestamp: new Date().toISOString(),
+  });
+  append('WORLD_VERSION_STARTED', {});
+  try {
+    const snapshot = await captureCoveredSnapshot(state.root, state.coverage, snapshotId, domain.domainId, state.worldId);
+    const record = { ...state, snapshotId, fingerprint: snapshot.treeFingerprint };
+    const atSeq = store.transaction(() => {
+      store.recordSnapshot(snapshot);
+      return append('WORLD_VERSION_CREATED', { ...record });
+    });
+    return { ...world, state: Object.freeze({ ...record, atSeq }) };
+  } catch (error) {
+    append('WORLD_VERSION_FAILED', { reason: error instanceof Error ? error.message : String(error), resources: 'retained' });
     throw error;
   }
 }

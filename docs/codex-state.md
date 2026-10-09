@@ -1,8 +1,8 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1 契约设计齐备，统一公开入口仍未实现；M3/M4未完成。
-- 下一轮最小切片：基于 validateWorldCandidate 的持久探测结果接入既有修复准备，生成关联旧候选的新版本候选；先处理 changed，unknown 保持拒绝或显式全量重算。
-- M2 完成标准仍缺：统一句柄、增量/全量refresh、explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
+- 下一轮最小切片：把持久探测、显式全量重算及unknown拒绝收敛进内部refresh状态机；changed增量修复须校验首差之外的复用证据。
+- M2 完成标准仍缺：统一句柄、增量refresh与全量重算策略接入、explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md 冻结六入口状态表、适配器覆盖和六类失败/重试/资源归属；src/world/contract.ts 共享非公开契约，spec重导出，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph持久节点、祖先/历史切片/失效闭包；explainRecomputation返回变化源及最短路径，explainCausalRecovery关联checkpoint。
@@ -39,4 +39,7 @@
 - WORLD_VALIDATION_STARTED/COMPLETED保存旧候选引用、底层validationSeq及固定计划/路径；readWorldCandidateValidation重开只读恢复，未接通完整explain。
 - 探测沿用旧入口回收正常结束的临时fork/快照；失败保留journal证据，无统一资源报告/自动恢复。changed仅首差种子，不是完整变化清单。
 - 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev；本轮工具链已可用。
-- 本轮验证：基线859通过/7跳过；新增9项和pnpm typecheck通过；最终全量复验运行中，提交前回填。
+- 本轮recomputeWorldCandidate按持久旧候选/task显式全量重算；捕获当前固定新版本，复用prepareWorldStep，保存旧候选→新结果关系，不复用旧产物。
+- captureWorldRevision复用精确覆盖/快照校验，原句柄基线不变；版本及重算started/completed/failed持久化。unknown重算仍须新证据完整；失败保留资源。
+- 新候选重开后可重验，再次改输入检出changed；尚无自动策略、重算幂等、断点续跑或统一资源清理，不新增公开入口。
+- 本轮验证：基线868通过/7跳过；新增7项、相关31项及pnpm typecheck通过；最终全量复验运行中，提交前回填。

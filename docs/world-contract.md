@@ -150,3 +150,14 @@ matched 仅说明此次探测匹配，changed 的计划仅从首个分歧扩展�
 刷新候选或提交许可。宿主仍须完整声明依赖和确定性工具语义，保持候选静止；未接通
 增量/全量重算、新版本候选、strict commit 和资源恢复状态机。验证正常结束沿用旧入口回收探测
 fork/快照；异常保留 started/事务证据，尚无自动恢复或统一资源报告。
+
+内部 `recomputeWorldCandidate` 补齐显式全量重算路径，供后续统一 refresh 的
+`onUnknown: 'recompute'` 和完整重跑对照使用。按持久候选引用读取原 task，重新捕获当前
+目录的固定版本，并复用 prepareWorldStep/AgentRuntime 执行完整任务；refresh 上下文为 null，
+旧模型响应、文件产物和依赖均不复用，也不会将验证异常自动当作重算许可。
+新版本复用首次创建的精确覆盖与快照检查，WORLD_VERSION_STARTED/CREATED/FAILED
+记录版本身份和失败；WORLD_RECOMPUTE_STARTED/COMPLETED/FAILED 关联旧候选及新结果。
+原句柄基线保持不变，新候选使用新 snapshotId 和版本截止点，关闭重开后可用既有验证入口重验。
+未知候选可显式重算，但新执行仍必须提供完整依赖和产物证据，否则继续 unknown；宿主异常为 failed。
+准备不发布文件，失败保留 journal、快照及既有执行资源；尚无自动续跑、幂等重算或统一资源回收。
+本入口仍为内部实现，未自动选择策略，未接增量刷新或公开 WorldHandle。
