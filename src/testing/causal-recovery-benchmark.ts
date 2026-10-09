@@ -26,10 +26,10 @@ type Counters = { executionToolCalls: number; probeCalls: number; bindingCalls: 
 type Boundary = { before: ReturnType<typeof listAgentCausalRefreshExecutions>[number]; settled: number[];
   counters: Counters; abandonedTxId: string; elapsedBeforeRecovery: number };
 type RecoveryOutput = 'stable' | 'tampered' | 'deleted';
-type SampleConfig = { branches: number; hashRounds: number; recoveryInput?: 'stable' | 'input-changed'; recoveryOutput?: RecoveryOutput };
+type SampleConfig = { branches: number; hashRounds: number; recoveryInput?: 'stable' | 'input-changed'; recoveryOutput?: RecoveryOutput; outputFileBytes?: number[] };
 
 /** Measures durable recovery, with optional OCC publication after a second input change. */
-export async function runCausalRecoveryBenchmark(options: { trials?: number; branches?: number; hashRounds?: number; publication?: 'stable' | 'input-changed'; interruption?: 'close' | 'sigkill'; recoveryInput?: 'stable' | 'input-changed'; recoveryOutput?: RecoveryOutput } = {}) {
+export async function runCausalRecoveryBenchmark(options: { trials?: number; branches?: number; hashRounds?: number; publication?: 'stable' | 'input-changed'; interruption?: 'close' | 'sigkill'; recoveryInput?: 'stable' | 'input-changed'; recoveryOutput?: RecoveryOutput; outputFileBytes?: number[] } = {}) {
   if (options.publication !== undefined && !['stable', 'input-changed'].includes(options.publication)) throw new Error('Invalid publication');
   if (options.interruption !== undefined && !['close', 'sigkill'].includes(options.interruption)) throw new Error('Invalid interruption');
   const config = { trials: options.trials ?? 3, branches: options.branches ?? 4, hashRounds: options.hashRounds ?? 1000 };
@@ -38,10 +38,13 @@ export async function runCausalRecoveryBenchmark(options: { trials?: number; bra
   }
   if (options.recoveryInput !== undefined && !['stable', 'input-changed'].includes(options.recoveryInput)) throw new Error('Invalid recoveryInput');
   if (options.recoveryOutput !== undefined && !['stable', 'tampered', 'deleted'].includes(options.recoveryOutput)) throw new Error('Invalid recoveryOutput');
+  const outputFileBytes = options.outputFileBytes ?? [];
+  if (!Array.isArray(outputFileBytes) || outputFileBytes.some(size => !Number.isSafeInteger(size) || size < 1)
+    || !Number.isSafeInteger(outputFileBytes.reduce((sum, size) => sum + size, 64))) throw new Error('Invalid outputFileBytes');
   const comparison = options.recoveryInput !== undefined || options.recoveryOutput !== undefined;
   const selectedModes = comparison ? modes : modes.slice(0, 2);
   const selectedFaults = comparison ? ['outcome-interruption'] as const : faults;
-  const sampleConfig = { ...config, recoveryInput: options.recoveryInput, recoveryOutput: options.recoveryOutput };
+  const sampleConfig = { ...config, recoveryInput: options.recoveryInput, recoveryOutput: options.recoveryOutput, outputFileBytes };
   const samples: (Awaited<ReturnType<typeof runSample>> | Awaited<ReturnType<typeof runKilledSample>>)[] = [];
   for (let trial = 0; trial < config.trials; trial++) {
     for (const fault of selectedFaults) {
@@ -50,7 +53,7 @@ export async function runCausalRecoveryBenchmark(options: { trials?: number; bra
       }
     }
   }
-  return { schemaVersion: 5, config, recoveryOutput: options.recoveryOutput ?? null, recoveryInput: options.recoveryInput ?? null, interruption: options.interruption ?? 'close', publication: options.publication ?? null, modelTokens: null,
+  return { schemaVersion: 6, config: { ...config, outputFileBytes, outputBytes: 64 + outputFileBytes.reduce((sum, size) => sum + size, 0) }, recoveryOutput: options.recoveryOutput ?? null, recoveryInput: options.recoveryInput ?? null, interruption: options.interruption ?? 'close', publication: options.publication ?? null, modelTokens: null,
     scope: options.publication ? 'recovery-through-occ-publication' : 'checkpoint-and-isolated-workspace-recovery',
     environment: { node: process.version, platform: process.platform, arch: process.arch }, samples,
     summary: selectedFaults.flatMap(fault => selectedModes.map(mode => {
@@ -62,6 +65,9 @@ export async function runCausalRecoveryBenchmark(options: { trials?: number; bra
         meanRecoveryMs: mean('recoveryMs'), meanElapsedMs: mean('elapsedMs'),
         meanRecoveryBindingCalls: rows.reduce((sum, row) => sum + row.recoveryEvidence.bindingCalls, 0) / rows.length,
         meanRecoveryProbeCalls: rows.reduce((sum, row) => sum + row.recoveryEvidence.probeCalls, 0) / rows.length,
+        meanPrebindValidationMs: rows.reduce((sum, row) => sum + row.recoveryEvidence.prebindValidationMs, 0) / rows.length,
+        meanDistributionMs: rows.reduce((sum, row) => sum + row.recoveryEvidence.distributionMs, 0) / rows.length,
+        meanDistributionBytesRead: rows.reduce((sum, row) => sum + row.recoveryEvidence.distributionBytesRead, 0) / rows.length,
         meanRejectedBindings: rows.reduce((sum, row) => sum + row.recoveryEvidence.rejectedBindings, 0) / rows.length };
     })) };
 }
@@ -98,6 +104,17 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
       for (let i = 0; i < config.hashRounds; i++) input = hash(input);
       return input;
     };
+    // Payload depends on both the causal result and file index; checkpoints retain only the digest.
+    const payloads = (digest: string) => (config.outputFileBytes ?? []).map((size, index) => ({
+      name: `payload-${index}.txt`, value: hash(`${digest}:${index}`).repeat(Math.ceil(size / 64)).slice(0, size),
+    }));
+    const writeOutput = (directory: string, digest: string) => {
+      fs.writeFileSync(path.join(directory, 'derived.txt'), digest);
+      for (const file of payloads(digest)) fs.writeFileSync(path.join(directory, file.name), file.value);
+    };
+    const outputCorrect = (directory: string, digest: string) =>
+      fs.readFileSync(path.join(directory, 'derived.txt'), 'utf8') === digest
+      && payloads(digest).every(file => fs.readFileSync(path.join(directory, file.name), 'utf8') === file.value);
     const ids = Array.from({ length: config.branches }, (_, i) => `agent-${i}`);
     if (!resume) {
       const initial = await supervisor.beginWorkspaceTransaction(txOptions('initial'));
@@ -105,8 +122,8 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
         observation: { kind: 'observe', call: { tool: 'read', args: {} }, resultHash: hash('old') } });
       const output = graph.record({ txId: initial.txId, actorId: 'shared', dependsOn: [input.seq],
         observation: { kind: 'mutate', call: { tool: 'derive', args: {} }, resultHash: hash(derive('old')) },
-        writes: [{ status: 'A', path: 'derived.txt' }] });
-      fs.writeFileSync(path.join(initial.forkRoot, 'derived.txt'), derive('old'));
+        writes: ['derived.txt', ...payloads(derive('old')).map(file => file.name)].map(file => ({ status: 'A' as const, path: file })) });
+      writeOutput(initial.forkRoot, derive('old'));
       for (const id of ids) {
         runtime.create({ id, runId: 'run', input: null, checkpoint: derive('old'), causalHeads: [output.seq], maxSteps: 2 });
         runtime.pause(id);
@@ -120,7 +137,7 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
       counters.executionToolCalls++;
       const value = fs.readFileSync(path.join(tx.forkRoot, 'input.txt'), 'utf8');
       const result = entry.observation.call.tool === 'read' ? value : derive(value);
-      if (entry.observation.kind === 'mutate') fs.writeFileSync(path.join(tx.forkRoot, 'derived.txt'), result);
+      if (entry.observation.kind === 'mutate') writeOutput(tx.forkRoot, result);
       return { actorId: entry.actorId, observation: { ...entry.observation, resultHash: hash(result) }, writes: entry.writes };
     };
     let inject = true;
@@ -128,6 +145,9 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
     let validationStarted: number | undefined;
     let prebindValidationMs = 0;
     let distributionOutputChecks = 0;
+    let distributionBytesRead = 0;
+    let distributionBytesWritten = 0;
+    let distributionMs = 0;
     const bind: AgentSharedCausalRecoveryOptions['bind'] = async ({ agentId }, repair, attempt) => {
       if (validationStarted !== undefined) {
         prebindValidationMs = performance.now() - validationStarted;
@@ -144,11 +164,24 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
       }
       counters.distributionReads++;
       distributionOutputChecks++;
-      const value = fs.readFileSync(path.join(repair.transaction.forkRoot, 'derived.txt'), 'utf8');
-      const output = repair.replacements.find(row => row.node.observation.call.tool === 'derive')!.node;
-      if (hash(value) !== output.observation.resultHash) throw new Error('Shared output changed during distribution');
-      counters.distributionWrites++;
-      fs.writeFileSync(path.join(tx.forkRoot, 'derived.txt'), value);
+      const distributionStarted = performance.now();
+      let value: string;
+      try {
+        value = fs.readFileSync(path.join(repair.transaction.forkRoot, 'derived.txt'), 'utf8');
+        distributionBytesRead += Buffer.byteLength(value);
+        const output = repair.replacements.find(row => row.node.observation.call.tool === 'derive')!.node;
+        if (hash(value) !== output.observation.resultHash) throw new Error('Shared output changed during distribution');
+        for (const file of payloads(value)) {
+          const actual = fs.readFileSync(path.join(repair.transaction.forkRoot, file.name), 'utf8');
+          distributionBytesRead += Buffer.byteLength(actual);
+          if (hash(actual) !== hash(file.value)) throw new Error('Shared payload changed during distribution');
+          fs.writeFileSync(path.join(tx.forkRoot, file.name), actual);
+          distributionBytesWritten += Buffer.byteLength(actual);
+        }
+        counters.distributionWrites++;
+        fs.writeFileSync(path.join(tx.forkRoot, 'derived.txt'), value);
+        distributionBytesWritten += Buffer.byteLength(value);
+      } finally { distributionMs += performance.now() - distributionStarted; }
       if (inject && agentId === ids.at(-1)) {
         counters.injectedFaults++;
         abandonedTxId = txId;
@@ -162,7 +195,7 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
           const value = fs.readFileSync(path.join(context, 'input.txt'), 'utf8');
           if (entry.call.tool === 'read') return hash(value);
           const result = derive(value);
-          fs.writeFileSync(path.join(context, 'derived.txt'), result);
+          writeOutput(context, result);
           return hash(result);
         } });
     const refresh = (prefix: string, agentIds: string[]) => refreshAgentSharedCausalBatch(runtime!, supervisor, {
@@ -206,8 +239,10 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
     inject = false;
     const recoveryInput = config.recoveryInput === 'input-changed' ? `recovery-change-${trial}` : updated;
     fs.writeFileSync(path.join(root, 'input.txt'), recoveryInput);
-    if (config.recoveryOutput === 'tampered') fs.writeFileSync(path.join(temp, before.repair!.txId, 'derived.txt'), 'corrupted');
-    if (config.recoveryOutput === 'deleted') fs.unlinkSync(path.join(temp, before.repair!.txId, 'derived.txt'));
+    const damagedFile = config.outputFileBytes?.length ? `payload-${config.outputFileBytes.length - 1}.txt` : 'derived.txt';
+    if (config.recoveryOutput === 'tampered') fs.writeFileSync(path.join(temp, before.repair!.txId, damagedFile), 'corrupted');
+    if (config.recoveryOutput === 'deleted') fs.unlinkSync(path.join(temp, before.repair!.txId, damagedFile));
+    const distributionBefore = { distributionBytesRead, distributionBytesWritten, distributionMs };
     const outputChecksBefore = distributionOutputChecks;
     const bindingsBefore = counters.bindingCalls;
     const probesBeforeRecovery = counters.probeCalls;
@@ -257,7 +292,7 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
       const expected = derive(id === ids.at(-1) ? recoveryInput : updated);
       const agent = runtime!.get(id)!;
       return agent.checkpoint === expected && !!agent.workspace
-        && fs.readFileSync(path.join(agent.workspace.forkRoot, 'derived.txt'), 'utf8') === expected;
+        && outputCorrect(agent.workspace.forkRoot, expected);
     }).length;
     const preservedPublications = ids.slice(0, -1).every((id, i) => runtime!.checkpoints(id).at(-1)!.seq === settled[i]);
     const recoveryExecutionToolCalls = counters.executionToolCalls - executionBeforeRecovery;
@@ -265,6 +300,9 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
       event.type === 'AGENT_CAUSAL_SHARED_OUTPUT_VALIDATED' && event.payload.planSeq === before.seq);
     const recoveryEvidence = { resumeStatus, resumeValidationSeq, rejectedBindings, outputStatus, outputSeq,
       outputChecks: outputEvents.length, prebindValidationMs,
+      distributionBytesRead: distributionBytesRead - distributionBefore.distributionBytesRead,
+      distributionBytesWritten: distributionBytesWritten - distributionBefore.distributionBytesWritten,
+      distributionMs: distributionMs - distributionBefore.distributionMs,
       distributionOutputChecks: distributionOutputChecks - outputChecksBefore,
       outputValidationRecorded: outputSeq === null || outputEvents.some(event => event.seq === outputSeq
         && event.payload.preparationSeq === before.repair!.seq && event.payload.status === outputStatus),
@@ -299,7 +337,7 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
               const value = fs.readFileSync(path.join(context, 'input.txt'), 'utf8');
               if (entry.call.tool === 'read') return hash(value);
               const result = derive(value);
-              fs.writeFileSync(path.join(context, 'derived.txt'), result);
+              writeOutput(context, result);
               return hash(result);
             } },
         });
@@ -322,7 +360,7 @@ export async function runSample(mode: typeof modes[number], fault: typeof faults
         conflictReason: first.status === 'conflict' ? first.observation?.reason ?? null : null,
         staleOutputBlocked, checkpointsCurrent,
         rootCorrect: fs.existsSync(path.join(root, 'derived.txt'))
-          && fs.readFileSync(path.join(root, 'derived.txt'), 'utf8') === derive(currentInput)
+          && outputCorrect(root, derive(currentInput))
           && fs.readFileSync(path.join(root, 'input.txt'), 'utf8') === currentInput,
         commitAttempts, commitReplayToolCalls, executionToolCalls: counters.executionToolCalls - executionBefore,
         probeCalls: counters.probeCalls - probesBefore, elapsedMs: performance.now() - publicationStarted,

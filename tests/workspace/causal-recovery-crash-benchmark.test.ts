@@ -28,7 +28,7 @@ it.each(['stable', 'input-changed'] as const)('recovers an actually killed worke
 it.each(['stable', 'input-changed'] as const)('validates pending recovery after SIGKILL before distribution: %s', async recoveryInput => {
   const report = await runCausalRecoveryBenchmark({ trials: 1, branches: 2, hashRounds: 2,
     interruption: 'sigkill', publication: 'input-changed', recoveryInput });
-  expect(report.schemaVersion).toBe(5);
+  expect(report.schemaVersion).toBe(6);
   expect(report.samples).toHaveLength(3);
   for (const sample of report.samples) {
     expect(sample.success).toBe(true);
@@ -53,7 +53,7 @@ it.each(['stable', 'input-changed'] as const)('validates pending recovery after 
 
 it.each(['tampered', 'deleted'] as const)('rejects damaged shared output after SIGKILL: %s', async recoveryOutput => {
   const report = await runCausalRecoveryBenchmark({ trials: 1, branches: 2, hashRounds: 2,
-    interruption: 'sigkill', publication: 'stable', recoveryOutput });
+    interruption: 'sigkill', publication: 'stable', recoveryOutput, outputFileBytes: [17, 131072] });
   expect(report.recoveryOutput).toBe(recoveryOutput);
   expect(report.samples).toHaveLength(3);
   for (const sample of report.samples) {

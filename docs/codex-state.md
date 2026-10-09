@@ -50,11 +50,11 @@
 - listAgentCheckpointWorkspaceReferences：跨Run/txId/atSeq查询历史checkpoint工作区、TX_BEGUN基线和当前标志；缺失基线不补造，不保证磁盘仍存在。
 - planAgentCausalResourceCleanup：冻结journal截止点，关联共享修复/登记尝试、事务生命周期、当前及历史checkpoint和跨事务共享基线引用。
 - runId/planSeq只筛资源归属，引用扫描全domain；共享、pending、历史/当前、共享基线与committing均retain，其余review。纯查询不删资源，未登记分配/外部引用仍由宿主核对。
-- planAgentCausalResourceCleanup 新增 fork 独立 retain/review；历史 checkpoint 与跨事务基线引用不再单独阻止 fork 回收，顶层保留语义不变。
 - cleanupAgentCausalFork：整个 domain 最新截止点核对→持久请求→既有 abort；只处理已登记 open/conflicted，保留所有基线。共享/pending/当前/committing拒绝，关闭事务不重复回收。
 - 截止点是前置核对，不锁异步文件操作；宿主须停止相关写入/发布并核对外部使用。请求不代表成功，TX_ABORTED reason关联requestSeq；中断需核对磁盘后重新规划。
 - listAgentCausalForkCleanups：runId/txId/atSeq/重开查询pending/aborted/failed；精确关联TX_ABORTED reason，失败持久记录；双重故障抛AggregateError，未决不推断磁盘。
 - benchmark:recovery schemaVersion=3：第四参数stable/input-changed接恢复→强制OCC→变化拒绝→全批刷新→代表输出提交；第五参数close/sigkill新增真实worker终止，failed/pending边界保持domain打开，核对SIGKILL后接管遗留锁并从journal恢复。12变化样本正确，执行8→4；crash.sample记录进程开销，非多事务原子提交/断电/模型测试。真实进程基准保留，用于后续恢复验证成本对比。
 - resumeAgentSharedCausalRefreshWithValidation：当前基线重放pending修复后heads，matched才续跑；stale/validation_failed保留pending；与bind共用preparation重叠保护，探测后重查事务。AGENT_CAUSAL_RESUME_VALIDATED关联plan/preparation/validation，文件发布仍需OCC。
 - benchmark:recovery schemaVersion=4：第六参数recoveryInput(stable/input-changed)启用pending三策略对照（直接续跑/验证续跑/重跑）；恢复前扰动与第四参数发布前扰动独立。recoveryEvidence计绑定/探测/拒绝/分发校验，验证事件核对；恢复保留已发布历史，发布后核对全批新鲜度。
-- 共享refresh准备记录output（基线/coverage/文件树指纹）；验证resume在probe前后核对，output_invalid区分changed/missing/unavailable并保持pending。AGENT_CAUSAL_SHARED_OUTPUT_VALIDATED持久证据，旧无证据拒绝；宿主保持共享fork静止，范围沿用快照，不证明上下文/分发结果。benchmark:recovery schemaVersion=5第七参数recoveryOutput支持stable/tampered/deleted，独立于两次输入扰动；SIGKILL重开后注入，三策略均宿主分发哈希核对。指纹提前拒绝避免一次绑定/输出读取，均需重算；outputChecks/outputSeq关联证据，prebindValidationMs含查询/指纹/探测/journal，非纯指纹耗时。下一步：大文件与异质输出规模的验证成本对照。
+- 共享refresh准备记录output（基线/coverage/文件树指纹）；验证resume在probe前后核对，output_invalid区分changed/missing/unavailable并保持pending。AGENT_CAUSAL_SHARED_OUTPUT_VALIDATED持久证据，旧无证据拒绝；宿主保持共享fork静止，范围沿用快照，不证明上下文/分发结果。benchmark:recovery schemaVersion=5第七参数recoveryOutput支持stable/tampered/deleted，独立于两次输入扰动；SIGKILL重开后注入，三策略均宿主分发哈希核对。指纹提前拒绝避免一次绑定/输出读取，均需重算；outputChecks/outputSeq关联证据，prebindValidationMs含查询/指纹/探测/journal，非纯指纹耗时。
+- benchmark:recovery schemaVersion=6：第八参数逗号分隔outputFileBytes，派生payload覆盖生成/重放/分发/最终OCC校验，checkpoint保留摘要；有payload时损坏最后一个文件。恢复分发字节/耗时包含失败尝试，不含fork/内核指纹；summary附验证与分发均值。下一步：多规模多轮独立测量并接入恢复成本策略，避免轻量合成任务外推。

@@ -59,3 +59,33 @@ it.each(['stable', 'input-changed'] as const)('compares resume validation before
   }
   await expect(runCausalRecoveryBenchmark({ recoveryInput: 'invalid' as 'stable' })).rejects.toThrow('Invalid recoveryInput');
 });
+
+it.each(['stable', 'tampered', 'deleted'] as const)('measures heterogeneous payload recovery and OCC: %s', async recoveryOutput => {
+  const outputFileBytes = [17, 131072];
+  const outputBytes = 64 + 17 + 131072;
+  const report = await runCausalRecoveryBenchmark({ trials: 1, branches: 2, hashRounds: 2,
+    recoveryOutput, outputFileBytes, publication: 'input-changed' });
+  expect(report.config).toMatchObject({ outputFileBytes, outputBytes });
+  for (const sample of report.samples) {
+    expect(sample.success).toBe(true);
+    expect(sample.correctOutputs).toBe(2);
+    expect(sample.publication).toMatchObject({ rootCorrect: true, firstStatus: 'conflict', finalStatus: 'committed' });
+    expect(sample.recoveryEvidence.distributionBytesRead).toBeGreaterThanOrEqual(outputBytes);
+    expect(sample.recoveryEvidence.distributionBytesWritten).toBeGreaterThanOrEqual(outputBytes);
+    expect(sample.recoveryEvidence.distributionMs).toBeGreaterThan(0);
+    if (sample.mode === 'validated-recovery') {
+      expect(sample.recoveryEvidence.resumeStatus).toBe(recoveryOutput === 'stable' ? 'resumed' : 'output_invalid');
+      expect(sample.recoveryEvidence.bindingCalls).toBe(1);
+      expect(sample.recoveryEvidence.distributionBytesRead).toBe(outputBytes);
+      expect(sample.recoveryEvidence.distributionBytesWritten).toBe(outputBytes);
+    }
+    if (sample.mode === 'durable-recovery' && recoveryOutput !== 'stable') {
+      expect(sample.recoveryEvidence.rejectedBindings).toBe(1);
+      expect(sample.recoveryEvidence.distributionBytesRead).toBe(outputBytes + 64 + 17 + (recoveryOutput === 'tampered' ? 9 : 0));
+    }
+  }
+});
+
+it.each([[0], [-1], [1.5], [NaN], [Infinity], [Number.MAX_SAFE_INTEGER]])('rejects invalid output byte sizes: %j', async size => {
+  await expect(runCausalRecoveryBenchmark({ outputFileBytes: [size] })).rejects.toThrow('Invalid outputFileBytes');
+});

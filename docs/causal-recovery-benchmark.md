@@ -176,3 +176,31 @@ outputValidationRecorded` 核对 plan 与 preparation 关联。`distributionOutp
 指纹、可能的观测探测及 journal 写入，**不是纯指纹计算耗时**。恢复总耗时仍包含后续刷新。
 损坏场景中先验证避免一次绑定和输出读取，三策略均需重算两个工具节点；不保证墙钟收益。
 最终成功仍要求历史保留、独立输出正确和（启用 publication 时）强制 OCC 发布正确。
+
+## 大文件与混合大小输出
+
+```sh
+# 同一故障、分支数与计算量；第八参数逐文件指定字节数
+pnpm benchmark:recovery 3 2 1000 stable sigkill stable stable 1048576
+pnpm benchmark:recovery 3 2 1000 stable sigkill stable stable 64,4096,1048576
+pnpm benchmark:recovery 3 2 1000 stable sigkill stable tampered 64,4096,1048576
+```
+
+schemaVersion 6 增加 `config.outputFileBytes` 和 `outputBytes`（含原有 64 字节
+`derived.txt`）。默认无额外文件，沿用原工作负载。额外 `payload-N.txt` 内容由派生摘要
+和文件序号确定；生成、探测重放、宿主分发、最终独立工作区与 OCC 根目录校验都覆盖
+全部文件，checkpoint 仍只保存小摘要。配置跨 worker 死亡保留。指定额外文件时，输出
+损坏注入最后一个 payload，避免仅验证摘要文件而漏掉大文件损坏。
+
+`recoveryEvidence.distributionBytesRead / distributionBytesWritten / distributionMs`
+计恢复阶段宿主读取、内容校验与复制，包括失败尝试和拒绝后的重算分发；不含初次准备、
+事务 fork、发布或内核指纹扫描。字节是应用层实际读写长度，不是物理磁盘 I/O。
+`prebindValidationMs` 仍是完整验证入口开销；summary 单列验证、分发耗时和读取字节均值，结合 recoveryMs
+及 elapsedMs 比较，不能把两种阶段耗时相减推算纯指纹成本。
+
+这是确定性重复内容负载，文件数、大小和 hashRounds 可独立调整。结果受页缓存、文件
+复制、journal 和进程启动影响；多轮交替策略顺序但不清页缓存，不据单次样本声称收益，
+不测模型 token。每份报告使用独立夹具，跨规模比较须固定其余参数。
+
+原有 `distributionReads / distributionWrites / distributionOutputChecks` 继续按一次整组输出分发计数，
+不随 payload 文件数增长；逐文件规模请使用新增字节指标。
