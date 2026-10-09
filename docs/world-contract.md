@@ -152,8 +152,9 @@ matched 仅说明此次探测匹配，changed 的计划仅从首个分歧扩展�
 fork；固定世界版本快照保留供修复使用，异常保留 started/事务证据，尚无自动恢复或统一资源报告。
 
 内部 `recomputeWorldCandidate` 补齐显式全量重算路径，供后续统一 refresh 的
-`onUnknown: 'recompute'` 和完整重跑对照使用。按持久候选引用读取原 task，重新捕获当前
-目录的固定版本，并复用 prepareWorldStep/AgentRuntime 执行完整任务；refresh 上下文为 null，
+`onUnknown: 'recompute'` 和完整重跑对照使用。按持久候选引用读取原 task，默认重新捕获当前
+目录的固定版本；传入 validation 引用时从持久 changed 报告恢复版本，核对原候选身份。
+复用 prepareWorldStep/AgentRuntime 执行完整任务；refresh 上下文为 null，
 旧模型响应、文件产物和依赖均不复用，也不会将验证异常自动当作重算许可。
 新版本复用首次创建的精确覆盖与快照检查，WORLD_VERSION_STARTED/CREATED/FAILED
 记录版本身份和失败；WORLD_RECOMPUTE_STARTED/COMPLETED/FAILED 关联旧候选及新结果。
@@ -164,8 +165,10 @@ fork；固定世界版本快照保留供修复使用，异常保留 started/事�
 
 内部 `refreshWorldCandidate` 现将持久探测与全量重算收敛为同一流程：matched 复用原候选，
 unknown 按 onUnknown 返回 unknown 或完整重算；工具异常、产物篡改直接 failed，不自动重试。
-changed 暂时完整重算：探测证据仅属于探测基线，接入增量修复前须在实际修复基线上重验复用节点。
-全量路径仍调用 recomputeWorldCandidate，保持新证据、版本、原 task 和隔离执行规则。
+changed 暂时完整重算，通过验证引用让 recomputeWorldCandidate 使用同一固定版本；
+恢复前核对版本事件、覆盖、快照归属以及 Git ref/commit/tree/blob，缺失或错配直接 failed，
+不重新抓取当前目录。重放期间再次改变主目录时，新候选仍对应探测版本，后续验证会检出变化。
+unknown 没有可用探测版本，继续重新采集。接入增量修复前仍须重验复用节点和物化产物。
 WORLD_REFRESH_STARTED/RECOMPUTING/FAILED/COMPLETED 保存原引用、验证引用、选择路径和结果；
 readWorldRefresh 按固定引用只读查询，关闭重开后不调用模型或推进 journal。
 此内部流程在 matched 时返回原候选身份，不创建刷新版本，也不授予发布许可；strict commit

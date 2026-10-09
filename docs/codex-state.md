@@ -1,7 +1,7 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
-- 当前里程碑：M2（单世界正确性闭环）未完成；M1 契约设计齐备，统一公开入口仍未实现；M3/M4未完成。
-- 下一轮最小切片：用验证报告version接入既有修复准备，在固定基线上重验复用节点并物化/核验产物；保持异常阻断，不扩大公开入口。
+- 当前里程碑：M2（单世界正确性闭环）未完成；M1契约已冻结，统一公开入口待M2实现；M3/M4未完成。
+- 下一轮最小切片：用持久验证version接入既有修复准备，在固定基线上重验复用节点并物化/核验产物；异常阻断，不扩大公开入口。
 - M2 完成标准仍缺：统一句柄、增量refresh、完整explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md 冻结六入口状态表、适配器覆盖和六类失败/重试/资源归属；src/world/contract.ts 共享非公开契约，spec重导出，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
@@ -52,4 +52,7 @@
 - 本轮固定验证/修复基线：两者支持baseSnapshotId，显式快照属调用方，探测结束/修复失败不误删，修复事件记录实际基线。
 - world验证先captureWorldRevision核验当前覆盖，报告持久version；旧报告读为null。symlink/目录/忽略漏收在工具调用前failed。
 - 固定版本跨主目录后续变化用于修复，失败仍保留；未接通自动增量刷新或免除复用重验/最终OCC。
-- 本轮基线892通过/7跳过；typecheck与验证相关17项通过（新增5项）；最终全量复验进行中。
+- 本轮changed refresh全量重算使用持久validation引用的固定版本；unknown/显式全量默认重新采集，原句柄基线不变。
+- restoreWorldRevision核验版本事件/覆盖/归属及Git ref/commit/tree/blob；缺失或错配failed，不回退当前目录、不调用agent。
+- 新增6项覆盖探测期间再改价、重开后固定重算、快照丢失/错配、候选错配及伪造版本；仍无增量复用或发布许可。
+- 环境基线804通过/7跳过，3套件因缺cc加载失败；已安装gcc/libc6-dev。typecheck与相关27项通过，全量复验待回填。

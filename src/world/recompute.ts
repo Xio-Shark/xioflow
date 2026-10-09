@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { captureWorldRevision, type openWorldState } from './state.js';
+import { captureWorldRevision, restoreWorldRevision, type openWorldState } from './state.js';
+import { readWorldCandidateValidation } from './validation.js';
 import { prepareWorldStep } from './prepare.js';
 import type { PreparationResult, WorldAgent, WorldRef } from './contract.js';
 
 /** Explicit full recomputation: no old output or dependency evidence is reused. */
 export async function recomputeWorldCandidate(world: Awaited<ReturnType<typeof openWorldState>>,
-  ref: WorldRef, agent: WorldAgent): Promise<PreparationResult> {
+  ref: WorldRef, agent: WorldAgent, options: { validation?: WorldRef } = {}): Promise<PreparationResult> {
   const { domain, state } = world;
   if (domain.isClosed()) throw new Error('World is closed');
   const store = domain.getStore();
@@ -25,10 +26,16 @@ export async function recomputeWorldCandidate(world: Awaited<ReturnType<typeof o
     domainId: domain.domainId, type, payload: { worldId: state.worldId, id, previous, mode: 'full', ...payload },
     timestamp: new Date().toISOString(),
   });
-  append('WORLD_RECOMPUTE_STARTED', {});
+  const validation = options.validation ? { ...options.validation } : null;
+  append('WORLD_RECOMPUTE_STARTED', { validation });
   let result: PreparationResult;
   try {
-    const revision = await captureWorldRevision(world);
+    const probe = validation ? readWorldCandidateValidation(world, validation) : null;
+    if (probe && (probe.status !== 'changed' || !probe.version
+        || probe.previous.worldId !== previous.worldId || probe.previous.id !== previous.id
+        || probe.previous.atSeq !== previous.atSeq)) throw new Error('Recomputation validation mismatch');
+    const revision = probe
+      ? await restoreWorldRevision(world, probe.version!) : await captureWorldRevision(world);
     // The ordinary preparation path checks fresh coverage, artifacts and dependencies.
     result = await prepareWorldStep(revision, agent, { task: input.task });
   } catch (error) {

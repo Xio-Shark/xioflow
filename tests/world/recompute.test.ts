@@ -4,7 +4,7 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, expect, it } from 'vitest';
-import { openWorldState } from '../../src/world/state.js';
+import { openWorldState, restoreWorldRevision } from '../../src/world/state.js';
 import { prepareWorldStep } from '../../src/world/prepare.js';
 import { validateWorldCandidate } from '../../src/world/validation.js';
 
@@ -42,6 +42,49 @@ async function prepare(unknown = false) {
   if (result.status === 'failed') throw new Error(result.reason);
   return result.candidate;
 }
+
+it.each(['reopen', 'missing', 'wrong_commit', 'foreign_candidate'] as const)(
+  'uses durable validation evidence for recomputation: %s', async scenario => {
+    const previous = await prepare();
+    await fs.writeFile(path.join(world.state.root, 'input'), 'validated');
+    const probe = await validateWorldCandidate(world, previous, adapter, 'selected_nodes');
+    const version = probe.version!;
+    const root = world.state.root;
+    await fs.writeFile(path.join(root, 'input'), 'later');
+    if (scenario === 'missing') {
+      await exec('git', ['update-ref', '-d', `refs/xioflow/snapshots/${version.snapshotId}`], { cwd: root });
+    } else if (scenario === 'wrong_commit') {
+      const original = world.domain.getStore().getSnapshot(world.state.snapshotId)!;
+      await exec('git', ['update-ref', `refs/xioflow/snapshots/${version.snapshotId}`, original.commitHash!], { cwd: root });
+    }
+    world.close();
+    world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+    const source = scenario === 'foreign_candidate' ? await prepare() : previous;
+    let calls = 0;
+    const result = await recomputeWorldCandidate(world, source, { execute: async context => {
+      calls++;
+      expect(context.version).toEqual(version);
+      expect(await fs.readFile(path.join(context.forkRoot, 'input'), 'utf8')).toBe('validated');
+      return { coverage: { status: 'complete', manifestHash: version.manifestHash }, heads: [], artifacts: [] };
+    } }, { validation: probe.ref });
+    expect(result.status).toBe(scenario === 'reopen' ? 'prepared' : 'failed');
+    expect(calls).toBe(scenario === 'reopen' ? 1 : 0);
+    expect(await fs.readFile(path.join(root, 'input'), 'utf8')).toBe('later');
+    await expect(fs.stat(path.join(root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(world.domain.getStore().getJournalEvents('world').filter(e => e.type === 'WORLD_VERSION_CREATED')).toHaveLength(1);
+  });
+
+it('rejects forged revision fields without changing history', async () => {
+  const previous = await prepare();
+  const probe = await validateWorldCandidate(world, previous, adapter);
+  const version = probe.version!;
+  const events = world.domain.getStore().getJournalEvents('world');
+  for (const forged of [{ ...version, fingerprint: 'forged' }, { ...version, worldId: 'foreign' },
+    { ...version, atSeq: previous.atSeq }, { ...version, manifestHash: 'forged' }]) {
+    await expect(restoreWorldRevision(world, forged)).rejects.toThrow('reference mismatch');
+  }
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+});
 
 it('fully recomputes against a fresh version and preserves lineage after reopening', async () => {
   const previous = await prepare();

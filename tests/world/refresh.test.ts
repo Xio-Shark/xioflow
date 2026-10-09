@@ -8,7 +8,7 @@ import { explainWorldPreparation } from '../../src/world/explain.js';
 import { openWorldState } from '../../src/world/state.js';
 import { prepareWorldStep } from '../../src/world/prepare.js';
 import { refreshWorldCandidate, readWorldRefresh } from '../../src/world/refresh.js';
-import { validateWorldCandidate } from '../../src/world/validation.js';
+import { validateWorldCandidate, readWorldCandidateValidation } from '../../src/world/validation.js';
 import type { WorldAgent } from '../../src/world/contract.js';
 
 const exec = promisify(execFile);
@@ -51,6 +51,25 @@ async function prepare() {
   if (result.status === 'failed') throw new Error(result.reason);
   return result.candidate;
 }
+
+it('recomputes the probed version when the main directory changes during validation', async () => {
+  const previous = await prepare();
+  await fs.writeFile(path.join(world.state.root, 'input'), 'probed price');
+  const report = await refreshWorldCandidate(world, previous, { ...adapter, replay: async (entry, root) => {
+    await fs.writeFile(path.join(world.state.root, 'input'), 'later price');
+    return adapter.replay(entry, root);
+  } }, agent, { onUnknown: 'reject' });
+  if (report.result.status !== 'prepared') throw new Error(JSON.stringify(report));
+  const candidate = report.result.candidate;
+  expect(candidate.version).toEqual(readWorldCandidateValidation(world, report.validation!).version);
+  const events = world.domain.getStore().getJournalEvents('world');
+  expect(events.filter(e => e.type === 'WORLD_VERSION_CREATED')).toHaveLength(1);
+  const completed = events.find(e => e.type === 'WORLD_STEP_COMPLETED' && e.payload.id === candidate.id)!;
+  expect(await fs.readFile(path.join(completed.payload.forkRoot as string, 'output'), 'utf8')).toBe('probed price');
+  expect(await fs.readFile(path.join(world.state.root, 'input'), 'utf8')).toBe('later price');
+  await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
+  expect((await validateWorldCandidate(world, candidate, adapter)).status).toBe('changed');
+});
 
 it.each([false, true])('refreshes changed=%s and preserves exact read-only history after reopening', async changed => {
   const previous = await prepare();

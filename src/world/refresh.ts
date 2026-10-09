@@ -54,11 +54,12 @@ export async function refreshWorldCandidate(world: WorldState, ref: WorldRef,
       strategy = 'reject';
       result = { status: 'unknown', candidate, reasons: probe.reasons };
     } else {
-      // Evidence is complete for the probed baseline, not a later repair baseline.
-      // Until repair preparation revalidates reuse, regenerate the entire task.
+      // Keep the explanation and execution on the same durable baseline.
+      // Incremental reuse still requires separate evidence and output validation.
       strategy = 'full';
       append('WORLD_REFRESH_RECOMPUTING', { validation, cause: probe.status });
-      result = await recomputeWorldCandidate(world, previous, agent);
+      result = await recomputeWorldCandidate(world, previous, agent,
+        probe.status === 'changed' ? { validation: probe.ref } : {});
     }
   } catch (error) {
     strategy = 'failed';

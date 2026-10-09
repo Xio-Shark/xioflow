@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ExecutionDomain } from '../domain.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
+import type { WorldVersion } from './contract.js';
 
 const exec = promisify(execFile);
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -217,4 +218,31 @@ export async function captureWorldRevision(world: Awaited<ReturnType<typeof open
     append('WORLD_VERSION_FAILED', { reason: error instanceof Error ? error.message : String(error), resources: 'retained' });
     throw error;
   }
+}
+
+/** Restore a durable revision without recapturing the current directory. */
+export async function restoreWorldRevision(world: Awaited<ReturnType<typeof openWorldState>>,
+  version: WorldVersion) {
+  const { domain, state } = world;
+  if (domain.isClosed()) throw new Error('World is closed');
+  const store = domain.getStore();
+  const event = store.getJournalEvent(domain.domainId, version.atSeq);
+  const record = event?.payload as unknown as WorldStateRecord | undefined;
+  if (!event || event.type !== 'WORLD_VERSION_CREATED' || !record
+      || version.worldId !== state.worldId || version.id !== version.snapshotId
+      || record.worldId !== state.worldId || record.snapshotId !== version.snapshotId
+      || record.fingerprint !== version.fingerprint || record.root !== state.root
+      || record.manifestHash !== state.manifestHash || version.manifestHash !== state.manifestHash
+      || record.schemaVersion !== 1
+      || hash({ adapter: record.adapter, coverage: record.coverage }) !== state.manifestHash) {
+    throw new Error('World revision reference mismatch');
+  }
+  const snapshot = store.getSnapshot(version.snapshotId);
+  if (!snapshot || snapshot.domainId !== domain.domainId || snapshot.driver !== 'git-shadow'
+      || snapshot.opId !== state.worldId || snapshot.coverage !== 'worktree_non_ignored'
+      || snapshot.treeFingerprint !== version.fingerprint || snapshot.roots.length !== 1
+      || snapshot.roots[0] !== state.root) throw new Error('World baseline metadata missing or inconsistent');
+  await checkBaseline(state.root, version.snapshotId, version.fingerprint, state.coverage, snapshot.commitHash);
+  return { ...world, state: Object.freeze({ ...state, snapshotId: version.snapshotId,
+    fingerprint: version.fingerprint, atSeq: version.atSeq }) };
 }
