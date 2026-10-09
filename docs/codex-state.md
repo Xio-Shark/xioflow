@@ -45,16 +45,16 @@
 - validate / prepare refresh / refresh 支持 replayReuse: baseline_observations（默认 none）。
 - 单次基线按 seq 复用 mutation 前纯观测；错误不缓存、不同节点不合并；提交完整重放。
 - 适配器须纯文件观测、与 fork 路径 / 内存副作用无关；缓存不跨调用或修复。
-- benchmark:probe-reuse 仅探测；benchmark:refresh 四模式计入修复 / 复用 / 强制提交。
+- benchmark:probe-reuse 仅探测；benchmark:refresh 五模式计入修复 / 复用 / 强制提交。
 - refresh 新增 --shared / --change-shared，共享祖先加独立输入，支持四种变化场景。
-- 四分支总调用普通→缓存：无变化 12→9，局部 29→26，全部独立 26→23，共享变化 22→19。
-- 受验证模式 36/36 正确；有变化时仍多于完整重跑 18 次，无稳定耗时收益，无模型 token。
-- 原始数据 docs/benchmarks/causal-refresh-shared.sample.json；协议 docs/causal-refresh-benchmark.md。
 - refresh / prepare refresh 可选 costModel；planWorkspaceCausalRefresh 可纯查询比较成本。
 - 每节点 execute / reuse / replay 同单位有限非负估算；溢出或异常在修复事务前拒绝。
 - 比较增量重算+复用验证+完整提交重放与全部重算+完整提交重放；相等保留增量。
 - full 只重算选中联合祖先，共享节点一次；validateReuse 收到 []，保留强制 OCC。
 - 返回 decision；关联事件可选 decision 持久保存策略及成本，旧行为 / 事件兼容。
 - 先探测再决策；估算不包含已发生探测和相同固定开销，不声称实测或 token 收益。
-- 下一步：将自适应选择接入端到端基准，校准估算误差与实际总调用 / 耗时。
-- 最新验证：补齐 gcc / libc6-dev；pnpm typecheck 通过，pnpm test 639 通过 / 7 跳过（117.37 秒）。
+- benchmark:refresh 新增 adaptive；实际 reusePasses 与估算可独立配置，schemaVersion=2。
+- 原始数据 causal-refresh-adaptive.sample.json：48/48 正确；三轮校验 40→26 调用，完整重跑 18。
+- 低估校验时误差 14、仍 40 次；重复校验仅敏感性负载，耗时与测试争用，不声称稳定加速。
+- 下一步：探索探测前选择策略，减少全失效时的探测开销；或独立输出 / checkpoint 发布协调。
+- 最新验证：typecheck / build / CLI 通过；pnpm test 647 通过 / 7 跳过（142.86 秒）。

@@ -7,7 +7,7 @@ describe('causal refresh benchmark', () => {
   it('measures actual probe, repair, reuse and mandatory publication replay against equal guarantees', async () => {
     const report = await runCausalRefreshBenchmark({ trials: 2, branches: 3, hashRounds: 2 });
     expect(report.modelTokens).toBeNull();
-    expect(report.samples).toHaveLength(8);
+    expect(report.samples).toHaveLength(10);
     for (let trial = 0; trial < 2; trial++) {
       const samples = report.samples.filter((sample) => sample.trial === trial);
       const full = samples.find((sample) => sample.mode === 'full-rerun')!;
@@ -29,8 +29,8 @@ describe('causal refresh benchmark', () => {
         commitValidation: null, transactionsStarted: 0, snapshotsCaptured: 0 });
       expect(refresh.elapsedMs).toBeGreaterThan(0);
     }
-    expect(report.summary.map((row) => row.successRate)).toEqual([1, 1, 1, 0]);
-    expect(report.summary.map((row) => row.meanTotalToolCalls)).toEqual([12, 17, 17, 0]);
+    expect(report.summary.map((row) => row.successRate)).toEqual([1, 1, 1, 1, 0]);
+    expect(report.summary.map((row) => row.meanTotalToolCalls)).toEqual([12, 17, 17, 17, 0]);
   }, 30_000);
 
   it.each([0, 2])('covers %i changed inputs including unchanged fast path and full invalidation', async (changedBranches) => {
@@ -73,8 +73,45 @@ describe('causal refresh benchmark', () => {
       correctOutputs: changes.changeSharedInput ? 0 : 3 - changes.changedBranches });
   }, 30_000);
 
+  it.each([
+    { reusePasses: 1, estimatedReusePasses: 1, strategy: 'incremental', execution: 2, reuse: 5, error: 0 },
+    { reusePasses: 3, estimatedReusePasses: 3, strategy: 'full', execution: 7, reuse: 0, error: 0 },
+    { reusePasses: 3, estimatedReusePasses: 1, strategy: 'incremental', execution: 2, reuse: 15, error: 10 },
+  ])('measures adaptive decisions and estimation error: %j', async (scenario) => {
+    const report = await runCausalRefreshBenchmark({ trials: 1, branches: 3, hashRounds: 2,
+      sharedInput: true, reusePasses: scenario.reusePasses, estimatedReusePasses: scenario.estimatedReusePasses });
+    const adaptive = report.samples.find(sample => sample.mode === 'causal-refresh-adaptive')!;
+    const fixed = report.samples.find(sample => sample.mode === 'causal-refresh-reuse')!;
+    const full = report.samples.find(sample => sample.mode === 'full-rerun')!;
+    expect(adaptive).toMatchObject({ success: true, status: 'committed', commitValidation: 'observations',
+      executionToolCalls: scenario.execution, reuseToolCalls: scenario.reuse, commitReplayToolCalls: 7,
+      probeToolCalls: 6, reusedProbeSteps: 2, decision: { strategy: scenario.strategy },
+      costPrediction: { unit: 'toolCalls', estimatedRemainingToolCalls: 14,
+        actualRemainingToolCalls: 14 + scenario.error, errorToolCalls: scenario.error } });
+    expect(report.summary.find(row => row.mode === 'causal-refresh-adaptive')).toMatchObject({
+      meanAbsoluteCostErrorToolCalls: scenario.error,
+      strategySelections: { incremental: scenario.strategy === 'incremental' ? 1 : 0, full: scenario.strategy === 'full' ? 1 : 0 },
+    });
+    expect(adaptive.outputHashes).toEqual(full.outputHashes);
+    expect(fixed.outputHashes).toEqual(full.outputHashes);
+    expect(fixed.reuseToolCalls).toBe(5 * scenario.reusePasses);
+    expect(adaptive.totalToolCalls).toBe(adaptive.probeToolCalls + adaptive.costPrediction!.actualRemainingToolCalls);
+    if (scenario.strategy === 'full') expect(adaptive.totalToolCalls).toBe(fixed.totalToolCalls - 10);
+    else expect(adaptive.totalToolCalls).toBe(fixed.totalToolCalls);
+  }, 30_000);
+
+  it('skips cost selection and publication when every branch is unchanged', async () => {
+    const report = await runCausalRefreshBenchmark({ trials: 1, branches: 2, hashRounds: 1,
+      changedBranches: 0, sharedInput: true, reusePasses: 3 });
+    expect(report.samples.find(sample => sample.mode === 'causal-refresh-adaptive')).toMatchObject({
+      success: true, status: 'unchanged', decision: null, costPrediction: null,
+      executionToolCalls: 0, reuseToolCalls: 0, commitReplayToolCalls: 0, probeToolCalls: 5,
+    });
+  }, 30_000);
+
   it.each([{ trials: 0 }, { branches: 1.5 }, { hashRounds: NaN }, { changedBranches: -1 },
-    { branches: 2, changedBranches: 3 }, { changedBranches: Infinity }, { changeSharedInput: true }])('rejects invalid configuration %j', async (options) => {
+    { branches: 2, changedBranches: 3 }, { changedBranches: Infinity }, { changeSharedInput: true },
+    { reusePasses: 0 }, { reusePasses: 1.5 }, { estimatedReusePasses: -1 }, { estimatedReusePasses: Infinity }])('rejects invalid configuration %j', async (options) => {
     await expect(runCausalRefreshBenchmark(options)).rejects.toThrow();
   });
 });

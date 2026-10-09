@@ -9,19 +9,24 @@ import { ExecutionDomain } from '../domain.js';
 import { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { WorkspaceCausalGraph } from '../workspace/causal-graph.js';
 import { refreshWorkspaceCausalBranches } from '../workspace/causal-refresh.js';
+import type { CausalRefreshDecision } from '../workspace/causal-refresh-cost.js';
 import type { ObservationEntry, CommitValidation } from '../workspace/transactions.js';
 import type { CausalBenchmarkOptions } from './causal-repair-benchmark.js';
 
 export interface CausalRefreshBenchmarkOptions extends CausalBenchmarkOptions {
   /** Number of independent inputs changed per trial; zero measures the unchanged fast path. */
   changedBranches?: number;
+  /** Actual complete validation passes over retained evidence (sensitivity workload). */
+  reusePasses?: number;
+  /** Estimated calls per retained node; defaults to reusePasses. */
+  estimatedReusePasses?: number;
   /** Add one pure observation shared by every branch. */
   sharedInput?: boolean;
   /** Change the shared input, invalidating every dependent branch. */
   changeSharedInput?: boolean;
 }
 const exec = promisify(execFile);
-const modes = ['full-rerun', 'causal-refresh', 'causal-refresh-reuse', 'unchecked-reuse'] as const;
+const modes = ['full-rerun', 'causal-refresh', 'causal-refresh-reuse', 'causal-refresh-adaptive', 'unchecked-reuse'] as const;
 type Mode = typeof modes[number];
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 function output(value: string, rounds: number): string {
@@ -33,9 +38,13 @@ function output(value: string, rounds: number): string {
 export async function runCausalRefreshBenchmark(options: CausalRefreshBenchmarkOptions = {}) {
   const config = { trials: options.trials ?? 3, branches: options.branches ?? 4,
     hashRounds: options.hashRounds ?? 1000, changedBranches: options.changedBranches ?? 1,
+    reusePasses: options.reusePasses ?? 1, estimatedReusePasses: options.estimatedReusePasses ?? options.reusePasses ?? 1,
     sharedInput: options.sharedInput ?? false, changeSharedInput: options.changeSharedInput ?? false };
-  for (const key of ['trials', 'branches', 'hashRounds'] as const) {
+  for (const key of ['trials', 'branches', 'hashRounds', 'reusePasses'] as const) {
     if (!Number.isSafeInteger(config[key]) || config[key] < 1) throw new Error(`${key} must be a positive safe integer`);
+  }
+  if (!Number.isFinite(config.estimatedReusePasses) || config.estimatedReusePasses < 0) {
+    throw new Error('estimatedReusePasses must be finite and nonnegative');
   }
   if (!Number.isSafeInteger(config.changedBranches) || config.changedBranches < 0 || config.changedBranches > config.branches) {
     throw new Error('changedBranches must be an integer between zero and branches');
@@ -50,19 +59,24 @@ export async function runCausalRefreshBenchmark(options: CausalRefreshBenchmarkO
       samples.push(await runSample(modes[(trial + offset) % modes.length], trial, config));
     }
   }
-  return { schemaVersion: 1, config, modelTokens: null,
+  return { schemaVersion: 2, config, modelTokens: null,
     environment: { node: process.version, platform: process.platform, arch: process.arch,
       git: (await exec('git', ['--version'])).stdout.trim() },
     samples, summary: modes.map((mode) => {
       const selected = samples.filter((sample) => sample.mode === mode);
       const mean = (key: 'executionToolCalls' | 'probeToolCalls' | 'reuseToolCalls' | 'commitReplayToolCalls' | 'totalToolCalls' | 'reusedProbeSteps') =>
         selected.reduce((sum, sample) => sum + sample[key], 0) / selected.length;
+      const predictions = selected.flatMap(sample => sample.costPrediction ? [sample.costPrediction] : []);
       const times = selected.map((sample) => sample.elapsedMs).sort((a, b) => a - b);
       const middle = Math.floor(times.length / 2);
       return { mode, successRate: selected.filter((sample) => sample.success).length / selected.length,
         meanExecutionToolCalls: mean('executionToolCalls'), meanProbeToolCalls: mean('probeToolCalls'),
         meanReuseToolCalls: mean('reuseToolCalls'), meanCommitReplayToolCalls: mean('commitReplayToolCalls'),
         meanTotalToolCalls: mean('totalToolCalls'), meanReusedProbeSteps: mean('reusedProbeSteps'),
+        strategySelections: { incremental: selected.filter(sample => sample.decision?.strategy === 'incremental').length,
+          full: selected.filter(sample => sample.decision?.strategy === 'full').length },
+        meanAbsoluteCostErrorToolCalls: predictions.length
+          ? predictions.reduce((sum, prediction) => sum + Math.abs(prediction.errorToolCalls), 0) / predictions.length : null,
         medianElapsedMs: times.length % 2 ? times[middle] : (times[middle - 1] + times[middle]) / 2 };
     }) };
 }
@@ -133,6 +147,7 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
     let status: string = 'reused';
     let reusedProbeSteps = 0;
     let commitValidation: CommitValidation | null = null;
+    let decision: CausalRefreshDecision | null = null;
     if (mode === 'full-rerun') {
       const tx = await supervisor.beginWorkspaceTransaction(txOptions('rerun'));
       const log: ObservationEntry[] = [];
@@ -144,19 +159,24 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
       if (result.status === 'committed') commitValidation = result.validation;
       else await supervisor.abortWorkspaceTransaction(tx.txId, 'benchmark conflict');
       await supervisor.pruneSnapshots([tx.baseSnapshotId], { runId: 'run' });
-    } else if (mode === 'causal-refresh' || mode === 'causal-refresh-reuse') {
+    } else if (mode === 'causal-refresh' || mode === 'causal-refresh-reuse' || mode === 'causal-refresh-adaptive') {
       let repairing = false;
       const result = await refreshWorkspaceCausalBranches(supervisor, {
         ...txOptions('probe'), atSeq: view.nodes.at(-1)!.seq, branches,
         closedWorld: true, replayPolicy: 'deterministic',
-        replayReuse: mode === 'causal-refresh-reuse' ? 'baseline_observations' : 'none',
+        replayReuse: mode === 'causal-refresh' ? 'none' : 'baseline_observations',
+        ...(mode === 'causal-refresh-adaptive' ? { costModel: () => ({
+          execute: 1, reuse: config.estimatedReusePasses, replay: 1,
+        }) } : {}),
         replay: (entry, dir) => perform(entry, dir, repairing ? 'commitReplayToolCalls' : 'probeToolCalls'),
         repair: { txId: 'repair', forkPath: path.join(temp, 'repair'),
           validateReuse: async (tx, unaffected) => {
             repairing = true;
-            for (const node of unaffected) {
-              if (await perform(node.observation, tx.forkRoot, 'reuseToolCalls') !== node.observation.resultHash) {
-                throw new Error(`Invalid reused evidence: ${node.seq}`);
+            for (let pass = 0; pass < config.reusePasses; pass++) {
+              for (const node of unaffected) {
+                if (await perform(node.observation, tx.forkRoot, 'reuseToolCalls') !== node.observation.resultHash) {
+                  throw new Error(`Invalid reused evidence: ${node.seq}`);
+                }
               }
             }
           },
@@ -165,6 +185,7 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
             writes: node.writes?.map((write) => ({ ...write, status: 'M' as const })) }),
         },
       });
+      decision = 'decision' in result ? result.decision ?? null : null;
       status = result.status;
       reusedProbeSteps = result.validation.reusedSteps;
       if (result.status === 'committed' && result.commit.status === 'committed') commitValidation = result.commit.validation;
@@ -180,7 +201,13 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
       const expectedShared = config.sharedInput ? `${config.changeSharedInput ? `shared-changed-${trial}` : 'shared-initial'}\n` : '';
       if (actual === output(expectedShared + expectedInput, config.hashRounds)) correctOutputs++;
     }
-    return { mode, trial, changedBranches: changed, status, ...counters, reusedProbeSteps,
+    const actualRemainingToolCalls = counters.executionToolCalls + counters.reuseToolCalls + counters.commitReplayToolCalls;
+    const estimatedRemainingToolCalls = decision ? decision[decision.strategy].total : null;
+    const costPrediction = estimatedRemainingToolCalls === null ? null : {
+      unit: 'toolCalls' as const, estimatedRemainingToolCalls, actualRemainingToolCalls,
+      errorToolCalls: actualRemainingToolCalls - estimatedRemainingToolCalls,
+    };
+    return { mode, trial, decision, costPrediction, changedBranches: changed, status, ...counters, reusedProbeSteps,
       totalToolCalls: Object.values(counters).reduce((a, b) => a + b, 0), elapsedMs,
       transactionsStarted: events.filter((event) => event.type === 'TX_BEGUN').length,
       snapshotsCaptured: events.filter((event) => event.type === 'SNAPSHOT_CAPTURED').length,
