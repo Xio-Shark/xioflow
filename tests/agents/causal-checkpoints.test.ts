@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -49,7 +49,7 @@ describe('agent checkpoint causal branches', () => {
     expect(bind).not.toHaveBeenCalled();
   });
 
-  it.each(['resume', 'advanced', 'closed', 'legacy'] as const)('resumes pending publication after reopen: %s', async (mode) => {
+  it.each(['resume', 'advanced', 'closed', 'legacy', 'allocated', 'reservation_failed'] as const)('resumes pending publication after reopen: %s', async (mode) => {
     const source = node();
     open();
     for (const id of ['first', 'second']) {
@@ -61,6 +61,8 @@ describe('agent checkpoint causal branches', () => {
     const record = store.recordJournalEvent.bind(store);
     vi.spyOn(store, 'recordJournalEvent').mockImplementation(event => {
       if (event.type === 'AGENT_CAUSAL_REFRESH_OUTCOME') throw new Error('outcome disk failure');
+      if (mode === 'reservation_failed' && event.type === 'AGENT_CAUSAL_BINDING_RESERVED'
+        && event.payload.txId === 'second-bound') throw new Error('reservation disk failure');
       if (mode === 'legacy' && event.type === 'AGENT_CAUSAL_REFRESH_PREPARED') {
         const { repair: _repair, ...payload } = event.payload;
         return record({ ...event, payload });
@@ -78,8 +80,18 @@ describe('agent checkpoint causal branches', () => {
         validateReuse: async () => {}, execute: async entry => ({ actorId: entry.actorId,
           observation: { ...entry.observation, resultHash: 'new' } }),
       }),
-      bind: async ({ agentId }) => {
-        if (agentId === 'second') throw new Error('process interrupted before publication');
+      bind: async ({ agentId }, _repair, attempt) => {
+        expect(attempt).toBeDefined();
+        expect(() => attempt!.reserveTransaction('')).toThrow('nonempty');
+        expect(() => attempt!.reserveTransaction('shared')).toThrow('already allocated');
+        attempt!.reserveTransaction(`${agentId}-bound`);
+        expect(() => attempt!.reserveTransaction(`${agentId}-bound`)).toThrow('already allocated');
+        if (agentId === 'second') {
+          if (mode === 'allocated') await supervisor.beginWorkspaceTransaction({
+            txId: 'second-bound', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'second-bound'),
+          });
+          throw new Error('process interrupted before publication');
+        }
         return { checkpoint: 'first-new', workspace: await supervisor.beginWorkspaceTransaction({
           txId: 'first-bound', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'first-bound'),
         }) };
@@ -89,18 +101,37 @@ describe('agent checkpoint causal branches', () => {
     const execution = listAgentCausalRefreshExecutions(domain)[0];
     expect(execution.publications.map(entry => entry.status)).toEqual(['repaired', 'pending']);
     const first = runtime.checkpoints('first').at(-1);
+    const attempts = listAgentCausalBindingAttempts(domain);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0].reservations[0]).toMatchObject({ txId: 'first-bound', state: 'open', referencedBy: ['first'] });
+    if (mode === 'reservation_failed') {
+      expect(attempts[1].reservations).toEqual([]);
+      expect(fs.existsSync(path.join(temp, 'second-bound'))).toBe(false);
+    } else expect(attempts[1].reservations[0]).toMatchObject({ txId: 'second-bound',
+      state: mode === 'allocated' ? 'open' : 'reserved', referencedBy: [] });
+    expect(listAgentCausalBindingAttempts(domain, { atSeq: attempts[0].seq })[0].reservations).toEqual([]);
+    expect(listAgentCausalBindingAttempts(domain, { atSeq: attempts[0].reservations[0].seq })[0].reservations[0].state).toBe('reserved');
+    expect(listAgentCausalBindingAttempts(domain, { runId: 'other' })).toEqual([]);
+    expect(() => listAgentCausalBindingAttempts(domain, { atSeq: -1 })).toThrow('sequence');
     runtime.close(); domain.close();
     domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
     open();
+    expect(listAgentCausalBindingAttempts(domain)).toEqual(attempts);
     const usage = runtime.getRunUsage('run');
     if (mode === 'advanced') runtime.restoreCheckpoint('second', runtime.checkpoints('second').at(-1)!.seq);
     if (mode === 'closed') domain.getStore().recordJournalEvent({ domainId: domain.domainId,
       runId: 'run', type: 'TX_ABORTED', timestamp: new Date().toISOString(), payload: { txId: 'shared' } });
-    const bind = vi.fn(async ({ agentId }: { agentId: string }) => {
+    let savedAttempt: import('../../src/index.js').AgentCausalBindingAttempt | undefined;
+    const bind = vi.fn(async ({ agentId }: { agentId: string }, _repair: unknown,
+      attempt?: import('../../src/index.js').AgentCausalBindingAttempt) => {
+      savedAttempt = attempt;
+      expect(attempt!.attemptSeq).toBeGreaterThan(attempts[1].seq);
+      if (mode !== 'reservation_failed') expect(() => attempt!.reserveTransaction('second-bound')).toThrow('already allocated');
+      attempt!.reserveTransaction('second-resumed');
       expect(agentId).toBe('second');
       await expect(resumeAgentSharedCausalRefresh(runtime, execution.seq, bind)).rejects.toThrow('already active');
       return { checkpoint: 'second-new', workspace: await new ProcessSupervisor(domain).beginWorkspaceTransaction({
-        txId: 'second-bound', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'second-bound'),
+        txId: 'second-resumed', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'second-resumed'),
       }) };
     });
     if (mode === 'closed' || mode === 'legacy') {
@@ -113,11 +144,18 @@ describe('agent checkpoint causal branches', () => {
     expect(result.outcomes).toHaveLength(1);
     expect(result.outcomes[0]).toMatchObject(mode === 'advanced'
       ? { status: 'skipped', reason: 'checkpoint_changed' } : { status: 'repaired' });
-    expect(bind).toHaveBeenCalledTimes(mode === 'resume' ? 1 : 0);
+    expect(bind).toHaveBeenCalledTimes(mode === 'advanced' ? 0 : 1);
+    if (savedAttempt) expect(() => savedAttempt!.reserveTransaction('late')).toThrow('no longer active');
+    expect(listAgentCausalBindingAttempts(domain, { planSeq: execution.seq })).toHaveLength(mode === 'advanced' ? 2 : 3);
+    if (mode === 'allocated') {
+      await new ProcessSupervisor(domain).abortWorkspaceTransaction('second-bound', 'reconciled orphan');
+      expect(listAgentCausalBindingAttempts(domain)[1].reservations[0].state).toBe('aborted');
+      expect(listAgentCausalBindingAttempts(domain, { atSeq: attempts[1].reservations[0].seq })[1].reservations[0].state).toBe('reserved');
+    }
     expect(runtime.checkpoints('first').at(-1)).toEqual(first);
     expect(runtime.getRunUsage('run')).toEqual(usage);
     expect(listAgentCausalRefreshExecutions(domain)[0].publications.map(entry => entry.status))
-      .toEqual(['repaired', mode === 'resume' ? 'repaired' : 'skipped']);
+      .toEqual(['repaired', mode === 'advanced' ? 'skipped' : 'repaired']);
     expect((await resumeAgentSharedCausalRefresh(runtime, execution.seq, bind)).outcomes).toEqual([]);
     expect(listAgentCausalRefreshExecutions(domain, { atSeq: execution.repair!.seq })[0].publications
       .map(entry => entry.status)).toEqual(['pending', 'pending']);

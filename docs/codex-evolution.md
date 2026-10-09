@@ -429,3 +429,11 @@
 - 宿主显式 bind 负责核对中断副作用、保留和校验共享输出；文件发布仍需 OCC；补充 API 示例与定位文档。
 - 验证：原版本定向53通过；新增5例及终态幂等/缺失准备断言；pnpm typecheck通过，全量737通过/7跳过；补齐gcc/libc开发包后原生reaper实际构建通过，diff检查通过。
 - 下一步：持久记录绑定尝试与独立事务分配身份，提供孤立资源核对，再支持 failed 的显式重试。
+
+## 2026-10-09 — 绑定尝试身份与中断资源核对
+- 共享refresh/resume在bind前持久记录attempt，第三参数reserveTransaction在分配前保存独立事务意图；既有回调兼容。
+- 拒绝已用/重复/共享事务身份和回调结束后的登记；登记失败不进入宿主后续分配，不自动分配或删除资源。
+- listAgentCausalBindingAttempts关联计划、准备、checkpoint及登记，支持Run/planSeq/atSeq/重开，报告TX生命周期与当前agent引用。
+- 续跑产生新attempt、保留旧归属；reserved不证明没有部分分配，无当前引用不证明可删除，宿主核实后沿用abort回收。
+- 更新定位、资源核对示例和60行交接；验证基线737通过/7跳过，定向60通过，pnpm typecheck通过，全量739通过/7跳过，diff检查通过。
+- 下一步：依托持久尝试归属支持failed绑定显式重试，完善历史checkpoint资源保留及部分分配回收协议。

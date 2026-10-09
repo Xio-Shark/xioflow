@@ -256,3 +256,35 @@ console.log(continued.outcomes);
 调用外部系统，内核不会自动回滚这些效果。共享工作区及其输出必须由宿主保留、校验；
 续跑不会把旧观测视为当前世界仍然有效的证据。后续文件发布继续经过 OCC。
 返回 plan 的 affected 仅包含本次未发布项；完整冻结计划与历次发布仍可通过历史 API 查询。
+
+### 绑定尝试与中断资源核对
+
+自动刷新及其续跑在调用每个 `bind` 前持久记录 `AGENT_CAUSAL_BINDING_STARTED`。
+第三参数 `attempt` 提供 journal 序号身份和 `reserveTransaction(txId)`：同步写入
+`AGENT_CAUSAL_BINDING_RESERVED`，随后宿主才开始分配工作区。重复、已开始或共享事务
+身份会被拒绝；回调结束后不能继续登记。普通 `recoverAgentSharedCausalBatch` 没有持久
+刷新计划，因此第三参数为 undefined。既有两参数回调仍兼容，但不会产生资源登记。
+
+```ts
+import { listAgentCausalBindingAttempts, resumeAgentSharedCausalRefresh } from '@xioflow/kernel';
+
+const evidence = listAgentCausalBindingAttempts(domain, { planSeq });
+// 宿主先核对历次 reservations，保留仍被引用的事务，并核查历史 checkpoint 和外部副作用。
+console.log(evidence);
+await resumeAgentSharedCausalRefresh(runtime, planSeq, async (impact, repair, attempt) => {
+  const txId = `binding-${attempt!.attemptSeq}`;
+  attempt!.reserveTransaction(txId); // 落盘失败会抛错；此后才分配资源
+  const workspace = await supervisor.beginWorkspaceTransaction({
+    txId, runId, root, forkPath: `${bindingRoot}/${txId}`,
+  });
+  return reconstructContextAndOutputs(impact, repair, workspace);
+});
+```
+
+`listAgentCausalBindingAttempts` 支持 `planSeq` / `runId` / `atSeq`，重开 domain 后可纯查询。
+每次尝试关联冻结 checkpoint、共享准备和全部登记事务；资源分别报告 reserved / open /
+committing / committed / conflicted / aborted，以及已开始事务的 forkRoot 和当前 agent 引用。
+登记是分配意图，不是事务锁；宿主必须使用独立身份。reserved 可能包含尚未写入 TX_BEGUN
+的部分文件分配，open 且无当前引用也不证明可删除。查询不扫描文件或删除资源；宿主核实后
+可用既有 abortWorkspaceTransaction 回收开放事务，历史切片仍保留回收前证据。
+续跑为同一 agent 创建新的尝试身份，不覆盖此前登记，也不会自动重试 failed / skipped。

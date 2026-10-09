@@ -67,13 +67,23 @@ async function recoverPlan(
   return { plan, outcomes };
 }
 
+export interface AgentCausalBindingAttempt {
+  attemptSeq: number;
+  preparationSeq: number;
+  /** Persist allocation intent before beginning a transaction. Does not allocate it.
+   * Only usable during this bind callback; transaction identities cannot be reused.
+   */
+  reserveTransaction(txId: string): number;
+}
+
 export interface AgentSharedCausalRecoveryOptions {
   /** Recompute compatible branches once. Own cleanup if preparation throws. */
   prepare(plan: AgentCausalRecoveryPlan): Promise<WorkspaceBranchRepairResult>;
   /** Rebuild context and provide an independently owned, open transaction.
    * discard must release only this agent's resources, never the shared repair.
    */
-  bind(impact: AgentCausalRecoveryImpact, repair: WorkspaceBranchRepairResult): Promise<
+  bind(impact: AgentCausalRecoveryImpact, repair: WorkspaceBranchRepairResult,
+    attempt?: AgentCausalBindingAttempt): Promise<
     Omit<AgentCausalCheckpointPreparation, 'causalHeads'> | undefined
   >;
 }
@@ -136,7 +146,30 @@ async function bindSharedRepair(
       if (branches.length !== 1 || JSON.stringify(heads) !== JSON.stringify(sourceHeads)) {
         throw new Error(`Shared repair branch does not match checkpoint for "${impact.agentId}"`);
       }
-      const prepared = await bind(impact, structuredClone(repair));
+      let binding = true;
+      const record = (type: string, payload: Record<string, unknown>) => domain.getStore().recordJournalEvent({
+        domainId: domain.domainId, runId, type, timestamp: new Date().toISOString(),
+        payload: { version: 1, ...payload },
+      });
+      const attemptSeq = preparationSeq === undefined ? undefined : record('AGENT_CAUSAL_BINDING_STARTED', {
+        preparationSeq, agentId: impact.agentId, checkpointSeq: impact.checkpoint.seq,
+      });
+      const attempt: AgentCausalBindingAttempt | undefined = attemptSeq === undefined ? undefined : {
+        attemptSeq, preparationSeq: preparationSeq!,
+        reserveTransaction(txId) {
+          if (!binding) throw new Error('Causal binding attempt is no longer active');
+          if (typeof txId !== 'string' || !txId.trim()) throw new Error('Transaction identity must be nonempty');
+          const events = domain.getStore().getJournalEvents(domain.domainId);
+          if (txId === repair.transaction.txId || events.some(event => event.payload.txId === txId
+            && (event.type.startsWith('TX_') || event.type === 'AGENT_CAUSAL_BINDING_RESERVED'))) {
+            throw new Error('Transaction identity already allocated or reserved');
+          }
+          return record('AGENT_CAUSAL_BINDING_RESERVED', { attemptSeq, txId });
+        },
+      };
+      let prepared: Awaited<ReturnType<AgentSharedCausalRecoveryOptions['bind']>>;
+      try { prepared = await bind(impact, structuredClone(repair), attempt); }
+      finally { binding = false; }
       if (!prepared) return undefined;
       if (prepared.workspace.txId === repair.transaction.txId) {
         // Never invoke a callback that might dispose the shared workspace.

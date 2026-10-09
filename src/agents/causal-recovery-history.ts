@@ -90,6 +90,70 @@ export interface AgentCausalRefreshExecutionRecord extends AgentCausalRefreshPla
   publications: AgentCausalRefreshPublication[];
 }
 
+export interface AgentCausalBindingAttemptRecord {
+  seq: number;
+  planSeq: number;
+  preparationSeq: number;
+  agentId: string;
+  checkpointSeq: number;
+  reservations: {
+    seq: number;
+    txId: string;
+    /** Journal evidence only: reserved does not prove no filesystem allocation occurred. */
+    state: 'reserved' | 'open' | 'committing' | 'committed' | 'aborted' | 'conflicted';
+    forkRoot?: string;
+    /** Latest agent states at the cutoff that still reference this transaction. */
+    referencedBy: string[];
+  }[];
+}
+
+/** Read-only resource reconciliation evidence across attempts, including interrupted
+ * allocations. Absence of a current reference never authorizes automatic deletion:
+ * historical checkpoints, external effects and incomplete allocations may remain.
+ */
+export function listAgentCausalBindingAttempts(
+  domain: ExecutionDomain, options: { runId?: string; atSeq?: number; planSeq?: number } = {},
+): AgentCausalBindingAttemptRecord[] {
+  const executions = listAgentCausalRefreshExecutions(domain, options)
+    .filter(entry => options.planSeq === undefined || entry.seq === options.planSeq);
+  const preparations = new Map(executions.filter(entry => entry.repair).map(entry => [entry.repair!.seq, entry]));
+  const events = domain.getStore().getJournalEvents(domain.domainId)
+    .filter(event => event.seq <= (options.atSeq ?? Number.MAX_SAFE_INTEGER));
+  const states = new Map<string, AgentState>();
+  for (const event of events) if (event.type === 'AGENT_STATE') {
+    const state = event.payload.state as AgentState;
+    states.set(state.id, state);
+  }
+  return events.filter(event => event.type === 'AGENT_CAUSAL_BINDING_STARTED'
+    && preparations.has(event.payload.preparationSeq as number)).map(event => {
+    const preparationSeq = event.payload.preparationSeq as number;
+    const execution = preparations.get(preparationSeq)!;
+    const { agentId, checkpointSeq } = event.payload as { agentId: string; checkpointSeq: number };
+    if (event.payload.version !== 1 || event.seq <= preparationSeq
+      || !execution.preview.affected.some(entry => entry.agentId === agentId && entry.checkpoint.seq === checkpointSeq)) {
+      throw new Error('Invalid causal binding attempt reference');
+    }
+    const reservations = events.filter(entry => entry.type === 'AGENT_CAUSAL_BINDING_RESERVED'
+      && entry.payload.attemptSeq === event.seq).map(entry => {
+      const txId = entry.payload.txId as string;
+      if (entry.payload.version !== 1 || entry.seq <= event.seq || typeof txId !== 'string' || !txId.trim()) {
+        throw new Error('Invalid causal binding reservation');
+      }
+      const transitions = { TX_BEGUN: 'open', TX_COMMITTING: 'committing', TX_COMMITTED: 'committed',
+        TX_ABORTED: 'aborted', TX_CONFLICTED: 'conflicted' } as const;
+      const lifecycle = events.filter(item => item.payload.txId === txId && Object.hasOwn(transitions, item.type));
+      const latest = lifecycle.at(-1);
+      const begun = lifecycle.find(item => item.type === 'TX_BEGUN');
+      return { seq: entry.seq, txId,
+        state: latest ? transitions[latest.type as keyof typeof transitions] : 'reserved' as const,
+        ...(begun ? { forkRoot: begun.payload.forkRoot as string } : {}),
+        referencedBy: [...states.values()].filter(state => state.workspace?.txId === txId).map(state => state.id),
+      };
+    });
+    return { seq: event.seq, planSeq: execution.seq, preparationSeq, agentId, checkpointSeq, reservations };
+  });
+}
+
 /** Explicit publication lineage, including partial batches. Checkpoint binding is
  * not an OCC commit. Preparation failures and legacy plans remain pending.
  */

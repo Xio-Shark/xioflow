@@ -6,6 +6,8 @@ xioflow 的目标是让多个 agent 在同一个不断变化的世界中投机�
 
 历史恢复计划可通过 `listAgentCausalRefreshPlans` 从 journal 独立重建冻结的 checkpoint 与失效路径；不启动调度器，支持 Run / 时间切片查询，计划不代表实际发布。`listAgentCausalRefreshExecutions` 进一步关联共享修复事务与原子 checkpoint 发布，按时间切片区分 repaired / failed / skipped / pending，支持部分完成后的审计。`resumeAgentSharedCausalRefresh` 可从持久共享修复续跑未发布绑定，检查 checkpoint 版本与事务状态，复用已完成计算；宿主负责核对中断副作用，文件发布仍需 OCC。
 
+共享刷新绑定现有持久尝试身份与分配前事务登记；`listAgentCausalBindingAttempts` 可跨重开核对各次尝试的事务状态和当前 checkpoint 引用，为中断后资源处理提供证据。登记不是文件分配完成或可删除的证明，见[资源核对](causal-recovery-batches.md#绑定尝试与中断资源核对)。
+
 ## 核心抽象
 
 - **世界版本**：已有 snapshot / fork / rollback 定义文件系统的版本与分支；外部系统需要显式的版本化适配器。
