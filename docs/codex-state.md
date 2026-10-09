@@ -5,8 +5,7 @@
 - prepareWorkspaceRepair：拓扑重算失效节点、复用独立结果、记录替代关系；view(heads) 与新 heads 支持连续修复。
 - speculateWorkspace：OCC 冲突后最多一次 repair 与再提交。
 - commitPolicy first_valid / all_valid；后者依声明顺序合并 OCC 有效结果。
-- AgentRuntime create / step 原子持久化 causalHeads 与 checkpoint。
-- heads 引用同 domain 已有节点；null 未跟踪，[] 空分支；checkpoint 历史可查，恢复不回退预算。
+- AgentRuntime create / step 原子持久化 causalHeads 与 checkpoint。 heads 引用同 domain 已有节点；null 未跟踪，[] 空分支；checkpoint 历史可查，恢复不回退预算。
 - planCausalRecovery 查询跨 agent 失效；recoverCausalCheckpoint 校验版本、独占绑定宿主重建。
 - causal_repaired 原子保存上下文 / heads / workspace；成功后 paused。
 - recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。
@@ -30,8 +29,7 @@
 - CAUSAL_VALIDATION_REPAIR_PREPARED 关联 validationSeq / txId；关联失败回收修复。
 - commitWorkspaceTransaction 支持 observationPolicy: 'always'，无文件冲突也重放。
 - refreshWorkspaceCausalBranches：探测→共享修复→联合 heads 完整日志→强制重放提交。
-- 包含复用祖先；成功回收基线，冲突中止回收；提交抛错保留恢复资源并报告 txId。
-- 依已有 validationSeq→txId→TX_COMMITTED 追溯；不分发独立事务、不绑定 checkpoint。
+- 包含复用祖先；成功回收基线，冲突中止回收；提交抛错保留恢复资源并报告 txId。 依已有 validationSeq→txId→TX_COMMITTED 追溯；不分发独立事务、不绑定 checkpoint。
 - 环境需 C 编译器（cc）与 libc 开发包；原生 reaper 测试必须实际构建。
 - validate / prepare refresh / refresh 支持 replayReuse: baseline_observations（默认 none）。
 - 单次基线按 seq 复用 mutation 前纯观测；错误不缓存、不同节点不合并；提交完整重放。
@@ -56,5 +54,7 @@
 - 固定 trainingAtSeq；训练须决策和遥测均已完成，后续决策为验证集；迟到完成只计训练缺失。
 - 成功探测同时有 changed / unchanged 才输出forecast；failed / missing / recompute独立统计。
 - 单位 callback_duration_ms；验证集报告成本MAE；宿主显式采用并提供同单位costModel，选择偏差仍在。
-- 下一步：基准接入固定训练窗口与独立探测评估任务，对比历史预测和静态先验策略的实测成本。
-- 最新验证：typecheck/build通过；pnpm test 690通过/7跳过（145.59秒）；基线683通过/7跳过。
+- 历史预测 trainingAfterSeq：按决策序号冻结滑动训练窗口；excludedDecisions 计过时任务。
+- drift：独立验证变化率差值、Brier分数与样本量；单类别仍可统计，不自动改变策略。
+- 下一步：基准固定分布漂移，对照全历史/近期窗口，多重复评估后再接真实模型token。
+- 最新验证：typecheck通过；全量706通过/7跳过；既有暂存基准改动保留。

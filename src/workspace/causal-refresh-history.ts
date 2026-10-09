@@ -16,12 +16,19 @@ export interface CausalRefreshHistoryCounts {
 export interface CausalRefreshHistoryEstimate {
   taskKey: string;
   trainingAtSeq: number;
+  /** Exclusive decision-sequence lower bound; defaults to zero. */
+  trainingAfterSeq: number;
+  /** Matching decisions excluded by the lower bound, regardless of completion. */
+  excludedDecisions: number;
   atSeq: number;
   unit: 'callback_duration_ms';
   training: CausalRefreshHistoryCounts;
   heldOut: CausalRefreshHistoryCounts;
   /** Both changed and unchanged successful probe samples are required. */
   forecast: CausalRefreshForecast | null;
+  /** Descriptive probability drift, not a significance test or automatic policy change. */
+  drift: { trainingSamples: number; heldOutSamples: number; trainingChangeProbability: number;
+    heldOutChangeProbability: number; changeProbabilityDelta: number; brierScore: number } | null;
   evaluation: { samples: number; meanAbsoluteError: number; meanActualCost: number;
     expectedProbeCost: number } | null;
 }
@@ -31,17 +38,20 @@ export interface CausalRefreshHistoryEstimate {
  */
 export function estimateWorkspaceCausalRefreshHistory(
   domain: ExecutionDomain,
-  options: { taskKey: string; trainingAtSeq: number; atSeq?: number },
+  options: { taskKey: string; trainingAtSeq: number; trainingAfterSeq?: number; atSeq?: number },
 ): CausalRefreshHistoryEstimate {
   const { taskKey, trainingAtSeq } = options;
+  const trainingAfterSeq = options.trainingAfterSeq ?? 0;
   const atSeq = options.atSeq ?? Number.MAX_SAFE_INTEGER;
   if (!taskKey.trim()) throw new Error('Refresh history requires a nonempty taskKey');
-  if (![trainingAtSeq, atSeq].every(n => Number.isSafeInteger(n) && n >= 0) || trainingAtSeq > atSeq) {
+  if (![trainingAfterSeq, trainingAtSeq, atSeq].every(n => Number.isSafeInteger(n) && n >= 0)
+    || trainingAfterSeq > trainingAtSeq || trainingAtSeq > atSeq) {
     throw new Error('Invalid refresh history sequence cutoffs');
   }
   const reports = new Map(listWorkspaceCausalRefreshTelemetry(domain, { atSeq })
     .map(report => [report.decisionSeq, report]));
   const counts = (): CausalRefreshHistoryCounts => ({ unchanged: 0, changed: 0, failed: 0, missing: 0, recompute: 0 });
+  let excludedDecisions = 0;
   const training = counts();
   const heldOut = counts();
   const unchangedCosts: number[] = [];
@@ -51,6 +61,7 @@ export function estimateWorkspaceCausalRefreshHistory(
   for (const event of domain.getStore().getJournalEvents(domain.domainId)) {
     if (event.type !== 'CAUSAL_REFRESH_POLICY_SELECTED' || event.seq > atSeq
       || event.payload.taskKey !== taskKey) continue;
+    if (event.seq <= trainingAfterSeq) { excludedDecisions++; continue; }
     if (event.payload.version !== 1) throw new Error('Unsupported causal refresh policy version');
     const isTraining = event.seq <= trainingAtSeq;
     const partition = isTraining ? training : heldOut;
@@ -91,5 +102,16 @@ export function estimateWorkspaceCausalRefreshHistory(
       meanActualCost: mean(heldOutCosts),
       meanAbsoluteError: mean(heldOutCosts.map(cost => Math.abs(cost - expectedProbeCost))) };
   }
-  return { taskKey, trainingAtSeq, atSeq, unit: 'callback_duration_ms', training, heldOut, forecast, evaluation };
+  const trainingSamples = training.changed + training.unchanged;
+  const heldOutSamples = heldOut.changed + heldOut.unchanged;
+  let drift: CausalRefreshHistoryEstimate['drift'] = null;
+  if (trainingSamples && heldOutSamples) {
+    const p = training.changed / trainingSamples;
+    const q = heldOut.changed / heldOutSamples;
+    drift = { trainingSamples, heldOutSamples, trainingChangeProbability: p,
+      heldOutChangeProbability: q, changeProbabilityDelta: q - p,
+      brierScore: q * (1 - p) ** 2 + (1 - q) * p ** 2 };
+  }
+  return { taskKey, trainingAfterSeq, trainingAtSeq, atSeq, excludedDecisions,
+    unit: 'callback_duration_ms', training, heldOut, forecast, evaluation, drift };
 }

@@ -285,3 +285,5 @@ if (estimate.forecast) {
 这不包含快照与清理开销，不估计 token，不提供未执行路径的反事实收益。
 策略选择和成功样本筛选存在选择偏差；宿主应保留独立探测评估任务，不能将该比例视为无偏总体概率。
 所有预测仍仅影响执行路径，发布必须通过原有 OCC。
+
+需要排除过时样本时，可指定 `trainingAfterSeq`；返回的 `drift` 报告独立验证集的变化率差值和 Brier 分数，见[滑动窗口示例](causal-refresh-history-windows.md)。

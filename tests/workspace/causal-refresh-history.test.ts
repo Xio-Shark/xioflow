@@ -79,3 +79,65 @@ it('leaves untagged legacy decisions and other tasks out of the cohort', () => {
   expect(result.training).toEqual({ unchanged: 0, changed: 0, failed: 0, missing: 0, recompute: 0 });
   expect(result.forecast).toBeNull();
 });
+
+it('excludes stale decisions by start sequence and freezes a recent cohort across reopen', () => {
+  report(decision(), 'committed', 1000, 1000);
+  const oldPending = decision();
+  const trainingAfterSeq = oldPending;
+  report(oldPending, 'unchanged', 2000); // Completion in the window does not admit an old decision.
+  report(decision(), 'unchanged', 2);
+  const trainingAtSeq = report(decision(), 'committed', 4, 6);
+  report(decision(), 'committed', 4, 6);
+  const atSeq = report(decision(), 'committed', 4, 6);
+  const query = { taskKey: 'compile', trainingAfterSeq, trainingAtSeq, atSeq };
+  const result = estimateWorkspaceCausalRefreshHistory(domain, query);
+  expect(result.excludedDecisions).toBe(2);
+  expect(result.forecast).toEqual({ changeProbability: 0.5, probeUnchanged: 2, probeChanged: 4, refreshChanged: 6 });
+  expect(result.drift).toEqual({ trainingSamples: 2, heldOutSamples: 2,
+    trainingChangeProbability: 0.5, heldOutChangeProbability: 1, changeProbabilityDelta: 0.5, brierScore: 0.25 });
+  expect(result.evaluation).toMatchObject({ samples: 2, meanAbsoluteError: 4 });
+  report(decision(), 'unchanged', 9000);
+  domain.close(); domain = ExecutionDomain.acquire(temp, 'history');
+  expect(estimateWorkspaceCausalRefreshHistory(domain, query)).toEqual(result);
+  const empty = estimateWorkspaceCausalRefreshHistory(domain, { ...query, trainingAfterSeq: trainingAtSeq });
+  expect(empty.forecast).toBeNull();
+  expect(empty.drift).toBeNull();
+  expect(empty.heldOut).toEqual(result.heldOut);
+});
+
+it('scores probability drift with one training class while excluding unlabeled and failed runs', () => {
+  const trainingAtSeq = report(decision(), 'unchanged', 2);
+  report(decision(), 'committed', 4, 6);
+  report(decision(), 'failed', 100);
+  report(decision(), 'committed', 0, 100, 'recompute');
+  decision();
+  const result = estimateWorkspaceCausalRefreshHistory(domain, { taskKey: 'compile', trainingAtSeq });
+  expect(result.forecast).toBeNull();
+  expect(result.drift).toEqual({ trainingSamples: 1, heldOutSamples: 1,
+    trainingChangeProbability: 0, heldOutChangeProbability: 1, changeProbabilityDelta: 1, brierScore: 1 });
+  expect(result.heldOut).toEqual({ changed: 1, unchanged: 0, failed: 1, recompute: 1, missing: 1 });
+  expect(estimateWorkspaceCausalRefreshHistory(domain, { taskKey: 'compile', trainingAtSeq, atSeq: trainingAtSeq }).drift).toBeNull();
+});
+
+it.each([-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, 11])(
+  'rejects invalid training lower bound %s', trainingAfterSeq => {
+    expect(() => estimateWorkspaceCausalRefreshHistory(domain, {
+      taskKey: 'compile', trainingAtSeq: 10, trainingAfterSeq,
+    })).toThrow('Invalid refresh history sequence cutoffs');
+  });
+
+
+it('keeps the default full history and measures a decrease in change frequency', () => {
+  report(decision(), 'unchanged', 2);
+  for (let i = 0; i < 3; i++) report(decision(), 'committed', 4, 6);
+  const trainingAtSeq = domain.getStore().getJournalEvents(domain.domainId).at(-1)!.seq;
+  report(decision(), 'committed', 4, 6);
+  for (let i = 0; i < 3; i++) report(decision(), 'unchanged', 2);
+  const options = { taskKey: 'compile', trainingAtSeq };
+  const result = estimateWorkspaceCausalRefreshHistory(domain, options);
+  expect(estimateWorkspaceCausalRefreshHistory(domain, { ...options, trainingAfterSeq: 0 })).toEqual(result);
+  expect(result.excludedDecisions).toBe(0);
+  expect(result.drift).toEqual({ trainingSamples: 4, heldOutSamples: 4,
+    trainingChangeProbability: 0.75, heldOutChangeProbability: 0.25,
+    changeProbabilityDelta: -0.5, brierScore: 0.4375 });
+});
