@@ -43,4 +43,5 @@
 - 验证：refresh/step/validation共61项及pnpm typecheck通过；全量pnpm test通过：63文件/926项，跳过1文件/7项，232.50秒；下一轮无需全量基线。
 - 本轮修复回调第四参/返回refresh含固定previous、plan和可复用产物；依赖须全部unaffected，[]保留，null/传递失效/混合依赖排除。
 - 复用验证后才暴露正文，各回调独立副本；previous仅投影候选元数据防止夹带失效正文；持久记录可复用/失效产物ID。
-- 本轮验证：repair共6项及pnpm typecheck通过；未跑全量（时间不足5分钟），下一轮先补跑一次全量。
+- 本轮修复M2未跟踪依赖传播：null事件及传递后继可被本步骤引用，保存实际依赖，均不进入可复用图；候选/checkpoint heads为null，伪造引用仍失败。
+- 本轮验证：step/repair共33项及pnpm typecheck通过；补装gcc/libc6-dev，全量收尾结果待回填。

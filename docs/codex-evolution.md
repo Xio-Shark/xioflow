@@ -688,3 +688,9 @@
 - 复用重放及源产物验证通过后暴露，各回调独立副本；保存可复用/失效产物ID供后续解释。
 - 回归覆盖重开、后续输入变化、传递依赖、混合依赖、[]及宿主篡改上下文隔离；repair 6项/typecheck通过。
 - 未跑全量（剩余时间不足5分钟），下一轮先补全量，再连接WorldAgent执行与候选/checkpoint准备；M2未完成。
+
+## 2026-10-09 — M2 未跟踪依赖的传递语义
+- 优先修正依赖未跟踪验收缺口：引用本步骤null事件及其后继返回unknown，不再误报越界失败。
+- 保留实际dependsOn供历史解释，未知链不进入可复用图，checkpoint/candidate heads均为null；混入伪造序号仍拒绝。
+- 新增混合/传递依赖、隔离写入、重开证据、低层heads及伪造引用回归；step/repair共33项和typecheck通过。
+- 补装gcc/libc6-dev；全量测试收尾后回填。M2仍缺WorldAgent增量候选、统一句柄、strict commit/key、资源与完整验收。

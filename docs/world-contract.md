@@ -235,3 +235,7 @@ WORLD_REPAIR_PREPARED 记录验证引用、版本、复用/替换节点、输出
 本切片仍只返回内部 open 事务；未执行 WorldAgent 或绑定新 checkpoint，未产生新的 WorldCandidate，
 尚未接入 refresh 自动增量路径。工具结果哈希依赖适配器声明，不代替最终 OCC、业务验收或
 独立 oracle；非确定性模型响应只选择持久正文，失效后的模型调用仍须由后续 agent 适配层执行。
+
+未跟踪依赖的工具链保留已记录事件身份：后续观测/写入可引用本步骤中依赖为 null 的事件，
+以及其传递后继；这些事件保存实际 dependsOn，但不进入可复用因果图。结果和 checkpoint
+的 causalHeads 为 null，候选返回 unknown；混合依赖中出现伪造或跨步骤序号仍失败。

@@ -49,6 +49,7 @@ export async function executeWorldStep(world: WorldState, input: AgentData, exec
     }
     const graph = new WorkspaceCausalGraph(domain);
     const recorded = new Set<number>();
+    const untrackedNodes = new Set<number>();
     let untracked = false;
     runtime = new AgentRuntime(domain, { maxConcurrentAgents: 1, step: async () => {
       recording = true;
@@ -58,11 +59,16 @@ export async function executeWorldStep(world: WorldState, input: AgentData, exec
           if (!['observe', 'mutate'].includes(entry.kind) || !entry.resultHash?.trim()) {
             throw new Error('World observations require a kind and result hash');
           }
-          if (dependsOn === null) {
+          if (dependsOn?.some(seq => !recorded.has(seq))) throw new Error('Dependency is outside this world step');
+          // A known event with incomplete ancestry is valid evidence of unknown coverage.
+          // Keep it out of the reusable graph, including every transitive descendant.
+          if (dependsOn === null || dependsOn.some(seq => untrackedNodes.has(seq))) {
             untracked = true;
-            return append('WORLD_OBSERVATION_UNTRACKED', { observation: entry, dependsOn: null });
+            const seq = append('WORLD_OBSERVATION_UNTRACKED', { observation: entry, dependsOn });
+            recorded.add(seq);
+            untrackedNodes.add(seq);
+            return seq;
           }
-          if (dependsOn.some(seq => !recorded.has(seq))) throw new Error('Dependency is outside this world step');
           const node = graph.record({ txId: id, actorId: id, observation: entry, dependsOn });
           recorded.add(node.seq);
           return node.seq;

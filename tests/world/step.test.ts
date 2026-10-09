@@ -154,6 +154,55 @@ it('accepts explicitly empty dependencies', async () => {
   expect(result).toMatchObject({ status: 'prepared', candidate: { heads: [], coverage: { status: 'complete' } } });
 });
 
+it('propagates untracked ancestry through tools and saves unknown evidence across reopen', async () => {
+  const seqs: number[] = [];
+  const result = await prepareWorldStep(world, { execute: async ({ record, forkRoot, version }) => {
+    const entry = { kind: 'observe' as const, call: { tool: 'read', args: {} }, resultHash: 'value' };
+    const tracked = await record(entry, []);
+    const unknown = await record(entry, null);
+    const derived = await record(entry, [tracked, unknown]);
+    await fs.writeFile(path.join(forkRoot, 'output'), 'derived');
+    const write = await record({ ...entry, kind: 'mutate' }, [derived]);
+    seqs.push(tracked, unknown, derived, write);
+    return { coverage: { status: 'complete', manifestHash: version.manifestHash }, heads: [write],
+      artifacts: [{ id: 'response', kind: 'model_response', body: 'derived',
+        hash: createHash('sha256').update('derived').digest('hex'), dependsOn: [write] }] };
+  } }, { task: 'derive from incomplete evidence' });
+  expect(result).toMatchObject({ status: 'unknown', reasons: ['untracked_dependencies'],
+    candidate: { heads: null } });
+  if (result.status !== 'unknown') throw new Error('not unknown');
+  const events = world.domain.getStore().getJournalEvents('world');
+  expect(events.filter(e => e.type === 'WORLD_OBSERVATION_UNTRACKED').map(e => e.payload.dependsOn))
+    .toEqual([null, [seqs[0], seqs[1]], [seqs[2]]]);
+  expect(new WorkspaceCausalGraph(world.domain).nodes().map(n => n.seq)).toEqual([seqs[0]]);
+  expect(events.find(e => e.type === 'WORLD_STEP_COMPLETED')?.payload.causalHeads).toBeNull();
+  await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
+  world.close();
+  world = await openWorldState({ root: path.join(temp, 'repo'), statePath: path.join(temp, 'state'), adapter });
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+  expect(readWorldArtifacts(world, result.candidate)[0]).toMatchObject({ body: 'derived', dependsOn: [seqs[3]] });
+});
+
+it('keeps low-level untracked heads unknown rather than rejecting their recorded identity', async () => {
+  const result = await executeWorldStep(world, null, async ({ record }) => {
+    const seq = record({ kind: 'observe', call: { tool: 'read', args: {} }, resultHash: 'value' }, null);
+    return { checkpoint: 'response', causalHeads: [seq] };
+  });
+  expect(result).toMatchObject({ status: 'executed', causalHeads: null });
+});
+
+it('rejects a foreign dependency even when another parent is untracked', async () => {
+  const result = await executeWorldStep(world, null, async ({ record }) => {
+    const entry = { kind: 'observe' as const, call: { tool: 'read', args: {} }, resultHash: 'value' };
+    const unknown = record(entry, null);
+    record(entry, [unknown, 999999]);
+    return { checkpoint: 'invalid', causalHeads: null };
+  });
+  expect(result).toMatchObject({ status: 'failed', reason: 'Error: Dependency is outside this world step' });
+  expect(world.domain.getStore().getJournalEvents('world').filter(e => e.type === 'WORLD_OBSERVATION_UNTRACKED'))
+    .toHaveLength(1);
+});
+
 it.each(['', '响应\n', 'tool output'])('restores verified artifact body %j without changing history', async body => {
   const artifact = { id: 'response', kind: body === 'tool output' ? 'tool_result' as const : 'model_response' as const,
     hash: createHash('sha256').update(body).digest('hex'), body, dependsOn: [] };
