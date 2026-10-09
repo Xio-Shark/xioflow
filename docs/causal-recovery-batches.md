@@ -477,3 +477,31 @@ for (const outcome of result.batch.outcomes) {
 结果附 `decisionSeq` / `outcomeSeq`，可从 journal 跨重开核对；缺少结果事件只表示未决。
 checkpoint 发布继续归入原准备记录，`listAgentCausalRefreshExecutions` 可查询逐项结果，中断仍用既有 resume。
 预测不授权复用；文件发布仍需 OCC，API 不提供整批原子提交，也不自动学习成本。
+
+
+### 恢复策略的持久实测反馈
+
+`resumeAgentSharedCausalRefreshWithPolicy` 可传入 `taskKey`（例如包含 pending 数量、文件大小档位的宿主分类）
+与 `forecastUnit: 'ms'`。默认单位为 `host`，避免将原有任意单位预测与毫秒直接相减。
+
+```ts
+const reports = listAgentCausalResumeTelemetry(domain, {
+  taskKey: 'recovery-4agents-16MiB', runId, atSeq: frozenJournalSeq,
+});
+for (const report of reports) {
+  console.log(report.status, report.phases, report.outcomes, report.predictionErrorMs);
+}
+```
+
+查询按决策序号排序，跨 Run、重开均可复现；`atSeq` 同时截断决策与结果。
+没有结果事件的决策返回 `pending`，不推断 worker 仍活着；旧记录缺少测量时字段缺省，不补零。
+`completed` 只表示策略流程完成，`outcomes` 分列 `repaired/skipped/failed` 数量，不能当成全批成功率。
+异常为 `failed`，可保留已测耗时；部分发布需查原批次逐项事件。
+
+`phases.validationAndResumeMs` 包含输出指纹、观测重放、分发与 checkpoint 发布；
+`phases.recomputeMs` 包含宿主重建、分发与 checkpoint 发布。两阶段互不重叠，未进入阶段记零。
+`durationMs` 从决策落盘后计时，到结果事件写入前结束，包含阶段之间的调度开销；不含之后的文件 OCC 提交。
+拒绝路径关联 `rejection` 及 `validationSeq/outputSeq`。只有显式毫秒预测、流程完成且有耗时时，
+返回 `predictionErrorMs = durationMs - 选中策略的期望成本`（正值表示低估）；失败项数量仍需单独筛选。
+单次误差不是反事实收益；直接重算不产生验证拒绝标签。宿主须按可比负载分类、冻结训练窗口并独立评估，
+本接口不自动训练、切换策略或宣称 token 节省。

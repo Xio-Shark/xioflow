@@ -18,6 +18,7 @@ export * from './agents/checkpoint-diff.js';
 export * from './agents/checkpoint-files.js';
 export * from './agents/causal-recovery.js';
 export * from './agents/causal-resume-cost.js';
+export * from './agents/causal-resume-telemetry.js';
 export * from './agents/causal-recovery-history.js';
 export * from './agents/workspace-resources.js';
 export * from './snapshot/git-shadow.js';

@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCheckpointWorkspaceReferences, planAgentCausalResourceCleanup, cleanupAgentCausalFork, listAgentCausalForkCleanups, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, resumeAgentSharedCausalRefreshWithValidation, resumeAgentSharedCausalRefreshWithPolicy, retryAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCheckpointWorkspaceReferences, planAgentCausalResourceCleanup, cleanupAgentCausalFork, listAgentCausalForkCleanups, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, resumeAgentSharedCausalRefreshWithValidation, resumeAgentSharedCausalRefreshWithPolicy, listAgentCausalResumeTelemetry, retryAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace, AgentSharedCausalRecoveryOptions } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -40,6 +40,24 @@ describe('agent checkpoint causal branches', () => {
     runtime?.close();
     domain.close();
     fs.rmSync(temp, { recursive: true, force: true });
+  });
+
+  it('keeps missing and legacy policy measurements distinct from zero and checks lineage', () => {
+    const record = (type: string, payload: Record<string, unknown>) => domain.getStore().recordJournalEvent({
+      domainId: domain.domainId, runId: 'run', type: `AGENT_CAUSAL_RESUME_POLICY_${type}`,
+      timestamp: new Date().toISOString(), payload: { version: 1, planSeq: 1, preparationSeq: 2, ...payload },
+    });
+    const policy = { strategy: 'recompute', recomputeCost: 4, expectedValidationCost: 5 };
+    const decisionSeq = record('SELECTED', { policy, checkpoints: [] });
+    expect(listAgentCausalResumeTelemetry(domain)[0]).toMatchObject({ status: 'pending', forecastUnit: 'host' });
+    const failed = record('FAILED', { decisionSeq, error: 'interrupted' });
+    expect(listAgentCausalResumeTelemetry(domain)[0]).toMatchObject({ status: 'failed', outcomeSeq: failed });
+    expect(listAgentCausalResumeTelemetry(domain)[0].durationMs).toBeUndefined();
+    const second = record('SELECTED', { policy, checkpoints: [] });
+    record('COMPLETED', { decisionSeq: second, status: 'recomputed', durationMs: 10 });
+    expect(listAgentCausalResumeTelemetry(domain)[1].predictionErrorMs).toBeUndefined();
+    record('COMPLETED', { decisionSeq: second, preparationSeq: 99 });
+    expect(() => listAgentCausalResumeTelemetry(domain)).toThrow('reference');
   });
 
   it('reconstructs cleanup outcomes with exact lineage, cutoffs and domain reopen', () => {
@@ -331,7 +349,8 @@ describe('agent checkpoint causal branches', () => {
         return { checkpoint: 'rebuilt', causalHeads: [head.seq],
           workspace: rebuiltWorkspace };
       });
-      const options = { forecast: { rejectionProbability: 0, validationAccepted: 1,
+      const options = { taskKey: 'recovery-small', forecastUnit: 'ms' as const,
+        forecast: { rejectionProbability: 0, validationAccepted: 1,
         validationRejected: 1, resume: 1, recompute: mode === 'policy_recompute' || mode === 'policy_failed' ? 1 : 10 },
         validation: { txId: 'policy-check', runId: 'run', root: path.join(temp, 'repo'),
           forkPath: path.join(temp, 'policy-check'), closedWorld: true as const, replayPolicy: 'deterministic' as const, replay },
@@ -350,9 +369,27 @@ describe('agent checkpoint causal branches', () => {
       const evidence = domain.getStore().getJournalEvents(domain.domainId).filter(event => event.type.startsWith('AGENT_CAUSAL_RESUME_POLICY_'));
       expect(evidence.map(event => event.type)).toEqual(['AGENT_CAUSAL_RESUME_POLICY_SELECTED', 'AGENT_CAUSAL_RESUME_POLICY_COMPLETED']);
       expect(evidence[1].payload.decisionSeq).toBe(evidence[0].seq);
+      const telemetry = listAgentCausalResumeTelemetry(domain, { taskKey: 'recovery-small', runId: 'run' });
+      expect(telemetry).toHaveLength(1);
+      expect(telemetry[0]).toMatchObject({ status: 'completed', pendingAgents: 1,
+        decisionSeq: evidence[0].seq, outcomeSeq: evidence[1].seq,
+        outcomes: { repaired: mode === 'policy_failed' ? 0 : 1, skipped: 0, failed: mode === 'policy_failed' ? 1 : 0 } });
+      const metric = telemetry[0];
+      expect(metric.durationMs).toBeGreaterThanOrEqual(metric.phases!.validationAndResumeMs + metric.phases!.recomputeMs);
+      expect(metric.phases!.validationAndResumeMs > 0).toBe(mode === 'policy_validate' || mode === 'policy_stale');
+      expect(metric.phases!.recomputeMs > 0).toBe(mode !== 'policy_validate');
+      expect(metric.predictionErrorMs).toBe(metric.durationMs! - (metric.policy.strategy === 'validate'
+        ? metric.policy.expectedValidationCost : metric.policy.recomputeCost));
+      expect(listAgentCausalResumeTelemetry(domain, { atSeq: evidence[0].seq })[0])
+        .toMatchObject({ status: 'pending' });
+      expect(listAgentCausalResumeTelemetry(domain, { atSeq: evidence[0].seq })[0].durationMs).toBeUndefined();
+      expect(listAgentCausalResumeTelemetry(domain, { taskKey: 'other' })).toEqual([]);
+      expect(listAgentCausalResumeTelemetry(domain, { runId: 'other' })).toEqual([]);
+      expect(() => listAgentCausalResumeTelemetry(domain, { atSeq: -1 })).toThrow('sequence');
       runtime.close(); domain.close();
       domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints'); open();
       expect(listAgentCausalRefreshExecutions(domain)).toEqual(saved);
+      expect(listAgentCausalResumeTelemetry(domain)).toEqual(telemetry);
       expect(domain.getStore().getJournalEvent(domain.domainId, evidence[1].seq)).toEqual(evidence[1]);
       return;
     }

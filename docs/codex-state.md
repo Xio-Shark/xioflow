@@ -56,5 +56,5 @@
 - 共享refresh准备记录output（基线/coverage/文件树指纹）；验证resume在probe前后核对，output_invalid区分changed/missing/unavailable并保持pending。AGENT_CAUSAL_SHARED_OUTPUT_VALIDATED持久证据，旧无证据拒绝；宿主保持共享fork静止，范围沿用快照，不证明上下文/分发结果。benchmark:recovery schemaVersion=5第七参数recoveryOutput支持stable/tampered/deleted，独立于两次输入扰动；SIGKILL重开后注入，三策略均宿主分发哈希核对。指纹提前拒绝避免一次绑定/输出读取，均需重算；outputChecks/outputSeq关联证据，prebindValidationMs含查询/指纹/探测/journal，非纯指纹耗时。
 - benchmark:recovery schemaVersion=6：第八参数逗号分隔outputFileBytes，派生payload覆盖生成/重放/分发/最终OCC校验，checkpoint保留摘要；有payload时损坏最后一个文件。恢复分发字节/耗时包含失败尝试，不含fork/内核指纹；summary附验证与分发均值。
 - resumeAgentSharedCausalRefreshWithPolicy：完整pending批次成本选择validate/recompute；正常验证拒绝自动宿主重建，异常抛出。planAgentCausalResumePolicy纯查询，概率/有限成本/溢出检查，持平验证。
-- recompute逐项返回完整checkpoint/heads/独立workspace，沿用冻结版本核对、原preparation发布和重叠保护；保留已发布项及旧共享资源。SELECTED/COMPLETED/FAILED事件关联决策/拒绝证据/耗时；批次完成须核对outcomes，文件仍需OCC。
-- 下一步：多规模多轮恢复测量校准forecast，对照策略实际成本与失准；当前宿主预测，不宣称生产/token收益。
+- recompute逐项返回完整checkpoint/heads/独立workspace，沿用冻结版本核对、原preparation发布和重叠保护；保留已发布项及旧共享资源。SELECTED/COMPLETED/FAILED事件关联决策/拒绝证据/耗时；批次完成须核对outcomes，文件仍需OCC。 listAgentCausalResumeTelemetry按taskKey/runId/atSeq/重开查询；SELECTED携带forecastUnit(ms/host)，结果持久phases(验证+续跑/重算)、outcomes计数，显式ms才算预测误差；旧缺测量不补零、未决pending。
+- 下一步：用恢复遥测按pending数量/输出大小冻结训练窗口，多规模多轮独立验证forecast；区分失败和未决，不宣称生产/token收益。

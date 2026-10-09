@@ -16,7 +16,7 @@ xioflow 的目标是让多个 agent 在同一个不断变化的世界中投机�
 共享基线引用接通，输出带 journal 截止点的资源保留和人工核对预览；保护时间旅行依据，
 `cleanupAgentCausalFork` 在宿主核对后按冻结证据回收可释放 fork，保留时间旅行基线。`listAgentCausalForkCleanups` 将请求与终止/失败证据关联，支持历史切片及重开后的未决结果核对。见[历史资源预览](causal-recovery-batches.md#历史工作区引用与回收预览)。
 
-恢复调度新增 `resumeAgentSharedCausalRefreshWithPolicy`：按完整 pending 批次的验证、分发与拒绝后重算成本，选择验证续跑或直接重建；决策和实际路径持久可查，预测不替代有效性证据。见[成本策略](causal-recovery-batches.md#按总成本选择持久恢复路径)。
+恢复调度新增 `resumeAgentSharedCausalRefreshWithPolicy`：按完整 pending 批次的验证、分发与拒绝后重算成本，选择验证续跑或直接重建；决策和实际路径持久可查，预测不替代有效性证据。恢复策略现有持久阶段耗时、逐项成功/失败计数和显式毫秒预测误差，可按任务类别冻结历史窗口查询，为成本校准提供实测反馈。见[成本策略](causal-recovery-batches.md#按总成本选择持久恢复路径)。
 
 ## 核心抽象
 
