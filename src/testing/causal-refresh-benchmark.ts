@@ -14,6 +14,8 @@ import { planWorkspaceCausalRefreshPolicy, refreshWorkspaceCausalBranchesWithPol
 import type { WorkspaceCausalRefreshOptions } from '../workspace/causal-refresh.js';
 import type { CausalRefreshDecision } from '../workspace/causal-refresh-cost.js';
 import type { ObservationEntry, CommitValidation } from '../workspace/transactions.js';
+import { listWorkspaceCausalRefreshTelemetry } from '../workspace/causal-refresh-telemetry.js';
+import type { CausalRefreshCostModel } from '../workspace/causal-refresh-cost.js';
 import type { CausalBenchmarkOptions } from './causal-repair-benchmark.js';
 
 export interface CausalRefreshBenchmarkOptions extends CausalBenchmarkOptions {
@@ -96,7 +98,9 @@ export async function runCausalRefreshBenchmark(options: CausalRefreshBenchmarkO
     }) };
 }
 
-async function runSample(mode: Mode, trial: number, config: Required<CausalRefreshBenchmarkOptions>) {
+/** Internal fixture shared with the temporal history benchmark. */
+export async function runSample(mode: Mode, trial: number, config: Required<CausalRefreshBenchmarkOptions>,
+  session?: { domain: ExecutionDomain; id: string; taskKey: string; costModel: CausalRefreshCostModel }) {
   const temp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'xio-refresh-bench-')));
   let domain: ExecutionDomain | undefined;
   try {
@@ -107,11 +111,12 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
     if (config.sharedInput) fs.writeFileSync(path.join(root, 'shared.txt'), 'shared-initial');
     await exec('git', ['add', '.'], { cwd: root });
     await exec('git', ['-c', 'user.name=Benchmark', '-c', 'user.email=benchmark@example.invalid', 'commit', '-qm', 'fixture'], { cwd: root });
-    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'benchmark');
+    domain = session?.domain ?? ExecutionDomain.acquire(path.join(temp, 'domain'), 'benchmark');
+    const runId = session?.id ?? 'run';
     const store = domain.getStore();
     const now = new Date().toISOString();
-    store.saveTask({ id: 'task', domainId: domain.domainId, name: 'refresh benchmark', createdAt: now });
-    store.saveRun({ id: 'run', taskId: 'task', domainId: domain.domainId, owner: 'benchmark', status: 'running', startedAt: now });
+    store.saveTask({ id: runId, domainId: domain.domainId, name: 'refresh benchmark', createdAt: now });
+    store.saveRun({ id: runId, taskId: runId, domainId: domain.domainId, owner: 'benchmark', status: 'running', startedAt: now });
     const supervisor = new ProcessSupervisor(domain);
     const graph = new WorkspaceCausalGraph(domain);
     const counters = { executionToolCalls: 0, probeToolCalls: 0, reuseToolCalls: 0, commitReplayToolCalls: 0 };
@@ -129,7 +134,7 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
       fs.writeFileSync(path.join(dir, `output-${branch}.txt`), derived);
       return hash(derived);
     };
-    const txOptions = (txId: string) => ({ txId, runId: 'run', root, forkPath: path.join(temp, txId) });
+    const txOptions = (txId: string) => ({ txId: session ? `${session.id}-${txId}` : txId, runId, root, forkPath: path.join(temp, txId) });
     const initial = await supervisor.beginWorkspaceTransaction(txOptions('initial'));
     const sharedHeads: number[] = [];
     if (config.sharedInput) {
@@ -150,7 +155,7 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
       branches.push({ id: `agent-${branch}`, heads });
     }
     if ((await supervisor.commitWorkspaceTransaction(initial.txId)).status !== 'committed') throw new Error('Initial fixture commit failed');
-    await supervisor.pruneSnapshots([initial.baseSnapshotId], { runId: 'run' });
+    await supervisor.pruneSnapshots([initial.baseSnapshotId], { runId });
     const heads = branches.flatMap((branch) => branch.heads);
     const view = graph.view(heads);
     const changed = Array.from({ length: config.changedBranches }, (_, i) => (trial + i) % config.branches);
@@ -174,7 +179,7 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
       status = result.status;
       if (result.status === 'committed') commitValidation = result.validation;
       else await supervisor.abortWorkspaceTransaction(tx.txId, 'benchmark conflict');
-      await supervisor.pruneSnapshots([tx.baseSnapshotId], { runId: 'run' });
+      await supervisor.pruneSnapshots([tx.baseSnapshotId], { runId });
     } else if (mode === 'causal-recompute') {
       const result = await recomputeWorkspaceCausalBranches(supervisor, {
         ...txOptions('recompute'), atSeq: view.nodes.at(-1)!.seq, branches,
@@ -192,11 +197,11 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
         ...txOptions('probe'), atSeq: view.nodes.at(-1)!.seq, branches,
         closedWorld: true, replayPolicy: 'deterministic',
         replayReuse: mode === 'causal-refresh' ? 'none' : 'baseline_observations',
-        ...(['causal-refresh-adaptive', 'causal-refresh-policy'].includes(mode) ? { costModel: () => ({
+        ...(['causal-refresh-adaptive', 'causal-refresh-policy'].includes(mode) ? { costModel: session?.costModel ?? (() => ({
           execute: 1, reuse: config.estimatedReusePasses, replay: 1,
-        }) } : {}),
+        })) } : {}),
         replay: (entry, dir) => perform(entry, dir, repairing ? 'commitReplayToolCalls' : 'probeToolCalls'),
-        repair: { txId: 'repair', forkPath: path.join(temp, 'repair'),
+        repair: { txId: session ? `${session.id}-repair` : 'repair', forkPath: path.join(temp, 'repair'),
           validateReuse: async (tx, unaffected) => {
             repairing = true;
             for (let pass = 0; pass < config.reusePasses; pass++) {
@@ -217,7 +222,7 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
       };
       const policyResult = mode === 'causal-refresh-policy'
         ? await refreshWorkspaceCausalBranchesWithPolicy(supervisor, { ...refreshOptions,
-          costModel: refreshOptions.costModel!, forecast: config.forecast }) : null;
+          costModel: refreshOptions.costModel!, forecast: config.forecast, taskKey: session?.taskKey }) : null;
       const result = policyResult ? policyResult.result : await refreshWorkspaceCausalBranches(supervisor, refreshOptions);
       policyDecision = policyResult?.policy ?? null;
       decision = 'decision' in result ? result.decision ?? null : null;
@@ -238,18 +243,19 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
     }
     const actualRemainingToolCalls = counters.executionToolCalls + counters.reuseToolCalls + counters.commitReplayToolCalls;
     const estimatedRemainingToolCalls = decision ? decision[decision.strategy].total : null;
-    const costPrediction = estimatedRemainingToolCalls === null ? null : {
+    const costPrediction = session || estimatedRemainingToolCalls === null ? null : {
       unit: 'toolCalls' as const, estimatedRemainingToolCalls, actualRemainingToolCalls,
       errorToolCalls: actualRemainingToolCalls - estimatedRemainingToolCalls,
     };
     const totalToolCalls = Object.values(counters).reduce((a, b) => a + b, 0);
     const estimatedTotalToolCalls = policyDecision
       ? policyDecision.strategy === 'probe' ? policyDecision.expectedProbeCost : policyDecision.recomputeCost : null;
-    const policyCostPrediction = estimatedTotalToolCalls === null ? null : {
+    const policyCostPrediction = session || estimatedTotalToolCalls === null ? null : {
       unit: 'toolCalls' as const, estimatedTotalToolCalls, actualTotalToolCalls: totalToolCalls,
       errorToolCalls: totalToolCalls - estimatedTotalToolCalls,
     };
-    return { mode, trial, decision, costPrediction, policyDecision, policyCostPrediction, changedBranches: changed, status, ...counters, reusedProbeSteps,
+    const telemetry = mode === 'causal-refresh-policy' ? listWorkspaceCausalRefreshTelemetry(domain, { runId }).at(-1)! : null;
+    return { mode, trial, telemetry, decision, costPrediction, policyDecision, policyCostPrediction, changedBranches: changed, status, ...counters, reusedProbeSteps,
       totalToolCalls, elapsedMs,
       policiesSelected: events.filter((event) => event.type === 'CAUSAL_REFRESH_POLICY_SELECTED').length,
       causalStepsRecorded: events.filter((event) => event.type === 'CAUSAL_STEP').length,
@@ -260,7 +266,7 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
       correctOutputs, totalOutputs: config.branches, outputHashes, commitValidation,
       success: correctOutputs === config.branches && (mode === 'unchecked-reuse' || status === 'committed' || status === 'unchanged') };
   } finally {
-    domain?.close();
+    if (!session) domain?.close();
     fs.rmSync(temp, { recursive: true, force: true });
   }
 }

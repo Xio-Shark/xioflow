@@ -137,3 +137,7 @@ node scripts/benchmarks/causal-refresh.mjs 3 4 1000 1 --shared --forecast='{"cha
 | 1 | 一个 | recompute | 18 | 26 / 18 | 0 | 210.21 |
 
 局部变化时，选直接重算比探测后自适应少 8 次调用；错误预测不变会承担这些探测成本。无变化时，错误预测变化让总调用从 9 增至 18，即使所选重算路径的成本预测误差为零。这里没有宣称学到了最佳策略，也没有真实模型 / token 数据；三轮耗时仅为本机小负载实测。
+
+## 历史预测与独立时间验证
+
+`pnpm benchmark:refresh-history` 在固定训练窗口后，使用独立探测任务验证历史成本预测，并在相同扰动下对照历史策略和静态先验的真实执行成本；见[协议与边界](causal-refresh-history-benchmark.md)。

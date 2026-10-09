@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "config": {
+    "repetitions": 2,
+    "hashRounds": 2,
+    "oldChanges": [
+      false,
+      false,
+      false,
+      true
+    ],
+    "recentChanges": [
+      false,
+      true,
+      true,
+      true
+    ],
+    "evaluationChanges": [
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "modelTokens": null,
+  "environment": {
+    "node": "v22.23.3",
+    "platform": "linux",
+    "arch": "arm64"
+  },
+  "summary": [
+    {
+      "mode": "history",
+      "successRate": 1,
+      "meanCallbackDurationMs": 0.1978788750004128,
+      "meanDurationMs": 192.28050700000006,
+      "meanCallbackCalls": 5
+    },
+    {
+      "mode": "recent",
+      "successRate": 1,
+      "meanCallbackDurationMs": 0.20936887500022294,
+      "meanDurationMs": 188.40503374999997,
+      "meanCallbackCalls": 4.5
+    }
+  ],
+  "pairedCallbackDeltaMs": {
+    "samples": 8,
+    "mean": 0.011489999999810152,
+    "min": -0.05036800000198127,
+    "max": 0.1064120000010007
+  },
+  "note": "Summary only; regenerate full per-repetition telemetry with the documented command."
+}

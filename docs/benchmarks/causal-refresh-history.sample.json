@@ -1,0 +1,258 @@
+{
+  "schemaVersion": 1,
+  "config": {
+    "hashRounds": 1000,
+    "trainingChanges": [
+      0,
+      1,
+      0,
+      1
+    ],
+    "evaluationChanges": [
+      0,
+      1,
+      2
+    ],
+    "staticForecast": {
+      "changeProbability": 0.5,
+      "probeUnchanged": 1,
+      "probeChanged": 1,
+      "refreshChanged": 2
+    }
+  },
+  "unit": "callback_duration_ms",
+  "modelTokens": null,
+  "environment": {
+    "node": "v22.23.3",
+    "platform": "linux",
+    "arch": "arm64"
+  },
+  "trainingAtSeq": 212,
+  "trainingSamples": 4,
+  "trainingToolCalls": 38,
+  "trainingElapsedMs": 594.0749879999998,
+  "frozenForecast": {
+    "changeProbability": 0.5,
+    "probeUnchanged": 4.51080900000008,
+    "probeChanged": 0.9302604999999744,
+    "refreshChanged": 3.510948999999954
+  },
+  "costModel": {
+    "execute": 0.42620675000003416,
+    "reuse": 0.3157355000000071,
+    "replay": 0.34226579999997286
+  },
+  "estimate": {
+    "taskKey": "independent-probe",
+    "trainingAtSeq": 212,
+    "atSeq": 9007199254740991,
+    "unit": "callback_duration_ms",
+    "training": {
+      "unchanged": 2,
+      "changed": 2,
+      "failed": 0,
+      "missing": 0,
+      "recompute": 0
+    },
+    "heldOut": {
+      "unchanged": 1,
+      "changed": 2,
+      "failed": 0,
+      "missing": 0,
+      "recompute": 0
+    },
+    "forecast": {
+      "changeProbability": 0.5,
+      "probeUnchanged": 4.51080900000008,
+      "probeChanged": 0.9302604999999744,
+      "refreshChanged": 3.510948999999954
+    },
+    "evaluation": {
+      "samples": 3,
+      "expectedProbeCost": 4.476009250000004,
+      "meanActualCost": 3.6963746666667703,
+      "meanAbsoluteError": 0.8408710833329943
+    }
+  },
+  "samples": [
+    {
+      "trial": 0,
+      "changedBranches": 0,
+      "probe": {
+        "expectedCallbackCostMs": 0,
+        "strategy": "probe",
+        "success": true,
+        "status": "unchanged",
+        "commitValidation": null,
+        "outputHashes": [
+          "c2c8a606ca2bc87af87e851023df3d999e8f300e881f4e49584757920c62d3d6",
+          "61b8a2880db2227f0a1bba52f5354ba37b3c2944fbdc529b5ad38305605357dc"
+        ],
+        "totalToolCalls": 5,
+        "elapsedMs": 72.2816029999999,
+        "callbackDurationMs": 2.788540000000239,
+        "decisionSeq": 233,
+        "telemetrySeq": 250
+      },
+      "history": {
+        "expectedCallbackCostMs": 3.842362750000035,
+        "strategy": "recompute",
+        "success": true,
+        "status": "committed",
+        "commitValidation": "observations",
+        "outputHashes": [
+          "c2c8a606ca2bc87af87e851023df3d999e8f300e881f4e49584757920c62d3d6",
+          "61b8a2880db2227f0a1bba52f5354ba37b3c2944fbdc529b5ad38305605357dc"
+        ],
+        "totalToolCalls": 10,
+        "elapsedMs": 186.83111499999995,
+        "callbackDurationMs": 3.7847019999999247,
+        "decisionSeq": 309,
+        "telemetrySeq": 343
+      },
+      "static": {
+        "expectedCallbackCostMs": 2,
+        "strategy": "probe",
+        "success": true,
+        "status": "unchanged",
+        "commitValidation": null,
+        "outputHashes": [
+          "c2c8a606ca2bc87af87e851023df3d999e8f300e881f4e49584757920c62d3d6",
+          "61b8a2880db2227f0a1bba52f5354ba37b3c2944fbdc529b5ad38305605357dc"
+        ],
+        "totalToolCalls": 5,
+        "elapsedMs": 71.55123599999979,
+        "callbackDurationMs": 1.7309999999999945,
+        "decisionSeq": 271,
+        "telemetrySeq": 288
+      }
+    },
+    {
+      "trial": 1,
+      "changedBranches": 1,
+      "probe": {
+        "expectedCallbackCostMs": 0,
+        "strategy": "probe",
+        "success": true,
+        "status": "committed",
+        "commitValidation": "observations",
+        "outputHashes": [
+          "c2c8a606ca2bc87af87e851023df3d999e8f300e881f4e49584757920c62d3d6",
+          "d8ab2a4c3914034d4dbfd22ed24f932606d8c731b5b16b253690453cdc9a5033"
+        ],
+        "totalToolCalls": 14,
+        "elapsedMs": 248.3884750000002,
+        "callbackDurationMs": 4.567863999999645,
+        "decisionSeq": 364,
+        "telemetrySeq": 411
+      },
+      "history": {
+        "expectedCallbackCostMs": 3.842362750000035,
+        "strategy": "recompute",
+        "success": true,
+        "status": "committed",
+        "commitValidation": "observations",
+        "outputHashes": [
+          "c2c8a606ca2bc87af87e851023df3d999e8f300e881f4e49584757920c62d3d6",
+          "d8ab2a4c3914034d4dbfd22ed24f932606d8c731b5b16b253690453cdc9a5033"
+        ],
+        "totalToolCalls": 10,
+        "elapsedMs": 180.00605799999994,
+        "callbackDurationMs": 3.482375000000957,
+        "decisionSeq": 432,
+        "telemetrySeq": 466
+      },
+      "static": {
+        "expectedCallbackCostMs": 2,
+        "strategy": "probe",
+        "success": true,
+        "status": "committed",
+        "commitValidation": "observations",
+        "outputHashes": [
+          "c2c8a606ca2bc87af87e851023df3d999e8f300e881f4e49584757920c62d3d6",
+          "d8ab2a4c3914034d4dbfd22ed24f932606d8c731b5b16b253690453cdc9a5033"
+        ],
+        "totalToolCalls": 14,
+        "elapsedMs": 248.978427,
+        "callbackDurationMs": 4.468742999999904,
+        "decisionSeq": 487,
+        "telemetrySeq": 534
+      }
+    },
+    {
+      "trial": 2,
+      "changedBranches": 2,
+      "probe": {
+        "expectedCallbackCostMs": 0,
+        "strategy": "probe",
+        "success": true,
+        "status": "committed",
+        "commitValidation": "observations",
+        "outputHashes": [
+          "878d30312e7e85ec1d976d9a17a10ab36adff34233f61c0b244c58fe713029b3",
+          "d003eaf954e49897f5644437fb922db41a301f9ea419bacd4ef14a66421c4889"
+        ],
+        "totalToolCalls": 13,
+        "elapsedMs": 266.31158400000004,
+        "callbackDurationMs": 3.732720000000427,
+        "decisionSeq": 555,
+        "telemetrySeq": 604
+      },
+      "history": {
+        "expectedCallbackCostMs": 3.842362750000035,
+        "strategy": "recompute",
+        "success": true,
+        "status": "committed",
+        "commitValidation": "observations",
+        "outputHashes": [
+          "878d30312e7e85ec1d976d9a17a10ab36adff34233f61c0b244c58fe713029b3",
+          "d003eaf954e49897f5644437fb922db41a301f9ea419bacd4ef14a66421c4889"
+        ],
+        "totalToolCalls": 10,
+        "elapsedMs": 205.6166720000001,
+        "callbackDurationMs": 3.5418590000008408,
+        "decisionSeq": 695,
+        "telemetrySeq": 729
+      },
+      "static": {
+        "expectedCallbackCostMs": 2,
+        "strategy": "probe",
+        "success": true,
+        "status": "committed",
+        "commitValidation": "observations",
+        "outputHashes": [
+          "878d30312e7e85ec1d976d9a17a10ab36adff34233f61c0b244c58fe713029b3",
+          "d003eaf954e49897f5644437fb922db41a301f9ea419bacd4ef14a66421c4889"
+        ],
+        "totalToolCalls": 13,
+        "elapsedMs": 284.0422349999999,
+        "callbackDurationMs": 3.659403999999995,
+        "decisionSeq": 625,
+        "telemetrySeq": 674
+      }
+    }
+  ],
+  "summary": [
+    {
+      "mode": "probe",
+      "successRate": 1,
+      "meanCallbackDurationMs": 3.6963746666667703,
+      "meanElapsedMs": 195.66055400000005,
+      "meanToolCalls": 10.666666666666666
+    },
+    {
+      "mode": "history",
+      "successRate": 1,
+      "meanCallbackDurationMs": 3.6029786666672408,
+      "meanElapsedMs": 190.81794833333333,
+      "meanToolCalls": 10
+    },
+    {
+      "mode": "static",
+      "successRate": 1,
+      "meanCallbackDurationMs": 3.286382333333298,
+      "meanElapsedMs": 201.5239659999999,
+      "meanToolCalls": 10.666666666666666
+    }
+  ]
+}
