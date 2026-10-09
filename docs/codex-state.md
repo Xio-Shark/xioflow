@@ -37,5 +37,7 @@
 - 内部prepareWorldRepair消费changed/selected_nodes持久报告，接既有prepareWorkspaceRepair；固定基线拓扑重放复用节点并验全部hash，物化复用写入后才重算闭包。
 - 修复前/复用后/完成后重验原产物及版本，最终覆盖/指纹检查；失败abort并留WORLD_REPAIR_FAILED与验证基线；成功记录事务、复用/替换及指纹。
 - 该基础层只返回open事务，未产生WorldCandidate/绑定模型上下文；不替代OCC或业务验收；已有5项回归覆盖修复准备边界。
-- 本轮matched刷新接prepareWorldStep：固定验证版本上完整重放/物化，映射节点、heads与已保存产物依赖，保存新候选及checkpoint，不调用模型。
+- matched刷新接prepareWorldStep：固定验证版本上完整重放/物化，映射节点、heads与已保存产物依赖，保存新候选及checkpoint，不调用模型。
 - WORLD_REUSE_PREPARED/FAILED保存引用和映射；原产物重验、重放首差/异常失败且不兜底重算，资源仍保留；strict commit尚未接入。
+- 本轮收尾7bfbb9c的matched复用WIP；补充重开后连续刷新、显式空依赖复用、首差/异常立即停止回归，仍不调用模型或发布主目录。
+- 验证：refresh/step/validation共61项及pnpm typecheck通过；全量待本轮最终回填，若未完成则下一轮先补跑。

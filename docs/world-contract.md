@@ -174,7 +174,8 @@ readWorldRefresh 按固定引用只读查询，关闭重开后不调用模型或
 matched 复用路径不调用模型：在探测版本的新事务中完整重放所选祖先子图，核对每个结果 hash，
 物化写入并映射节点、heads 和已保存产物的依赖；通过普通 prepareWorldStep 保存新版本候选与 checkpoint。
 重放前后核验原候选产物，重放不匹配或异常返回 failed，不自动完整重算；失败资源保留。
-WORLD_REUSE_PREPARED/FAILED 保存验证引用、新结果及节点映射，关闭重开后仍能读取产物和解释。
+WORLD_REUSE_PREPARED/FAILED 保存验证引用、新结果及节点映射，关闭重开后仍能读取产物和解释，
+并以新候选继续刷新；显式空依赖 `[]` 可复用常量产物，无须调用工具或模型，`null` 仍为 unknown。
 复用仍不授予发布许可；strict commit 须再次重验，尤其是刷新后再次发生变化时。它尚非公开 WorldHandle 的完整实现，未提供断点续跑、
 幂等刷新或统一资源清理；中断后只有 started 的操作不被当作完成，已有资源保留供后续恢复。
 
