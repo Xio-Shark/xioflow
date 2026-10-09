@@ -1,9 +1,9 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；以 docs/NORTH_STAR.md 为最高方向，按 M1→M2→M3→M4 推进。
-- 当前里程碑：M1（契约冻结），尚未完成。已有底层发布门禁与事务终态重试，不等于统一世界契约。
-- M1 缺口：openWorld/runAgentStep/refresh/explain/commit/close 的统一类型草案、状态表及适配器覆盖清单；六类失败/重试/资源归属须统一规定。
-- 下一轮最小切片：冻结上述类型与状态表，明确 unknown、验证异常、OCC冲突、提交未决、独立key重试和close；复用 workspace-publication.md，不再扩成本预测入口。
-- M2 未验收：六类场景各10次、独立oracle及全部不变式；M3真实模型报价demo与收益门槛、M4公开接入/进程故障均未完成。
+- 当前里程碑：M2（单世界正确性闭环），尚未完成；M1 的设计交付物已齐备，不代表统一入口已实现。
+- M1：docs/world-contract.md 冻结六入口状态表、适配器覆盖及六类失败/重试/资源归属；spec/world-contract.ts 是非公开类型草案，tests/world-contract.types.ts 随 typecheck 检查。
+- 下一轮最小切片：实现 openWorld 的持久世界身份与覆盖清单校验（含重开相同身份、缺失基线拒绝），复用 snapshot/journal；再连接 AgentRuntime 与事务，不再扩成本策略。
+- M2 缺口：统一句柄运行实现、独立key绑定与close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。M3/M4均未完成。
 - 基础能力：WorkspaceTransactions 文件读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph 持久节点、祖先/历史切片/失效闭包；explainRecomputation 列变化源与最短依赖路径，explainCausalRecovery关联checkpoint。
 - prepareWorkspaceRepair 拓扑重算与独立结果复用；view(heads)支持连续修复；共享多分支按源seq去重。
@@ -21,7 +21,7 @@
 - replayReuse 可复用同一基线 mutation 前的同seq纯观测，错误不缓存；最终提交仍完整重放。
 - publication 接入既有提交队列：覆盖unknown拒绝、准备候选指纹、强制重放、实际发布目录只读业务验收；TX_COMMITTING保存来源指纹，续提交核对。
 - TX_PUBLICATION_REJECTED记录覆盖/输出/验收拒绝；宿主完整声明依赖并保持候选静止。见 docs/workspace-publication.md。
-- 本轮：WorkspaceCommitReceipt.commitSeq 标识domain内TX_COMMITTED；同txId终态重试返回原结果，不重验、不重写、不再次清理。
+- WorkspaceCommitReceipt.commitSeq 标识domain内TX_COMMITTED；同txId终态重试返回原结果，不重验、不重写、不再次清理。
 - getWorkspaceCommitResult 只读查询，重开/候选已删除仍可恢复原凭据；undefined不代表无部分写入。txId不可复用，尚无独立key。
 - 发布后清理失败仍抛错，但查询/重试可取成功凭据；从活动缓存移除终态事务，禁止abort把成功改成中止。遗留资源由宿主核对引用后处理。
 - forkAgentCheckpoint：固定历史基线与完整确定性前缀逐步哈希；compareAgentCheckpoints/Files 提供上下文与文件对照，调试能力后续归插件。
@@ -30,4 +30,5 @@
 - 历史成本策略/窗口/漂移/恢复预测已有实现，北极星要求降级插件，当前不扩展；统一基准按第5节逐项合并，覆盖前不删样本。
 - benchmark:recovery schemaVersion=6：真实SIGKILL、输入/输出扰动、多文件规模、验证/直接续跑/全量重算；无真实模型token收益证明。
 - 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生测试需要gcc/libc6-dev（当前已安装）。
-- 本轮验证：基线808通过/7跳过；最终pnpm test 811通过/7跳过，pnpm typecheck与git diff --check通过。
+- 本轮仅冻结契约，不导出 openWorld；编译检查覆盖接入调用、结果穷尽、非成功无receipt与严格observations验证方式。
+- 本轮验证：基线与最终pnpm test均811通过/7跳过；pnpm typecheck（含契约编译检查）与git diff --check通过。

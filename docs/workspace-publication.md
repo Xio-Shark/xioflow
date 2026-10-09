@@ -2,6 +2,7 @@
 
 `commitWorkspaceTransaction` 的可选 `publication` 将成果有效性检查接到已有串行提交队列，
 是 [北极星](NORTH_STAR.md) 统一发布契约的实现切片。尚未实现 `openWorld`、独立提交 key 或跨 checkpoint 原子发布。
+统一入口的 M1 类型草案、状态表及六类失败/资源责任见 [单世界契约](world-contract.md)；下文描述当前底层 API 的实际行为。
 
 ```ts
 const base = domain.getStore().getSnapshot(tx.baseSnapshotId);

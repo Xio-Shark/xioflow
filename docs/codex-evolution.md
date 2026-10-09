@@ -556,3 +556,11 @@
 - 新增并发/重开/主目录后续修改、清理失败、未知/中止事务测试；更新既有恢复重试预期与发布契约文档。
 - 下一步仍为M1：统一世界句柄类型、状态表、覆盖清单与六类故障资源归属；独立key与close尚未实现。
 - 验证：基线808通过/7跳过；pnpm typecheck、最终pnpm test（811通过/7跳过）与git diff --check通过。
+
+## 2026-10-09 — 冻结单世界 M1 契约
+- 新增非公开 spec/world-contract.ts 类型草案，覆盖 openWorld/runAgentStep/refresh/explain/commit/close，复用既有观测、因果解释与提交凭据类型。
+- docs/world-contract.md 收敛状态表、文件/上下文覆盖声明及六类失败、重试和资源归属；区分发布、checkpoint绑定与回收事实。
+- 明确独立key绑定与终态幂等、验证异常不算失效、未决来源保留、固定截止点解释和close中止未发布候选。
+- 编译接入示例检查结果穷尽、非成功无receipt及严格observations验证；不导出或假装实现统一运行入口。
+- M1设计交付物齐备；下一轮进入M2，从持久世界身份、覆盖清单与重开校验开始，尚无M2六类场景验收。
+- 验证：基线与最终pnpm test均811通过/7跳过；pnpm typecheck（含契约编译检查）与git diff --check通过。
