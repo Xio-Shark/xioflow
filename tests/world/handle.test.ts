@@ -131,3 +131,48 @@ it('rejects publication of abandoned candidates after reopening', async () => {
     .toMatchObject({ status: 'rejected', reason: 'candidate_abandoned' });
   expect(await fs.readFile(path.join(options().root, 'input'), 'utf8')).toBe('original');
 });
+
+it('explains failed agent execution at a frozen cutoff after later work and reopening', async () => {
+  const failed = await world.runAgentStep({ execute: async context => {
+    await fs.writeFile(path.join(context.forkRoot, 'input'), 'isolated failure');
+    throw new Error('inference unavailable');
+  } }, { task: 'fail' });
+  if (failed.status !== 'failed') throw new Error('expected failure');
+  const explanation = await world.explain(failed.ref);
+  expect(explanation).toMatchObject({ ref: failed.ref,
+    failure: { ref: failed.ref, stage: 'step', reason: failed.reason },
+    preparation: { candidate: null, coverage: { status: 'unknown' }, plan: null },
+    publication: null, bindings: [],
+  });
+  expect(explanation.resources.some(r => r.kind === 'fork' && r.status === 'retained')).toBe(true);
+  await world.runAgentStep(agent, { task: 'later' });
+  expect(await world.explain(failed.ref)).toEqual(explanation);
+  await expect(world.explain({ ...failed.ref, worldId: 'forged' })).rejects.toThrow('reference mismatch');
+  await expect(world.explain({ ...failed.ref, atSeq: failed.ref.atSeq - 1 })).rejects.toThrow('reference mismatch');
+  await world.close();
+  world = await openWorld(options());
+  expect(await world.explain(failed.ref)).toEqual(explanation);
+  expect(await fs.readFile(path.join(options().root, 'input'), 'utf8')).toBe('original');
+});
+
+it('explains refresh tool failure without reporting a change or reading beyond the failure cutoff', async () => {
+  const prepared = await world.runAgentStep({ execute: async context => {
+    const seq = await context.record({ kind: 'observe', call: { tool: 'read', args: {} }, resultHash: 'original' }, []);
+    return { coverage: { status: 'complete', manifestHash: context.version.manifestHash }, heads: [seq], artifacts: [] };
+  } }, { task: 'read' });
+  if (prepared.status !== 'prepared') throw new Error('expected preparation');
+  const replay = vi.spyOn(adapter, 'replay').mockRejectedValue(new Error('tool offline'));
+  const failed = await world.refresh(prepared.candidate, { onUnknown: 'reject' });
+  if (failed.status !== 'failed') throw new Error('expected failure');
+  const calls = replay.mock.calls.length;
+  const explanation = await world.explain(failed.ref);
+  expect(explanation).toMatchObject({ failure: { stage: 'refresh', reason: failed.reason },
+    preparation: { candidate: prepared.candidate, plan: null, validation: { status: 'failed' }, refresh: null },
+    publication: null, bindings: [],
+  });
+  expect(replay).toHaveBeenCalledTimes(calls);
+  await world.close();
+  world = await openWorld(options());
+  expect(await world.explain(failed.ref)).toEqual(explanation);
+  expect(replay).toHaveBeenCalledTimes(calls);
+});

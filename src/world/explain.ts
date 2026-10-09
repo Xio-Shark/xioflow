@@ -11,7 +11,8 @@ type WorldState = Awaited<ReturnType<typeof openWorldState>>;
 /** Internal publication, binding and resource evidence from one journal prefix. */
 export interface WorldPublicationExplanation {
   ref: WorldRef;
-  preparation: WorldPreparationExplanation;
+  preparation: Omit<WorldPreparationExplanation, 'candidate'> & { candidate: WorldCandidate | null };
+  failure: { ref: WorldRef; stage: 'step' | 'refresh' | 'recompute'; reason: string } | null;
   publication: KeyedWorldPublication | null;
   bindings: WorldCheckpointBinding[];
   resources: WorldExplanation['resources'];
@@ -47,13 +48,36 @@ export function explainWorldPublication(world: WorldState,
   } else {
     // The query cutoff need not be the event that created its target. Resolve
     // that event within the frozen prefix so returned refs can be queried again.
-    const event = history.find(e => e.payload.worldId === target.worldId
+    const event = history.findLast(e => e.payload.worldId === target.worldId
       && e.payload.id === target.id && ['WORLD_STEP_PREPARED', 'WORLD_STEP_UNKNOWN',
-        'WORLD_VALIDATION_COMPLETED', 'WORLD_REFRESH_COMPLETED'].includes(e.type));
+        'WORLD_VALIDATION_COMPLETED', 'WORLD_REFRESH_COMPLETED',
+        'WORLD_STEP_FAILED', 'WORLD_REFRESH_FAILED', 'WORLD_RECOMPUTE_FAILED'].includes(e.type));
     if (target.worldId !== world.state.worldId || !event) {
       throw new Error('Explanation history reference mismatch');
     }
     preparationRef = { worldId: target.worldId, id: target.id, atSeq: event.seq };
+    if (['WORLD_STEP_FAILED', 'WORLD_REFRESH_FAILED', 'WORLD_RECOMPUTE_FAILED'].includes(event.type)) {
+      const previous = event.payload.previous as unknown as WorldRef | undefined;
+      const validationRef = event.payload.validation as unknown as WorldRef | undefined;
+      if (previous && previous.atSeq > event.seq) throw new Error('Explanation history reference mismatch');
+      if (validationRef && validationRef.atSeq > event.seq) throw new Error('Explanation history reference mismatch');
+      const preparation = previous ? explainWorldPreparation(world, previous) : null;
+      const validation = validationRef ? readWorldCandidateValidation(world, validationRef) : null;
+      if (validation && (!previous || validation.previous.worldId !== previous.worldId
+          || validation.previous.id !== previous.id || validation.previous.atSeq !== previous.atSeq)) {
+        throw new Error('Explanation validation target mismatch');
+      }
+      const resourceId = event.type === 'WORLD_STEP_FAILED' ? target.id : preparation?.candidate.txId;
+      return structuredClone({ ref: { ...preparationRef, atSeq: cutoff },
+        failure: { ref: preparationRef, stage: event.type === 'WORLD_STEP_FAILED' ? 'step'
+          : event.type === 'WORLD_REFRESH_FAILED' ? 'refresh' : 'recompute', reason: event.payload.reason as string },
+        preparation: { ref: preparationRef, candidate: preparation?.candidate ?? null,
+          coverage: preparation?.coverage ?? { status: 'unknown', reasons: ['preparation_failed'] },
+          plan: validation?.plan ?? null, validation, refresh: null, reuse: null },
+        publication: null, bindings: [], resources: resourceId ? explainWorldResources(world,
+          { worldId: target.worldId, id: resourceId, atSeq: cutoff }) : [],
+      });
+    }
     const candidate = explainWorldPreparation(world, preparationRef).candidate;
     const binding = history.find(e => e.type === 'WORLD_PUBLICATION_KEY_BOUND'
       && e.payload.worldId === candidate.worldId && e.payload.candidateId === candidate.id);
@@ -61,7 +85,7 @@ export function explainWorldPublication(world: WorldState,
   }
   const preparation = explainWorldPreparation(world, preparationRef);
   return structuredClone({ ref: { worldId: world.state.worldId, id: preparationRef.id, atSeq: cutoff },
-    preparation, publication, resources: explainWorldResources(world, {
+    preparation, failure: null, publication, resources: explainWorldResources(world, {
       worldId: preparation.candidate.worldId, id: preparation.candidate.txId, atSeq: cutoff,
     }), bindings: publication?.status === 'committed'
       ? [readWorldCheckpointBinding(world, publication.identity, publication.receipt.commitSeq, cutoff)] : [] });

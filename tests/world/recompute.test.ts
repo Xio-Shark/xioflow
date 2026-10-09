@@ -8,6 +8,7 @@ import { openWorldState, restoreWorldRevision } from '../../src/world/state.js';
 import { prepareWorldStep } from '../../src/world/prepare.js';
 import { validateWorldCandidate } from '../../src/world/validation.js';
 
+import { explainWorldPublication } from '../../src/world/explain.js';
 import { recomputeWorldCandidate } from '../../src/world/recompute.js';
 
 const exec = promisify(execFile);
@@ -141,6 +142,14 @@ it.each(['symlink', 'ignored', 'exception'])('records %s failure without publish
   } });
   expect(result.status).toBe('failed');
   expect(calls).toBe(failure === 'exception' ? 1 : 0);
+  if (result.status !== 'failed') throw new Error('expected failure');
+  const history = world.domain.getStore().getJournalEvents('world');
+  const explanation = explainWorldPublication(world, result.ref);
+  expect(explanation.failure).toEqual({ ref: result.ref, reason: result.reason,
+    stage: failure === 'exception' ? 'step' : 'recompute' });
+  expect(explanation.publication).toBeNull();
+  expect(explanation.preparation.candidate?.id ?? null).toBe(failure === 'exception' ? null : previous.id);
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(history);
   await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
   expect(world.domain.getStore().getJournalEvents('world').some(e =>
     e.type === (failure === 'exception' ? 'WORLD_RECOMPUTE_COMPLETED' : 'WORLD_RECOMPUTE_FAILED'))).toBe(true);

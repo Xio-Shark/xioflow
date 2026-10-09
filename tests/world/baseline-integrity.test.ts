@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { captureWorldRevision, openWorldState } from '../../src/world/state.js';
+import { explainWorldPublication } from '../../src/world/explain.js';
 import { prepareWorldStep } from '../../src/world/prepare.js';
 import { validateWorldCandidate } from '../../src/world/validation.js';
 
@@ -39,6 +40,13 @@ it.each(['initial', 'revision'] as const)('rejects an altered %s baseline before
   } }, { task: 'read' });
   expect(result).toMatchObject({ status: 'failed', reason: 'World baseline commit identity mismatch' });
   expect(calls).toBe(0);
+  if (result.status !== 'failed') throw new Error('expected failure');
+  const before = world.domain.getStore().getJournalEvents('world');
+  const explanation = explainWorldPublication(world, result.ref);
+  expect(explanation).toMatchObject({ failure: { stage: 'step', reason: result.reason },
+    preparation: { candidate: null }, publication: null });
+  expect(explanation.resources.some(r => r.kind === 'snapshot' && r.status === 'retained')).toBe(true);
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(before);
   expect(world.domain.getStore().getJournalEvents('world').some(e => e.type === 'WORLD_STEP_PREPARED')).toBe(false);
   expect(await fs.readFile(path.join(world.state.root, 'input'), 'utf8')).toBe('replacement');
 });

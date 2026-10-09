@@ -337,8 +337,8 @@ explainWorldPublication.bindings 独立报告 pending/bound/failed；TX_COMMITTE
 失败允许再次close，但不重新开放接收。句柄不暴露底层domain，避免绕过排空调度。
 候选关联本进程agent，刷新后传递关联；重开查询、同key续发布和无变化复用无需agent，
 确需新推理但缺宿主驱动时明确failed，不猜测或重放模型。
-这仍是内部集成入口：explain沿用现有完整组合结构，失败准备查询和冻结类型投影尚未收口；
-未发布候选的持久中止及引用释放见下节；冻结类型和失败查询仍待收口。
+这仍是内部集成入口：explain沿用现有完整组合结构，冻结类型投影尚未收口，失败准备查询见下节；
+未发布候选的持久中止及引用释放见下节；冻结类型仍待收口。
 不得将其视为完整WorldHandle或M2验收通过；包导出保持不变。
 
 
@@ -350,3 +350,14 @@ explainWorldPublication.bindings 独立报告 pending/bound/failed；TX_COMMITTE
 中止与回收分别落盘，清理失败可重开重试；固定截止点不受后续中止影响。
 重开后中止候选提交返回 rejected/candidate_abandoned；既有发布回执优先且身份不变。
 历史查询和依赖完整的重新计算仍可使用保存的证据；中止不恢复已删除的 fork。
+
+### M2：失败准备的固定历史解释
+
+内部 `world.explain(failed.ref)` 接受 `WORLD_STEP_FAILED`、`WORLD_REFRESH_FAILED`
+和 `WORLD_RECOMPUTE_FAILED` 的持久引用，返回 `failure.ref/stage/reason`。
+执行失败没有候选时 `preparation.candidate=null`、coverage 为 unknown；刷新/重算失败
+只关联已有的旧候选和当时已保存的验证报告，不把旧候选当作新准备成功。
+未创建事务的失败也保留分配意图、历史基线及 journal 的资源解释；不声明已发布。
+查询只读，不重放工具、不核验当前文件、不推进 journal；固定截止点不会混入
+后续完成或清理事件，关闭重开后结果相同。完整 refresh 报告仍保留原有解释结构。
+句柄到冻结 `WorldExplanation` 的类型投影和六场景验收仍未完成。

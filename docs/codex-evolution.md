@@ -782,3 +782,11 @@
 - 重开后中止候选提交明确rejected/candidate_abandoned；固定历史查询不变。
 - 验证：world相关38项、causal-checkpoints 85项及typecheck通过；新增重开、失败清理重试、其他agent引用和缺失发布结果覆盖。
 - 本轮剩余不足5分钟未跑全量，下一轮先补跑；M2仍缺冻结类型/失败查询收口及六场景完整验收。
+
+### 2026-10-09 — M2 explain failed preparation references
+- 统一explain接受step/refresh/recompute失败引用，保存阶段与原因；无候选明确null，旧候选仅作为历史证据。
+- 复用固定验证与资源查询，未创建事务也能解释；查询不重放、不推进journal，不读取当前文件。
+- 覆盖模型异常、工具异常、基线损坏、覆盖失败、伪造引用、后续执行及关闭重开一致性。
+- 验证：handle/commit/baseline-integrity/recompute/refresh共66项及typecheck通过，git diff --check通过。
+- 剩余不足5分钟未跑全量；下一轮安排补跑，环境缺cc需先补gcc/libc6-dev。
+- M2仍缺句柄冻结类型投影及六场景各10次完整验收；未新增公开入口。
