@@ -1,8 +1,8 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约已冻结，统一公开入口待M2实现；M3/M4未完成。
-- 下一轮先补全量测试；最小切片：strict commit独立key持久绑定/结果查询，收敛重试与未决状态。
-- M2完成标准仍缺：统一句柄、完整explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
+- 下一轮先补全量测试；最小切片：统一commit的工具异常重试语义（底层conflicted与可重试validation_failed尚不一致）。
+- M2完成标准仍缺：统一句柄、完整explain/strict commit、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md冻结六入口状态表、覆盖和六类失败/重试/资源归属；src/world/contract.ts共享非公开契约，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph持久节点、祖先/历史切片/失效闭包；explainRecomputation返回变化源及最短路径，explainCausalRecovery关联checkpoint。
@@ -16,7 +16,7 @@
 - shared refresh冻结checkpoint→探测→解释→共享prepare→独立bind；resume/retry持久repair只续pending，failed按failureSeq显式重试；终态幂等。
 - reserveTransaction登记不是锁；历史关联计划、准备、尝试、事务、checkpoint；带validation的resume核验输出并重放pending heads后绑定。
 - publication提交队列检查coverage、输出指纹、强制重放、实际发布目录只读验收；TX_COMMITTING保存来源指纹，续提交重验；拒绝持久化。
-- WorkspaceCommitReceipt.commitSeq标识domain内TX_COMMITTED；同txId终态重试返回原结果；getWorkspaceCommitResult支持重开/候选删除后查询，尚无独立key。
+- WorkspaceCommitReceipt.commitSeq标识domain内TX_COMMITTED；同txId终态重试返回原结果；getWorkspaceCommitResult支持重开/候选删除后查询，world层已补独立key。
 - cleanup扫描全domain引用；共享/pending/历史/current/committing保留；截止点不是文件锁。fork清理仅登记open/conflicted，保留基线，状态可查。
 - 成本预测/窗口/漂移不再扩展；基准按北极星第5节合并，覆盖前不删样本；benchmark:recovery schemaVersion=6，无真实模型token收益证明。
 - 内部openWorldState持久worldId、覆盖哈希及固定快照，重开核对ref/commit/tree/blob/归属；精确文件覆盖拒绝symlink/目录/忽略漏收，statePath在工作区外。
@@ -46,5 +46,8 @@
 - 本轮M2：changed refresh自动增量；refresh.reusedNodes覆盖无产物节点映射，explain.reuse持久区分实际映射和验证计划。
 - 本轮M2：commitWorldCandidate读取持久候选，复用共享supervisor发布队列/完整重放/OCC/只读业务验收；版本/正文/输出/覆盖检查。
 - WORLD_PUBLICATION_RESULT保存结果；txId成功重试/重开返回原回执，清理失败以持久回执为准；未决保留证据，无自动恢复。
-- 工具异常为validation_failed（底层可能conflicted，须新候选）；unknown不发布；独立key、绑定/close仍缺，入口非公开。
+- 工具异常为validation_failed（底层可能conflicted，须新候选）；unknown不发布；绑定/close仍缺，入口非公开。
 - 验证：新增commit测试9项（含刷新后再次改价10次全部冲突）及pnpm typecheck通过；未跑全量（剩余不足5分钟），下一轮先补。M2未完成。
+- 本轮M2：独立key持久绑定/结果，串行并发重试，冲突返回原身份，终态不重验；新key不能绕过原终态/未决。
+- readWorldPublication固定截止点只读查询，绑定前null、缺结果undetermined，TX_COMMITTED优先；重开身份不变。
+- 本轮验证：commit相关13项及typecheck通过；未跑全量，下一轮先补。M2仍缺统一句柄/绑定/close及完整验收。

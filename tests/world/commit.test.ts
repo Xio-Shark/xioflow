@@ -4,7 +4,7 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, expect, it } from 'vitest';
-import { commitWorldCandidate } from '../../src/world/commit.js';
+import { commitWorldCandidate, readWorldPublication } from '../../src/world/commit.js';
 import { openWorldState } from '../../src/world/state.js';
 import { prepareWorldStep } from '../../src/world/prepare.js';
 import { refreshWorldCandidate } from '../../src/world/refresh.js';
@@ -105,4 +105,65 @@ it('serializes competing candidates so only one publishes', async () => {
   const b = await prepare();
   const results = await Promise.all([commitWorldCandidate(world, a, adapter), commitWorldCandidate(world, b, adapter)]);
   expect(results.map(r => r.status).sort()).toEqual(['committed', 'conflict']);
+});
+
+it('binds independent keys once under concurrent requests and preserves historical queries', async () => {
+  const candidate = await prepare();
+  const before = world.domain.getStore().getJournalEvents('world').at(-1)!.seq;
+  const [first, retry] = await Promise.all([
+    commitWorldCandidate(world, candidate, adapter, { key: 'request-1' }),
+    commitWorldCandidate(world, candidate, adapter, { key: 'request-1' }),
+  ]);
+  expect(first.status).toBe('committed');
+  expect(retry).toEqual(first);
+  expect(first.identity.key).toBe('request-1');
+  expect(readWorldPublication(world, 'request-1', before).result).toBeNull();
+  const saved = readWorldPublication(world, 'request-1');
+  const events = world.domain.getStore().getJournalEvents('world');
+  expect(await commitWorldCandidate(world, candidate, adapter, { key: 'unused' })).toEqual(first);
+  expect(readWorldPublication(world, 'unused').result).toBeNull();
+  expect(await commitWorldCandidate(world, { ...candidate, id: 'other', atSeq: -1 }, adapter,
+    { key: 'request-1' })).toMatchObject({ status: 'key_conflict', identity: first.identity });
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+  const root = world.state.root;
+  world.close();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(readWorldPublication(world, 'request-1', saved.atSeq)).toEqual(saved);
+  expect(await commitWorldCandidate(world, candidate, adapter, { key: 'request-1' })).toEqual(first);
+});
+
+it('does not retry a terminal rejection or allocate a key for an invalid reference', async () => {
+  unknown = true;
+  const candidate = await prepare();
+  const result = await commitWorldCandidate(world, candidate, adapter, { key: 'unknown-key' });
+  expect(result.status).toBe('unknown');
+  const events = world.domain.getStore().getJournalEvents('world');
+  expect(await commitWorldCandidate(world, candidate, { ...adapter,
+    replay: async () => { throw new Error('must not replay'); } }, { key: 'unknown-key' })).toEqual(result);
+  await expect(commitWorldCandidate(world, { ...candidate, atSeq: -1 }, adapter,
+    { key: 'invalid' })).rejects.toThrow('reference mismatch');
+  expect(readWorldPublication(world, 'invalid').result).toBeNull();
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+});
+
+it('retries validation exceptions with the original key and transaction', async () => {
+  const candidate = await prepare();
+  const failed = await commitWorldCandidate(world, candidate, { ...adapter,
+    accept: async () => { throw new Error('temporary acceptance failure'); } }, { key: 'retry' });
+  expect(failed.status).toBe('validation_failed');
+  expect(await commitWorldCandidate(world, candidate, adapter, { key: 'replacement' })).toEqual(failed);
+  expect(readWorldPublication(world, 'replacement').result).toBeNull();
+  const retried = await commitWorldCandidate(world, candidate, adapter, { key: 'retry' });
+  expect(retried).toMatchObject({ status: 'committed', identity: failed.identity });
+});
+
+it('reads a missing world result from the durable transaction receipt at its cutoff', async () => {
+  const candidate = await prepare();
+  const result = await commitWorldCandidate(world, candidate, adapter, { key: 'lost-response' });
+  if (result.status !== 'committed') throw new Error(result.status);
+  const binding = world.domain.getStore().getJournalEvents('world')
+    .find(e => e.type === 'WORLD_PUBLICATION_KEY_BOUND')!;
+  expect(readWorldPublication(world, 'lost-response', binding.seq).result)
+    .toMatchObject({ status: 'undetermined', identity: result.identity });
+  expect(readWorldPublication(world, 'lost-response', result.receipt.commitSeq).result).toEqual(result);
 });

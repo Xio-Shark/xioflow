@@ -712,3 +712,10 @@
 - 保存WORLD_PUBLICATION_RESULT，成功同txId重试/重开返回原回执；工具异常不冒充变化，未决保留证据。
 - 新增9项测试含刷新后再次改价10次全部冲突、两候选竞争、输出篡改/业务拒绝/unknown/工具异常，以及重开回执身份。
 - 相关测试及pnpm typecheck通过；未跑全量（剩余不足5分钟），下一轮先补；独立key、绑定、统一句柄/资源及完整M2验收仍缺。
+
+### 2026-10-09 — M2 durable publication keys
+- strict commit持久绑定独立key、串行协调并发请求，记录原world/candidate/tx/key身份与结果。
+- 终态重试不重验，冲突返回原身份；成功/未决/终态拒绝不能用新key绕过。
+- readWorldPublication只读固定截止点，TX_COMMITTED补足world结果丢失；绑定前null、未决保留身份。
+- 新增并发幂等、重开历史查询、终态拒绝、非法引用、验收异常重试和回执恢复回归。
+- 验证：commit 13项、pnpm typecheck通过；未跑全量，下一轮补。M2尚未完成，工具异常重试/绑定/close仍缺。

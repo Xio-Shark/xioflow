@@ -255,11 +255,16 @@ explainWorldPreparation.reuse 从固定截止点读取实际 matched/incremental
 失败时可能仅有部分映射，不表示候选准备成功；最终状态仍以 refresh.result 为准。
 
 ### 内部 strict publication（M2 部分实现）
-`commitWorldCandidate(world, ref, adapter)` 只消费固定候选记录，忽略调用方改写的 heads、覆盖和输出。
+`commitWorldCandidate(world, ref, adapter, { key })` 只消费固定候选记录，忽略调用方改写的 heads、覆盖和输出。
 它复用事务发布队列、完整观测重放、OCC 与实际发布目录的只读 accept；核验固定版本、持久产物、
 候选输出及发布目录精确覆盖。unknown 不发布，工具异常为 validation_failed，变化为 conflict，
 输出篡改或业务拒绝为 rejected。WORLD_PUBLICATION_RESULT 保存结果，TX_COMMITTED 回执是文件发布事实。
 同 domain 内该入口共用 supervisor 队列；同 txId 成功重试及关闭重开直接读取原回执，候选清理不改变身份。
 已写 TX_COMMITTING 但未有回执的异常返回 undetermined 并保留证据；本层尚未实现自动恢复未决发布。
-这是内部桥接，不是冻结的 WorldHandle.commit 实现：仍缺独立 key、绑定状态及 close 资源报告；
+独立 key 在验证前写入 WORLD_PUBLICATION_KEY_BOUND，同 domain 串行协调绑定和发布；冲突 key
+返回原身份，终态重试不重验，成功候选使用新 key 返回原身份且不绑定新 key。内部省略 key 时使用候选 id。
+WORLD_PUBLICATION_KEY_RESULT 持久保存带 worldId/candidateId/txId/key 的结果；validation_failed 可用原 key 重试。
+`readWorldPublication(world, key, atSeq?)` 固定截止点只读查询；绑定前为 null，绑定后缺结果为 undetermined，
+若截止点内已有 TX_COMMITTED 则直接恢复 committed（即使 world 结果未写入）。查询不依赖候选文件。
+这是内部桥接，不是冻结的 WorldHandle.commit 实现：仍缺 checkpoint 绑定状态及 close 资源报告；
 工具异常可令底层事务终止为 conflicted，重算须准备新候选。不能据此宣称 M2 或崩溃恢复已完成。
