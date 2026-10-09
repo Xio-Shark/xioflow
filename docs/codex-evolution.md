@@ -826,3 +826,10 @@
 - 统一复核北极星第3节证据索引11文件294/294通过（103.43s），typecheck与diff --check通过。
 - M2有界文件世界正确性验收完成；下一轮推进M3报价demo可复现输入/扰动/独立oracle，真实模型及收益仍未验证。
 - 补装gcc/libc6-dev；剩余不足5分钟未跑全量，下轮优先安排（不作开发基线）。
+
+## 2026-10-09 — M3 reproducible quote inputs and independent oracle
+- 按北极星进入M3最小切片：20客户/19SKU确定性输入，独立进程stable/local/all/again扰动CLI。
+- 独立BigInt oracle读取实际输入，固定21份Markdown正文，发布逐字节核验拒绝缺失/过期输出。
+- 验证局部仅两份报价及汇总变化、增加8000分，全量改价、非法整数及超Number安全范围乘法。
+- 相关测试8/8、typecheck通过；全量回归在正式提交后补跑，结果另记。
+- 尚未接world/真实模型、配对运行或成本总账；M3收益门槛未达标，旧基准不删。
