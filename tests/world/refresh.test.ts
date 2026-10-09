@@ -29,7 +29,7 @@ const adapter = { id: 'test', version: '1', declareCoverage: async () => ({
 const agent: WorldAgent = { execute: async ({ record, forkRoot, version, refresh }, input) => {
   calls++;
   expect(input.task).toBe('copy');
-  expect(refresh).toBeNull();
+  if (refresh) expect(refresh.plan.unaffected).toEqual([]);
   const value = await fs.readFile(path.join(forkRoot, 'input'), 'utf8');
   const read = await record({ kind: 'observe', call: { tool: 'read', args: {} }, resultHash: value }, []);
   await fs.writeFile(path.join(forkRoot, 'output'), value);
@@ -78,7 +78,7 @@ it.each([false, true])('refreshes changed=%s and preserves exact read-only histo
   if (changed) await fs.writeFile(path.join(world.state.root, 'input'), 'new price');
   const report = await refreshWorldCandidate(world, { ...previous, heads: [] } as typeof previous,
     adapter, agent, { onUnknown: 'reject' });
-  expect(report.strategy).toBe(changed ? 'full' : 'reuse');
+  expect(report.strategy).toBe(changed ? 'incremental' : 'reuse');
   expect(calls).toBe(changed ? 2 : 1);
   if (report.result.status !== 'prepared') throw new Error(JSON.stringify(report));
   const candidate = report.result.candidate;

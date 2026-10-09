@@ -187,7 +187,7 @@ WORLD_REUSE_PREPARED/FAILED 保存验证引用、新结果及节点映射，关�
 宿主必须完整声明数据、控制及文件副作用依赖，子图才构成独立可重放的分支。
 验证报告持久保存 scope；旧报告缺 scope 时按 prefix 读取。unknown、产物完整性检查及
 只读历史规则不变；无新公开入口、无发布许可。逐节点验证会重复祖先工作，尚无性能收益承诺。
-此计划只描述探测基线；尚未接通实际修复基线上的复用重验、产物物化和增量执行。
+此计划描述探测基线；changed 刷新在同一固定版本上重验复用节点、物化产物并执行增量任务。
 
 内部 `explainWorldPreparation` 将候选、验证报告和完成的 refresh 汇入固定截止点的只读解释。
 只接受准确的 `worldId/id/atSeq`，从 journal 解析候选覆盖、验证原因、变化源和依赖路径；
@@ -206,7 +206,7 @@ validateWorkspaceCausalBranches 与 prepareWorkspaceRepair（含共享分支）�
 可对同一固定版本探测和修复；省略时保持既有当前快照行为。显式快照由调用方拥有，
 验证结束或修复失败均不删除它；修复 journal 保存实际 baseSnapshotId，失败仍回收修复 fork。
 共享快照不豁免 validateReuse、产物物化检查或最终 OCC；当前目录再次改变时不能凭旧探测发布。
-world refresh 尚未自动接入增量修复，changed 仍全量重算；下一步需连接复用节点重验与产物物化。
+world refresh 的 changed 分支自动调用 prepareRepairedWorldCandidate；unknown/recompute 仍使用完整重算。
 
 固定版本的核验也覆盖句柄打开后的使用阶段：`restoreWorldRevision` 统一接受初始
 `WORLD_CREATED` 与后续 `WORLD_VERSION_CREATED`，核对持久身份、覆盖及 Git 对象。
@@ -233,7 +233,7 @@ WORLD_REPAIR_PREPARED 记录验证引用、版本、复用/替换节点、输出
 及混合依赖产物均排除。只在复用重放和源产物核验通过后暴露上下文，各回调获得独立副本。
 原候选元数据不夹带 journal 中的失效正文；WORLD_REPAIR_PREPARED 保存可复用/失效产物 ID。
 本切片仍只返回内部 open 事务；未执行 WorldAgent 或绑定新 checkpoint，未产生新的 WorldCandidate，
-尚未接入 refresh 自动增量路径。工具结果哈希依赖适配器声明，不代替最终 OCC、业务验收或
+自动增量 refresh 使用下述 WorldAgent 准备执行器。工具结果哈希依赖适配器声明，不代替最终 OCC、业务验收或
 独立 oracle；非确定性模型响应只选择持久正文，失效后的模型调用仍须由后续 agent 适配层执行。
 
 未跟踪依赖的工具链保留已记录事件身份：后续观测/写入可引用本步骤中依赖为 null 的事件，
@@ -248,4 +248,8 @@ refresh.previous 与 plan 保持历史身份，reusableArtifacts.dependsOn 映�
 宿主须在返回 artifacts/heads 中显式保留所需复用成果，并记录新工作的依赖；直接引用旧节点拒绝。
 普通 prepareWorldStep 负责覆盖、产物、候选及 AgentRuntime checkpoint 保存；null 依赖返回 unknown。
 新候选支持关闭重开后取回产物和再次验证，WORLD_REUSE_* 记录 incremental 模式及节点映射。
-这是内部准备能力，refresh 协调器尚未自动选择增量路径，未接 strict commit 或保证业务结果完整性。
+refresh 协调器自动选择此增量路径，strategy 为 incremental；仍未接 strict commit 或保证业务结果完整性。
+refresh.reusedNodes 提供全部复用节点的 sourceSeq → replacementSeq 映射（包括无产物节点），
+宿主可据此声明新依赖和 heads；plan 保持源节点身份。底层 prepareWorldRepair 保留原复用节点身份。
+explainWorldPreparation.reuse 从固定截止点读取实际 matched/incremental 模式及已重放节点映射，
+失败时可能仅有部分映射，不表示候选准备成功；最终状态仍以 refresh.result 为准。

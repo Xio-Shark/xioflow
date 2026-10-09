@@ -11,6 +11,7 @@ export interface WorldPreparationExplanation extends Pick<WorldExplanation, 'ref
   /** The plan describes validation.previous, which can differ from candidate after a full refresh. */
   validation: WorldCandidateValidation | null;
   refresh: WorldRefreshReport | null;
+  reuse: { mode: 'matched' | 'incremental'; replacements: { sourceSeq: number; replacementSeq: number }[] } | null;
 }
 
 /** Read a fixed preparation/validation/refresh cutoff without inspecting today's files. */
@@ -55,6 +56,14 @@ export function explainWorldPreparation(world: WorldState, target: WorldRef): Wo
   } else {
     candidate = candidateAt(ref);
   }
-  return structuredClone({ ref, candidate, coverage: candidate.coverage,
+  const reuseEvent = refresh?.validation && store.getJournalEvents(world.domain.domainId).find(e => {
+    if (e.seq > ref.atSeq || !['WORLD_REUSE_PREPARED', 'WORLD_REUSE_UNKNOWN', 'WORLD_REUSE_FAILED'].includes(e.type)) return false;
+    const validationRef = e.payload.validation as WorldRef | undefined;
+    return validationRef?.worldId === refresh!.validation!.worldId
+      && validationRef?.id === refresh!.validation!.id && validationRef?.atSeq === refresh!.validation!.atSeq;
+  });
+  const reuse = reuseEvent ? { mode: reuseEvent.payload.mode,
+    replacements: reuseEvent.payload.replacements } as WorldPreparationExplanation['reuse'] : null;
+  return structuredClone({ ref, candidate, reuse, coverage: candidate.coverage,
     plan: validation?.plan ?? null, validation, refresh });
 }

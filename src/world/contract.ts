@@ -46,6 +46,8 @@ export interface AgentStepContext {
   readonly refresh: {
     readonly previous: WorldCandidate;
     readonly plan: ExplainedRecomputationPlan;
+    /** Verified source-to-current identities, including nodes without artifacts. */
+    readonly reusedNodes: readonly { sourceSeq: number; replacementSeq: number }[];
     readonly reusableArtifacts: readonly WorldArtifact[];
   } | null;
   /** Recording precedes exposure to the model; returns a durable causal node seq. */

@@ -196,3 +196,53 @@ it.each(['exception', 'old_dependency', 'untracked'] as const)('incremental prep
   if (result.status === 'failed') expect(result.reason).toContain(failure === 'exception' ? 'reuse offline' : 'outside this world step');
   await expect(fs.stat(path.join(world.state.root, 'out-b'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
+
+it('refreshes repeatedly using mapped nodes without artifacts and preserves incremental explanations', async () => {
+  const { refreshWorldCandidate, readWorldRefresh } = await import('../../src/world/refresh.js');
+  const { explainWorldPreparation } = await import('../../src/world/explain.js');
+  const initial = await prepareWorldStep(world, { execute: async ({ record, forkRoot, version }) => {
+    const heads: number[] = [];
+    for (const key of ['a', 'b']) {
+      const entry = { kind: 'observe' as const, call: { tool: 'read', args: { key } } };
+      heads.push(await record({ ...entry, resultHash: await adapter.replay(entry, forkRoot) }, []));
+    }
+    return { coverage: { status: 'complete', manifestHash: version.manifestHash }, heads, artifacts: [] };
+  } }, { task: 'observe both' });
+  if (initial.status !== 'prepared') throw new Error(JSON.stringify(initial));
+  let candidate = initial.candidate;
+  let calls = 0;
+  for (const key of ['a', 'b', 'a']) {
+    await fs.writeFile(path.join(world.state.root, key), `updated-${calls}`);
+    const previous = candidate;
+    const report = await refreshWorldCandidate(world, previous, adapter, { execute: async context => {
+      calls++;
+      const refresh = context.refresh!;
+      expect(refresh.reusableArtifacts).toEqual([]);
+      expect(refresh.reusedNodes).toHaveLength(1);
+      const mapping = refresh.reusedNodes[0];
+      expect(previous.heads).toContain(mapping.sourceSeq);
+      expect(previous.heads).not.toContain(mapping.replacementSeq);
+      const entry = { kind: 'observe' as const, call: { tool: 'read', args: { key } } };
+      const head = await context.record({ ...entry, resultHash: await adapter.replay(entry, context.forkRoot) }, []);
+      return { coverage: { status: 'complete', manifestHash: context.version.manifestHash },
+        heads: [head, mapping.replacementSeq], artifacts: [] };
+    } }, { onUnknown: 'reject' });
+    expect(report.strategy).toBe('incremental');
+    if (report.result.status !== 'prepared') throw new Error(JSON.stringify(report));
+    candidate = report.result.candidate;
+    expect((await validateWorldCandidate(world, candidate, adapter, 'selected_nodes')).status).toBe('matched');
+    const explanation = explainWorldPreparation(world, report.ref);
+    expect(explanation.reuse).toMatchObject({ mode: 'incremental', replacements: [
+      { sourceSeq: expect.any(Number), replacementSeq: expect.any(Number) },
+    ] });
+    const events = world.domain.getStore().getJournalEvents('world');
+    const root = world.state.root;
+    world.close();
+    world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+    expect(readWorldRefresh(world, report.ref)).toEqual(report);
+    expect(explainWorldPreparation(world, report.ref)).toEqual(explanation);
+    expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+    await expect(fs.stat(path.join(root, 'out-a'))).rejects.toMatchObject({ code: 'ENOENT' });
+  }
+  expect(calls).toBe(3);
+});

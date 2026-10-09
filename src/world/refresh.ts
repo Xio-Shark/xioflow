@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FileWorldAdapter, PreparationResult, WorldAgent, WorldCandidate, WorldRef } from './contract.js';
 import type { openWorldState } from './state.js';
 import { validateWorldCandidate } from './validation.js';
-import { prepareMatchedWorldCandidate } from './reuse.js';
+import { prepareMatchedWorldCandidate, prepareRepairedWorldCandidate } from './reuse.js';
 import { recomputeWorldCandidate } from './recompute.js';
 
 type WorldState = Awaited<ReturnType<typeof openWorldState>>;
@@ -10,11 +10,11 @@ export interface WorldRefreshReport {
   ref: WorldRef;
   previous: WorldRef;
   validation: WorldRef | null;
-  strategy: 'reuse' | 'reject' | 'full' | 'failed';
+  strategy: 'reuse' | 'incremental' | 'reject' | 'full' | 'failed';
   result: PreparationResult;
 }
 
-/** Internal conservative refresh coordinator. Preparation never grants publication permission. */
+/** Internal refresh coordinator. Preparation never grants publication permission. */
 export async function refreshWorldCandidate(world: WorldState, ref: WorldRef,
   adapter: Pick<FileWorldAdapter, 'id' | 'version' | 'replay'>, agent: WorldAgent,
   options: { onUnknown: 'reject' | 'recompute' }): Promise<WorldRefreshReport> {
@@ -54,13 +54,15 @@ export async function refreshWorldCandidate(world: WorldState, ref: WorldRef,
     } else if (probe.status === 'unknown' && onUnknown === 'reject') {
       strategy = 'reject';
       result = { status: 'unknown', candidate, reasons: probe.reasons };
+    } else if (probe.status === 'changed') {
+      strategy = 'incremental';
+      append('WORLD_REFRESH_RECOMPUTING', { validation, cause: probe.status, strategy });
+      result = await prepareRepairedWorldCandidate(world, probe.ref, adapter, agent);
     } else {
       // Keep the explanation and execution on the same durable baseline.
-      // Incremental reuse still requires separate evidence and output validation.
       strategy = 'full';
       append('WORLD_REFRESH_RECOMPUTING', { validation, cause: probe.status });
-      result = await recomputeWorldCandidate(world, previous, agent,
-        probe.status === 'changed' ? { validation: probe.ref } : {});
+      result = await recomputeWorldCandidate(world, previous, agent);
     }
   } catch (error) {
     strategy = 'failed';

@@ -700,3 +700,9 @@
 - 复用产物依赖映射为本次节点，普通prepareWorldStep保存候选与checkpoint；旧节点拒绝、未跟踪返回unknown。
 - 新增增量输出、上下文/依赖映射、checkpoint、关闭重开验证及工具异常阻断测试；不新增包公开入口，changed自动refresh暂仍全量。
 - repair/step/refresh共57项及typecheck通过；未跑全量（剩余不足5分钟），下一轮先补全量，再接refresh协调与解释；M2未完成。
+
+## 2026-10-09 — M2 自动增量 refresh 收敛
+- changed刷新接入既有prepareRepairedWorldCandidate，固定验证版本、复用重验和checkpoint共用原执行器；unknown仍按策略拒绝/全量。
+- refresh.reusedNodes暴露全部复用节点的新身份，包括无产物节点；解释读取固定截止点的实际模式/映射，不冒充发布。
+- 连续三轮交替扰动与重开验证通过，相关repair/step/refresh共58项及typecheck通过；全量待收尾。
+- M2未完成；下一步接内部strict commit和刷新后再次变化的拒绝发布验收。

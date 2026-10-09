@@ -80,7 +80,9 @@ async function prepareValidatedWorldCandidate(world: Awaited<ReturnType<typeof o
       mapped.set(node.seq, await record(node.observation, remap(node.dependsOn)));
     }
     await checkSource();
-    return refresh ? { ...refresh, reusableArtifacts: refresh.reusableArtifacts.map(artifact =>
+    return refresh ? { ...refresh,
+      reusedNodes: [...mapped].map(([sourceSeq, replacementSeq]) => ({ sourceSeq, replacementSeq })),
+      reusableArtifacts: refresh.reusableArtifacts.map(artifact =>
       ({ ...artifact, dependsOn: remap(artifact.dependsOn) })) } : null;
   });
   store.recordJournalEvent({ domainId: domain.domainId,

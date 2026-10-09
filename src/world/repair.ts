@@ -118,5 +118,6 @@ export function createWorldRepairContext(previous: WorldRef, candidate: WorldCan
     previous: { ...previous, txId: candidate.txId, version: candidate.version,
       heads: candidate.heads, outputFingerprint: candidate.outputFingerprint, coverage: candidate.coverage },
     plan, reusableArtifacts,
+    reusedNodes: plan.unaffected.map(node => ({ sourceSeq: node.seq, replacementSeq: node.seq })),
   };
 }
