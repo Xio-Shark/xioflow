@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "branches": 4,
+  "trials": 3,
+  "modelTokens": null,
+  "scope": "validation only; excludes repair and commit",
+  "environment": {
+    "node": "v22.23.3",
+    "platform": "linux",
+    "arch": "arm64"
+  },
+  "samples": [
+    {
+      "trial": 0,
+      "changed": false,
+      "replayReuse": "none",
+      "success": true,
+      "replayedSteps": 8,
+      "reusedSteps": 0,
+      "elapsedMs": 94.68867499999999
+    },
+    {
+      "trial": 0,
+      "changed": false,
+      "replayReuse": "baseline_observations",
+      "success": true,
+      "replayedSteps": 5,
+      "reusedSteps": 3,
+      "elapsedMs": 89.54849000000002
+    },
+    {
+      "trial": 0,
+      "changed": true,
+      "replayReuse": "none",
+      "success": true,
+      "replayedSteps": 4,
+      "reusedSteps": 0,
+      "elapsedMs": 97.694479
+    },
+    {
+      "trial": 0,
+      "changed": true,
+      "replayReuse": "baseline_observations",
+      "success": true,
+      "replayedSteps": 1,
+      "reusedSteps": 3,
+      "elapsedMs": 95.51666999999998
+    },
+    {
+      "trial": 1,
+      "changed": false,
+      "replayReuse": "baseline_observations",
+      "success": true,
+      "replayedSteps": 5,
+      "reusedSteps": 3,
+      "elapsedMs": 89.30058800000006
+    },
+    {
+      "trial": 1,
+      "changed": false,
+      "replayReuse": "none",
+      "success": true,
+      "replayedSteps": 8,
+      "reusedSteps": 0,
+      "elapsedMs": 91.54333099999997
+    },
+    {
+      "trial": 1,
+      "changed": true,
+      "replayReuse": "baseline_observations",
+      "success": true,
+      "replayedSteps": 1,
+      "reusedSteps": 3,
+      "elapsedMs": 93.24958100000003
+    },
+    {
+      "trial": 1,
+      "changed": true,
+      "replayReuse": "none",
+      "success": true,
+      "replayedSteps": 4,
+      "reusedSteps": 0,
+      "elapsedMs": 99.14148299999988
+    },
+    {
+      "trial": 2,
+      "changed": false,
+      "replayReuse": "none",
+      "success": true,
+      "replayedSteps": 8,
+      "reusedSteps": 0,
+      "elapsedMs": 94.7856069999998
+    },
+    {
+      "trial": 2,
+      "changed": false,
+      "replayReuse": "baseline_observations",
+      "success": true,
+      "replayedSteps": 5,
+      "reusedSteps": 3,
+      "elapsedMs": 97.08402799999999
+    },
+    {
+      "trial": 2,
+      "changed": true,
+      "replayReuse": "none",
+      "success": true,
+      "replayedSteps": 4,
+      "reusedSteps": 0,
+      "elapsedMs": 98.40458799999988
+    },
+    {
+      "trial": 2,
+      "changed": true,
+      "replayReuse": "baseline_observations",
+      "success": true,
+      "replayedSteps": 1,
+      "reusedSteps": 3,
+      "elapsedMs": 82.98230000000012
+    }
+  ]
+}

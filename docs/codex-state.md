@@ -16,7 +16,6 @@
 - preparation 返回 checkpoint / 显式 heads / open workspace；discard 回收失败资源。
 - causal_repaired 原子保存上下文 / heads / workspace；成功后 paused。
 - recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。
-- 入口 src/agents/causal-recovery.ts；文档 docs/causal-recovery-batches.md。
 - prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。
 - branches 为唯一 id / heads；联合视图拓扑执行，返回各分支 sourceHeads / 新 heads。
 - 复用证据统一验证；独立 / 空分支保留，排除未选兄弟；支持连续修复。
@@ -29,19 +28,15 @@
 - compareAgentCheckpoints：跨 agent / 事务 / Run 对比上下文 JSON Pointer 与因果分支。
 - compareAgentCheckpointFiles：重建历史工作区并比较实际文件 A/D/M/T。
 - 共享重建 src/agents/checkpoint-workspace.ts；不创建 agent / 消耗 agent step 预算。
-- 文档 docs/checkpoint-comparison.md；示例 examples/checkpoint-debug/run.mjs。
 - 无文本 patch / 空目录 / 时间戳 / 外部系统 diff；快照覆盖遵循 Git 忽略规则。
 - 宿主保证依赖完整性、确定性和文件效果，哈希匹配不能证明这些声明。
 - 时间旅行是 checkpoint 粒度，不是任意序号回滚，不重放模型或外部系统。
-- 因果基准工具 12→3；合并基准总工具 25→16；均 3/3 正确，另计验证 / 复制。
-- 新增 pnpm benchmark:shared：逐分支独立修复 / 共享祖先修复 / 不校验复用。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。
 - validateWorkspaceCausalBranches：同一当前基线，逐分支独立 fork 重放，自动发现因果修复种子。
 - 返回 matched / changed / failed、首个差异 seq、去重 changed、联合 plan 与实际 replayedSteps。
 - 工具异常不进入 changed；每分支首差即停；验证 fork / 基线回收，不改 checkpoint / 不提交。
 - CAUSAL_VALIDATION_COMPLETED 持久化报告、源分支 heads、基线 SnapshotRef 元数据。
 - listWorkspaceCausalValidations(domain, { runId?, atSeq? }) 支持重开与报告历史切片。
-- 报告 seq 与源图 atSeq 不同；快照已回收，基线身份不承诺可重新物化。
 - prepareWorkspaceCausalRefresh：自动探测→共享修复准备；failed / unchanged 不分配修复。
 - 任一探测失败阻断整批修复；prepared 返回开放事务，由宿主 OCC / 绑定 / 回收。
 - CAUSAL_VALIDATION_REPAIR_PREPARED 关联 validationSeq / txId；关联失败回收修复。
@@ -53,8 +48,13 @@
 - 依已有 validationSeq→txId→TX_COMMITTED 追溯；不分发独立事务、不绑定 checkpoint。
 - 环境需 C 编译器（cc）与 libc 开发包；原生 reaper 测试必须实际构建。
 - pnpm benchmark:refresh：完整重跑 / 自动刷新 / 不校验复用，均使用真实文件工具。
-- 两种发布均强制重放；分别统计生成、探测、复用验证、提交重放和 journal 资源数。
 - 支持零 / 局部 / 全部输入变化；默认生成 8→2，总工具 16→23，耗时约 188→296 ms。
-- 基准两种验证模式均 3/3 正确；modelTokens null；文档 docs/causal-refresh-benchmark.md。
-- 下一步：基于此成本基线减少重复验证；或实现独立输出分发 / checkpoint 发布协调。
-- 最新验证：pnpm typecheck / benchmark:refresh 通过；pnpm test 620 通过 / 7 跳过（104.92 秒）。
+- validate / prepare refresh / refresh 支持 replayReuse: baseline_observations（默认 none）。
+- 单次基线内按节点 seq 复用首次 mutation 前的纯观测；mutation 后不读写缓存。
+- 哈希差异可共享；工具错误不缓存，不同节点不合并；提交仍完整重放。
+- 适配器须纯文件观测、与 fork 路径 / 内存副作用无关；缓存不跨调用或修复。
+- 持久报告新增 replayReuse / reusedSteps；旧 v1 报告查询补 none / 0。
+- pnpm benchmark:probe-reuse：四分支探测 8→5（未变）/ 4→1（变化），12/12 正确。
+- 该基准仅探测，非端到端；原始 JSON docs/benchmarks/causal-probe-reuse.sample.json。
+- 下一步：共享祖先场景接入端到端刷新成本基准；或独立输出 / checkpoint 发布协调。
+- 最新验证：pnpm typecheck / benchmark:probe-reuse 通过；pnpm test 626 通过 / 7 跳过（106.85 秒）。

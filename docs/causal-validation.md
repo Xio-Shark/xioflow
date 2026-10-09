@@ -25,7 +25,7 @@ if (report.changed.length) {
 }
 ```
 
-每条分支返回 `matched`、`changed` 或 `failed`，以及成功匹配的 `matchedSteps`。后两者携带首次停止的因果节点 `seq`；`failed` 还携带错误。成功执行但哈希不一致才加入去重后的 `changed`。工具异常（包括 mutation 无法应用）不冒充世界变化，也不阻止其他分支再验证。`replayedSteps` 统计实际调用次数，包括失败尝试及跨分支重复执行的共享祖先。
+每条分支返回 `matched`、`changed` 或 `failed`，以及成功匹配的 `matchedSteps`。后两者携带首次停止的因果节点 `seq`；`failed` 还携带错误。成功执行但哈希不一致才加入去重后的 `changed`。工具异常（包括 mutation 无法应用）不冒充世界变化，也不阻止其他分支再验证。`replayedSteps` 统计实际调用次数，包括失败尝试；`reusedSteps` 另计跨分支复用次数，默认不复用。
 
 分支在首次变化或错误处立即停止。发生变化的 mutation 可能已经污染自己的 fork，因此所有验证工作区均被丢弃；其他分支从相同不可变基线重新开始，不继承这些效果。成功完成或工具失败后回收临时事务及本次基线；基础设施或清理失败抛出异常。验证不创建替代因果节点、不更新 agent checkpoint、不提交文件。
 
@@ -127,3 +127,25 @@ if (result.status === 'committed') {
 通过已有 `CAUSAL_VALIDATION_REPAIR_PREPARED.validationSeq → txId → TX_COMMITTED / TX_CONFLICTED` 查询探测与发布关系。准备成功不代表已经发布；以事务 journal 为准。提交抛错时可能已经写入 `TX_COMMITTING` 或应用文件，入口保留 fork 与基线并抛出带 txId 的错误：检查 journal，若存在 `TX_COMMITTING` 则通过原提交 API 完成恢复；若尚未开始提交则决定重新验证或中止。不要重新调用整个刷新流程来掩盖未知提交状态。已确定提交结果后的清理错误会明确携带该结果，不能据此假定发布被撤销。
 
 端到端成本可用 `pnpm benchmark:refresh` 复现；分别计入探测、重算、复用验证和提交重放，详见 [验证成本基准](causal-refresh-benchmark.md)。
+
+
+## 同基线观测复用
+
+对纯文件观测适配器，可在上述三个验证 / 刷新入口传入 `replayReuse: 'baseline_observations'`，默认值为 `'none'`。同一次验证内，相同因果节点在多个分支的首次 mutation 之前只实际观测一次，后续分支复用返回的哈希。哈希匹配与不匹配都可共享；工具错误不缓存，其他分支仍独立尝试。不同节点即使工具参数相同也不合并。
+
+```ts
+const report = await validateWorkspaceCausalBranches(supervisor, {
+  txId: 'probe-shared', runId, root, forkPath: '/tmp/xio-probe-shared',
+  atSeq, branches, closedWorld: true, replayPolicy: 'deterministic',
+  replayReuse: 'baseline_observations', replay: adapter.replay,
+});
+console.log({ actualCalls: report.replayedSteps, reusedCalls: report.reusedSteps });
+```
+
+启用即声明：观测是纯函数，只依赖工具参数和传入工作区的文件内容，不依赖 fork 的绝对路径、调用次数、时间或适配器内存；后续工具也不依赖观测回调的内存副作用。现有 closed-world / 确定性声明仍然必需。内核不能证明适配器满足该契约。
+
+任一分支执行过 mutation 后，其后所有观测均实际重放，既不读取也不写入缓存；mutation 本身从不跳过。每个分支仍有独立 fork，缓存只属于本次不可变基线，不跨调用、修复基线或提交复用。报告持久记录 `replayReuse` 和 `reusedSteps`；旧报告查询时补为 `'none'` / `0`。刷新发布仍强制完整重放，复用成功不能替代提交校验。
+
+`pnpm benchmark:probe-reuse [branches] [trials]` 对真实文件的共享读取和独立写入进行探测对照，默认四分支、三轮，轮换策略次序，输出 JSON 原始样本、工具次数、耗时与正确性。无变化时实际工具调用为 8→5，共享输入变化时为 4→1；两种策略都保留独立 fork 成本。此基准仅衡量探测，不包含修复 / 提交，不代表端到端加速或模型 token 收益（`modelTokens: null`）。
+
+本轮[原始样本](benchmarks/causal-probe-reuse.sample.json)共 12 次探测全部正确；无变化中位耗时约 94.69→89.55 ms，输入变化约 98.40→93.25 ms。微小耗时差异受环境影响，工具次数是该固定任务下更稳定的指标。

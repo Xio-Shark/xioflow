@@ -59,6 +59,7 @@
     "benchmark:causal": "pnpm build && node scripts/benchmarks/causal-repair.mjs",
     "benchmark:merge": "pnpm build && node scripts/benchmarks/speculative-merge.mjs",
     "benchmark:shared": "pnpm build && node scripts/benchmarks/shared-repair.mjs",
+    "benchmark:probe-reuse": "pnpm build && node scripts/benchmarks/causal-probe-reuse.mjs",
     "benchmark:refresh": "pnpm build && node scripts/benchmarks/causal-refresh.mjs"
   },
   "devDependencies": {

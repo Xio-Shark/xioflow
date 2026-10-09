@@ -46,6 +46,85 @@ describe('workspace causal validation', () => {
     replay: async (_entry: unknown, dir: string) => fs.readFileSync(path.join(dir, 'input.txt'), 'utf8'),
   });
 
+  it.each(['old', 'new'])('reuses shared baseline evidence for %s inputs and preserves repair plans', async (value) => {
+    const input = graph.record(step('a'));
+    const output = (txId: string) => graph.record({ ...step(txId, [input.seq]), observation: {
+      kind: 'mutate', call: { tool: 'write', args: { path: `${txId}.txt` } }, resultHash: 'ok',
+    } });
+    const branches = [{ id: 'left', heads: [output('a').seq] }, { id: 'right', heads: [output('b').seq] }];
+    fs.writeFileSync(path.join(root, 'input.txt'), value);
+    const replay = vi.fn(async (entry, dir: string) => {
+      if (entry.kind === 'observe') return fs.readFileSync(path.join(dir, 'input.txt'), 'utf8');
+      fs.writeFileSync(path.join(dir, entry.call.args.path), 'output');
+      return 'ok';
+    });
+    const plain = await validateWorkspaceCausalBranches(supervisor, { ...options(branches), replay });
+    replay.mockClear();
+    const reused = await validateWorkspaceCausalBranches(supervisor, { ...options(branches),
+      txId: 'cached', replayReuse: 'baseline_observations', replay });
+    expect(reused.branches).toEqual(plain.branches);
+    expect(reused.plan).toEqual(plain.plan);
+    expect(reused.changed).toEqual(plain.changed);
+    expect(reused.reusedSteps).toBe(1);
+    expect(reused.replayedSteps).toBe(plain.replayedSteps - 1);
+    expect(replay).toHaveBeenCalledTimes(reused.replayedSteps);
+    expect(fs.existsSync(path.join(root, 'a.txt'))).toBe(false);
+    domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal');
+    expect(listWorkspaceCausalValidations(domain).at(-1)).toEqual(reused);
+  });
+
+  it.each([false, true])('never reuses or caches observations after mutations (writer first: %s)', async (writerFirst) => {
+    const mutation = graph.record({ ...step('a'), observation: {
+      kind: 'mutate', call: { tool: 'write', args: {} }, resultHash: 'ok',
+    } });
+    const input = graph.record(step('b'));
+    const branches = [{ id: 'reader', heads: [input.seq] }, { id: 'writer', heads: [mutation.seq, input.seq] }];
+    if (writerFirst) branches.reverse();
+    const result = await validateWorkspaceCausalBranches(supervisor, { ...options(branches),
+      replayReuse: 'baseline_observations', replay: async (entry, dir) => {
+        if (entry.kind === 'mutate') {
+          fs.writeFileSync(path.join(dir, 'input.txt'), 'modified');
+          return 'ok';
+        }
+        return fs.readFileSync(path.join(dir, 'input.txt'), 'utf8');
+      },
+    });
+    expect(result.branches.find(branch => branch.id === 'reader')?.status).toBe('matched');
+    expect(result.branches.find(branch => branch.id === 'writer')?.status).toBe('changed');
+    expect(result).toMatchObject({ replayedSteps: 3, reusedSteps: 0, changed: [input.seq] });
+  });
+
+  it('does not cache tool errors or conflate distinct nodes with identical calls', async () => {
+    const input = graph.record(step('a'));
+    const other = graph.record(step('b'));
+    const replay = vi.fn().mockRejectedValueOnce(new Error('temporary')).mockResolvedValue('old');
+    const result = await validateWorkspaceCausalBranches(supervisor, {
+      ...options([{ id: 'failure', heads: [input.seq] }, { id: 'retry', heads: [input.seq] },
+        { id: 'other', heads: [other.seq] }, { id: 'reuse', heads: [input.seq] }]),
+      replayReuse: 'baseline_observations', replay,
+    });
+    expect(result.branches.map(branch => branch.status)).toEqual(['failed', 'matched', 'matched', 'matched']);
+    expect(result).toMatchObject({ replayedSteps: 3, reusedSteps: 1, changed: [] });
+  });
+
+  it('scopes reused evidence to one baseline and reads legacy reports without reuse fields', async () => {
+    const input = graph.record(step('a'));
+    const settings = { ...options([{ id: 'one', heads: [input.seq] }, { id: 'two', heads: [input.seq] }]),
+      replayReuse: 'baseline_observations' as const };
+    const first = await validateWorkspaceCausalBranches(supervisor, settings);
+    fs.writeFileSync(path.join(root, 'input.txt'), 'new');
+    const second = await validateWorkspaceCausalBranches(supervisor, { ...settings, txId: 'second' });
+    expect(first.changed).toEqual([]);
+    expect(second).toMatchObject({ changed: [input.seq], replayedSteps: 1, reusedSteps: 1 });
+    const { seq: _seq, plan: _plan, replayReuse: _reuse, reusedSteps: _steps, ...legacy } = first;
+    domain.getStore().recordJournalEvent({ domainId: domain.domainId, runId: 'run',
+      type: 'CAUSAL_VALIDATION_COMPLETED', payload: { version: 1, report: legacy }, timestamp: new Date().toISOString() });
+    expect(listWorkspaceCausalValidations(domain).at(-1)).toMatchObject({ replayReuse: 'none', reusedSteps: 0 });
+    await expect(validateWorkspaceCausalBranches(supervisor, { ...settings, replayReuse: 'invalid' as never }))
+      .rejects.toThrow('reuse policy');
+  });
+
   it('detects shared changes, deduplicates seeds and feeds the existing repair executor', async () => {
     const input = graph.record(step('a'));
     const left = graph.record(step('a', [input.seq]));
@@ -240,6 +319,7 @@ describe('workspace causal validation', () => {
       const replayed: string[] = [];
       const settings = {
         ...options(outputs.map((node, i) => ({ id: String(i), heads: [node.seq] }))),
+        replayReuse: 'baseline_observations' as const,
         replay: async (entry: CausalStep['observation'], dir: string) => {
           const file = String(entry.call.args.path);
           replayed.push(file);
@@ -276,6 +356,7 @@ describe('workspace causal validation', () => {
       const result = await refreshWorkspaceCausalBranches(supervisor, settings);
       expect(result.status).toBe(mode === 'stable' ? 'committed' : 'conflict');
       if (result.status !== 'committed' && result.status !== 'conflict') throw new Error('Expected commit outcome');
+      expect(result.validation).toMatchObject({ replayedSteps: 2, reusedSteps: 2 });
       expect(result.repair.reused.map(node => node.seq)).toEqual([reused.seq]);
       expect(fs.existsSync(path.join(temp, 'publish'))).toBe(false);
       expect(domain.getStore().getSnapshot(result.repair.transaction.baseSnapshotId)).toBeNull();

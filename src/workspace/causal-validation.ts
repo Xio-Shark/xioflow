@@ -18,6 +18,8 @@ export interface CausalValidationOptions {
   /** Every selected branch contains its complete, ordered filesystem effects and inputs. */
   closedWorld: true;
   replayPolicy: 'deterministic';
+  /** Opt in only when observations are pure and independent of fork paths / adapter state. */
+  replayReuse?: 'none' | 'baseline_observations';
   replay: ObservationValidation['replay'];
 }
 
@@ -42,6 +44,9 @@ export interface CausalValidationResult {
   changed: number[];
   plan: RecomputationPlan;
   replayedSteps: number;
+  replayReuse: 'none' | 'baseline_observations';
+  /** Successful tool results reused across branches before their first mutation. */
+  reusedSteps: number;
 }
 
 /** Probe each branch on an isolated copy of ONE current-world baseline.
@@ -55,6 +60,10 @@ export async function validateWorkspaceCausalBranches(
   if (options.closedWorld !== true || options.replayPolicy !== 'deterministic') {
     throw new Error('Causal validation requires closed-world deterministic replay');
   }
+  const replayReuse = options.replayReuse ?? 'none';
+  if (replayReuse !== 'none' && replayReuse !== 'baseline_observations') {
+    throw new Error('Invalid causal replay reuse policy');
+  }
   const domain = supervisor.getDomain();
   const graph = new WorkspaceCausalGraph(domain);
   const branches = options.branches.map(({ id, heads }) => ({ id, view: graph.view(heads, options.atSeq) }));
@@ -67,6 +76,10 @@ export async function validateWorkspaceCausalBranches(
   const changed = new Set<number>();
   let baseline: string | undefined;
   let replayedSteps = 0;
+  let reusedSteps = 0;
+  // Node identity, not call equality: distinct evidence is never conflated.
+  // This cache belongs to this baseline only and never survives the invocation.
+  const observed = new Map<number, string>();
   let baselineRef: SnapshotRef | undefined;
   let root = options.root;
   try {
@@ -83,10 +96,22 @@ export async function validateWorkspaceCausalBranches(
           baselineRef = structuredClone(saved);
           root = tx.root;
         }
+        let index = 0;
+        let mutated = false;
         const result = await replayObservationLog({ log: branch.view.nodes.map((node) => node.observation),
           replay: async (entry, root) => {
+            const node = branch.view.nodes[index++];
+            if (entry.kind === 'mutate') mutated = true;
+            const reusable = replayReuse === 'baseline_observations' && !mutated;
+            if (reusable && observed.has(node.seq)) {
+              reusedSteps++;
+              return observed.get(node.seq)!;
+            }
             replayedSteps++;
-            return options.replay(structuredClone(entry), root);
+            const seen = await options.replay(structuredClone(entry), root);
+            // Errors are retried on sibling forks, never cached as evidence.
+            if (reusable && typeof seen === 'string') observed.set(node.seq, seen);
+            return seen;
           },
         }, tx.forkRoot);
         if (result.status === 'matched') {
@@ -111,7 +136,7 @@ export async function validateWorkspaceCausalBranches(
   const report: Omit<CausalValidationResult, 'seq' | 'plan'> = {
     validationId: options.txId, runId: options.runId, root, baseline: baselineRef!,
     sourceBranches: branches.map(({ id, view }) => ({ id, heads: view.heads })),
-    atSeq: options.atSeq, heads, branches: results, changed: seeds, replayedSteps,
+    atSeq: options.atSeq, heads, branches: results, changed: seeds, replayedSteps, replayReuse, reusedSteps,
   };
   const plan = graph.planRecomputation(seeds, options.atSeq, heads);
   const seq = domain.getStore().recordJournalEvent({
@@ -136,6 +161,9 @@ export function listWorkspaceCausalValidations(
     .map((event) => {
       if (event.payload.version !== 1) throw new Error('Unsupported causal validation journal version');
       const report = structuredClone(event.payload.report) as Omit<CausalValidationResult, 'seq' | 'plan'>;
+      // Version 1 reports written before observation reuse had no cost fields for it.
+      report.replayReuse ??= 'none';
+      report.reusedSteps ??= 0;
       return { ...report, seq: event.seq,
         plan: graph.planRecomputation(report.changed, report.atSeq, report.heads) };
     });
