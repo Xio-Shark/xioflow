@@ -112,3 +112,14 @@ snapshot 的 opId 必须属于当前世界，coverage 必须保持创建时的 w
 commitHash 必须存在且与私有 ref 指向的提交一致，避免 materialize 按 ref、restore 按元数据
 读到不同基线。同树不同提交也不替代原提交身份；校验失败释放租约，修复原证据后可以重开。
 下一步连接隔离执行及 AgentRuntime，再收敛 refresh、strict commit、explain 与 close 状态机。
+
+内部 `src/world/step.ts` 的 `executeWorldStep` 现已连接固定世界基线、WorkspaceTransactions
+与 AgentRuntime：每次创建独立 Run/事务/fork，记录输入、工具依赖、宿主响应 checkpoint、
+累计步骤消耗及输出树指纹。返回 `executed` 仅表示执行产物已持久保存，不是草案的
+`prepared`，不证明覆盖完整或允许提交；尚未接入公开 WorldAgent/WorldHandle。
+执行始终使用该句柄的原始快照；当前目录变化留待 refresh 处理。record 先持久化再返回，
+只允许本步骤已有节点作为依赖；null 观测单独保存 WORLD_OBSERVATION_UNTRACKED，
+使最终 checkpoint 的 causalHeads 保持 null，不冒充空依赖。宿主必须把模型响应保存在
+checkpoint，响应本身不会进入工具重放。异常记 WORLD_STEP_FAILED，保留事务/fork 和预算证据，
+不写主目录、不自动重试或清理。重开可读取原 journal 和因果节点；本切片无自动续执行。
+内部调用者须等待执行结束再 close；并发步骤拒绝，句柄级 close 等待与资源报告仍待实现。

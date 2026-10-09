@@ -571,3 +571,10 @@
 - 新增7项损坏/修复测试：提交元数据、私有ref、归属、覆盖模式及缺失blob/子树；拒绝不改journal/主目录，修复后保持原身份重开。
 - 保持内部入口；M2仍缺隔离runAgentStep、refresh/strict commit/explain/close状态机与六类场景各10次验收。
 - 验证：基线828通过/7跳过，世界状态24项与pnpm typecheck通过；最终全量测试运行中。
+
+## 2026-10-09 — M2 隔离执行基础
+- 内部executeWorldStep连接固定世界快照、WorkspaceTransactions与AgentRuntime，持久保存输入、因果观测、响应checkpoint及输出指纹。
+- null观测单独留证并保持未跟踪heads；限制步骤内依赖，阻止执行结束后继续record；异常保留事务/预算证据且不发布。
+- 新增5项测试覆盖隔离与外部扰动、重开身份、null/[]、工具异常后再次执行及伪造heads/迟到回调。
+- 尚未导出公开入口；executed不等同prepared，M2仍缺覆盖/产物适配、refresh/strict commit/explain/close与完整验收。
+- 验证：基线835通过/7跳过，新增5项与pnpm typecheck通过；最终全量结果待更新。

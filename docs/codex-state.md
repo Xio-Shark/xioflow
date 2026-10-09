@@ -2,8 +2,8 @@
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；以 docs/NORTH_STAR.md 为最高方向，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环），尚未完成；M1 的设计交付物已齐备，不代表统一入口已实现。
 - M1：docs/world-contract.md 冻结六入口状态表、适配器覆盖及六类失败/重试/资源归属；spec/world-contract.ts 是非公开类型草案，tests/world-contract.types.ts 随 typecheck 检查。
-- 下一轮最小切片：在内部 openWorldState 基础上接通隔离 runAgentStep，复用 AgentRuntime/WorkspaceTransactions，记录依赖与产物；不再扩成本策略。
-- M2 缺口：统一句柄运行实现、独立key绑定与close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。M3/M4均未完成。
+- 下一轮最小切片：把内部 executeWorldStep 接入 WorldAgent 覆盖/产物声明，形成 prepared/unknown；随后收敛 refresh/strict commit，不扩成本策略。
+- M2 缺口：隔离执行到统一句柄的覆盖/产物适配、refresh/explain/strict commit、独立key绑定与close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。M3/M4均未完成。
 - 基础能力：WorkspaceTransactions 文件读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph 持久节点、祖先/历史切片/失效闭包；explainRecomputation 列变化源与最短依赖路径，explainCausalRecovery关联checkpoint。
 - prepareWorkspaceRepair 拓扑重算与独立结果复用；view(heads)支持连续修复；共享多分支按源seq去重。
@@ -35,4 +35,7 @@
 - 内部 close 仅释放domain，尚无句柄级资源报告；覆盖模式仅Git可表示的模式，不保证完整POSIX权限。
 - 本轮补齐基线一致性：保存的commitHash须与私有ref提交相同（同树不同提交也拒绝）；snapshot.opId绑定worldId，coverage固定为worktree_non_ignored。
 - 损坏元数据、覆盖blob或子树均拒绝重开且不改journal/主目录；恢复原证据后可重开，未新增公开入口。
-- 本轮验证：基线828通过/7跳过；世界状态24项（新增7项）与pnpm typecheck通过；最终全量测试运行中。
+- 内部 executeWorldStep 复用固定基线事务与AgentRuntime，保存输入、工具因果节点、响应checkpoint及输出指纹；仅executed，不声称prepared或可发布。
+- null观测单独保存WORLD_OBSERVATION_UNTRACKED并使checkpoint heads=null；[]保留空依赖。仅接收本步骤节点；执行后record回调失效。
+- 失败持久记录并保留fork/事务/预算，不自动重试；重开可读原journal。内部调用必须等待执行后close，句柄资源状态机尚未接通。
+- 本轮验证：基线835通过/7跳过；新增隔离执行5项与pnpm typecheck通过；最终全量结果待本轮结束更新。
