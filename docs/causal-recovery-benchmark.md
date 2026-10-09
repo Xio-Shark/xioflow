@@ -138,8 +138,7 @@ summary 同时报告恢复绑定、探测和拒绝次数均值。稳定输入下
 则保留先 OCC 拒绝、再刷新全批的流程。最终 `checkpointsCurrent` 检查全批最新状态。
 
 stale 验证保留旧 pending 计划，新刷新不会伪造它完成；直接续跑的拒绝会留下 failed 记录。
-资源保留差异因此属于真实结果，指标之后才清理整个夹具。此基准没有篡改共享输出，
-不能证明磁盘完整性，也不包含模型/token 测量。
+资源保留差异因此属于真实结果，指标之后才清理整个夹具。上述 schemaVersion 4 样本没有篡改共享输出；下节扩展输出故障，也不包含模型/token 测量。
 
 本机各3次重复、4 agent、1000轮哈希，18个SIGKILL样本全部正确；
 [变化输入报告](causal-recovery-validation-changed.sample.json)、[稳定输入报告](causal-recovery-validation-stable.sample.json)。
@@ -154,3 +153,26 @@ stale 验证保留旧 pending 计划，新刷新不会伪造它完成；直接�
 | stable | validated-recovery | 1 | 2 | 120.87 |
 
 均值仅代表此合成负载；验证避免过时绑定，但稳定输入会增加重放成本。
+
+## 进程中断后的共享输出损坏
+
+```sh
+pnpm benchmark:recovery 3 4 1000 stable sigkill stable tampered
+pnpm benchmark:recovery 3 4 1000 stable sigkill stable deleted
+```
+
+第七参数 `recoveryOutput` 为 `stable / tampered / deleted`；显式提供即开启三策略
+pending 对照，可与恢复前输入变化及发布前变化独立组合。故障在 worker 已死亡、domain
+重开后注入，仅改写或删除持久共享事务中的 `derived.txt`，保留已发布的独立工作区。
+
+schemaVersion 5 新增输出验证证据。`validated-recovery` 在观测重放前检查文件树指纹，
+返回 `output_invalid / changed` 后刷新未完成分支；直接续跑在独立事务分配后，
+由宿主读取共享输出并核对因果节点的结果哈希，失败后刷新。三策略都使用这项宿主核对，
+避免把缺少分发校验造成的错误当作性能收益。文件删除是输出树发生变化，区别于旧记录缺少指纹证据。
+
+`recoveryEvidence.outputChecks` 统计当前计划的持久指纹验证事件；`outputSeq / outputStatus /
+outputValidationRecorded` 核对 plan 与 preparation 关联。`distributionOutputChecks` 包含失败的
+输出读取尝试；`prebindValidationMs` 计验证入口到首次 bind 前或拒绝返回的耗时，包含历史查询、
+指纹、可能的观测探测及 journal 写入，**不是纯指纹计算耗时**。恢复总耗时仍包含后续刷新。
+损坏场景中先验证避免一次绑定和输出读取，三策略均需重算两个工具节点；不保证墙钟收益。
+最终成功仍要求历史保留、独立输出正确和（启用 publication 时）强制 OCC 发布正确。

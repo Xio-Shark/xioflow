@@ -28,7 +28,7 @@ it.each(['stable', 'input-changed'] as const)('recovers an actually killed worke
 it.each(['stable', 'input-changed'] as const)('validates pending recovery after SIGKILL before distribution: %s', async recoveryInput => {
   const report = await runCausalRecoveryBenchmark({ trials: 1, branches: 2, hashRounds: 2,
     interruption: 'sigkill', publication: 'input-changed', recoveryInput });
-  expect(report.schemaVersion).toBe(4);
+  expect(report.schemaVersion).toBe(5);
   expect(report.samples).toHaveLength(3);
   for (const sample of report.samples) {
     expect(sample.success).toBe(true);
@@ -46,6 +46,33 @@ it.each(['stable', 'input-changed'] as const)('validates pending recovery after 
       expect(sample.recoveryEvidence.resumeValidationSeq).toBeGreaterThan(0);
       expect(sample.recoveryEvidence.validationRecorded).toBe(true);
       expect(sample.recoveryEvidence.probeCalls).toBe(2);
+    }
+  }
+}, 30_000);
+
+
+it.each(['tampered', 'deleted'] as const)('rejects damaged shared output after SIGKILL: %s', async recoveryOutput => {
+  const report = await runCausalRecoveryBenchmark({ trials: 1, branches: 2, hashRounds: 2,
+    interruption: 'sigkill', publication: 'stable', recoveryOutput });
+  expect(report.recoveryOutput).toBe(recoveryOutput);
+  expect(report.samples).toHaveLength(3);
+  for (const sample of report.samples) {
+    expect(sample.success).toBe(true);
+    expect('processCrash' in sample && sample.processCrash.signal).toBe('SIGKILL');
+    expect(sample.recoveryExecutionToolCalls).toBe(2);
+    expect(sample.recoveryEvidence).toMatchObject({
+      bindingCalls: sample.mode === 'durable-recovery' ? 2 : 1,
+      rejectedBindings: sample.mode === 'durable-recovery' ? 1 : 0,
+      distributionOutputChecks: sample.mode === 'durable-recovery' ? 2 : 1,
+      outputValidationRecorded: true,
+    });
+    expect(sample.publication).toMatchObject({ firstStatus: 'committed', rootCorrect: true,
+      checkpointsCurrent: true, transactionHistoryVerified: true });
+    if (sample.mode === 'validated-recovery') {
+      expect(sample.recoveryEvidence).toMatchObject({ resumeStatus: 'output_invalid',
+        outputStatus: 'changed', outputChecks: 1, resumeValidationSeq: null, probeCalls: 1 });
+      expect(sample.recoveryEvidence.outputSeq).toBeGreaterThan(0);
+      expect(sample.recoveryEvidence.prebindValidationMs).toBeGreaterThan(0);
     }
   }
 }, 30_000);
