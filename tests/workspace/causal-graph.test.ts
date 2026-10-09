@@ -58,6 +58,74 @@ describe('workspace causal history', () => {
     expect(graph.planRecomputation([]).unaffected).toHaveLength(5);
   });
 
+  it('explains every changed cause across agents with deterministic shortest witnesses', () => {
+    const source = graph.record(step('a'));
+    const independent = graph.record(step('b'));
+    const left = graph.record(step('a', [source.seq]));
+    const right = graph.record(step('b', [source.seq]));
+    const join = graph.record(step('b', [right.seq, left.seq]));
+    const shortcut = graph.record(step('a', [join.seq, source.seq]));
+    const changed = [right.seq, source.seq, right.seq];
+    const explained = graph.explainRecomputation(changed);
+    expect(explained.invalidated).toEqual([source, left, right, join, shortcut]);
+    expect(explained.unaffected).toEqual([independent]);
+    expect(explained.explanations).toEqual([
+      { nodeSeq: source.seq, causes: [{ changedSeq: source.seq, path: [source.seq] }] },
+      { nodeSeq: left.seq, causes: [{ changedSeq: source.seq, path: [source.seq, left.seq] }] },
+      { nodeSeq: right.seq, causes: [
+        { changedSeq: source.seq, path: [source.seq, right.seq] },
+        { changedSeq: right.seq, path: [right.seq] },
+      ] },
+      { nodeSeq: join.seq, causes: [
+        { changedSeq: source.seq, path: [source.seq, left.seq, join.seq] },
+        { changedSeq: right.seq, path: [right.seq, join.seq] },
+      ] },
+      { nodeSeq: shortcut.seq, causes: [
+        { changedSeq: source.seq, path: [source.seq, shortcut.seq] },
+        { changedSeq: right.seq, path: [right.seq, join.seq, shortcut.seq] },
+      ] },
+    ]);
+    expect(graph.explainRecomputation([...changed].reverse())).toEqual(explained);
+    for (const { nodeSeq, causes } of explained.explanations) {
+      for (const cause of causes) {
+        expect(cause.path[0]).toBe(cause.changedSeq);
+        expect(cause.path.at(-1)).toBe(nodeSeq);
+        cause.path.slice(1).forEach((seq, index) => {
+          expect(explained.invalidated.find((node) => node.seq === seq)!.dependsOn).toContain(cause.path[index]);
+        });
+      }
+    }
+  });
+
+  it('keeps explanations branch-scoped, historical, detached and read-only after reopening', () => {
+    const source = graph.record(step('a'));
+    const selected = graph.record(step('b', [source.seq]));
+    const sibling = graph.record(step('a', [source.seq]));
+    const later = graph.record(step('b', [selected.seq]));
+    const before = domain.getStore().getJournalEvents(domain.domainId);
+    const explanation = graph.explainRecomputation([source.seq], selected.seq, [selected.seq]);
+    expect(explanation.invalidated).toEqual([source, selected]);
+    expect(explanation.explanations.map((entry) => entry.nodeSeq)).toEqual([source.seq, selected.seq]);
+    expect(graph.explainRecomputation([source.seq], later.seq, [selected.seq])).toEqual(explanation);
+    expect(() => graph.explainRecomputation([sibling.seq], later.seq, [selected.seq])).toThrow('absent');
+    expect(() => graph.explainRecomputation([source.seq], selected.seq, [later.seq])).toThrow('absent');
+    expect(() => graph.explainRecomputation([NaN])).toThrow('absent');
+    expect(() => graph.explainRecomputation([], -1)).toThrow('Invalid');
+    expect(graph.explainRecomputation([], selected.seq)).toEqual({
+      invalidated: [], unaffected: [source, selected], explanations: [],
+    });
+    expect(graph.explainRecomputation([], later.seq, [])).toEqual({ invalidated: [], unaffected: [], explanations: [] });
+    expect(domain.getStore().getJournalEvents(domain.domainId)).toEqual(before);
+    domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal');
+    graph = new WorkspaceCausalGraph(domain);
+    expect(graph.explainRecomputation([source.seq], selected.seq, [selected.seq])).toEqual(explanation);
+    explanation.explanations[0].causes[0].path.push(999);
+    explanation.invalidated[0].dependsOn.push(999);
+    expect(graph.explainRecomputation([source.seq], selected.seq, [selected.seq]).explanations[0].causes[0].path).toEqual([source.seq]);
+    expect(graph.nodes()[0]).toEqual(source);
+  });
+
   it('persists history across domain reopen and adapts to actual observation replay', async () => {
     const entry = graph.record(step('a'));
     domain.close();

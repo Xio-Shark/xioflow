@@ -6,8 +6,7 @@
 - speculateWorkspace：OCC 冲突后最多一次 repair 与再提交。
 - commitPolicy first_valid / all_valid；后者依声明顺序合并 OCC 有效结果。
 - AgentRuntime create / step 原子持久化 causalHeads 与 checkpoint。 heads 引用同 domain 已有节点；null 未跟踪，[] 空分支；checkpoint 历史可查，恢复不回退预算。
-- planCausalRecovery 查询跨 agent 失效；recoverCausalCheckpoint 校验版本、独占绑定宿主重建。
-- causal_repaired 原子保存上下文 / heads / workspace；成功后 paused。
+- planCausalRecovery 查询跨 agent 失效；recoverCausalCheckpoint 校验版本、独占绑定宿主重建。 成功后 causal_repaired 原子保存上下文 / heads / workspace 并 paused。
 - recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。
 - prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。
 - recoverAgentSharedCausalBatch：一次共享重算，逐项绑定独立事务与上下文。
@@ -47,14 +46,15 @@
 - CAUSAL_REFRESH_POLICY_SELECTED 先记意图，关联源 branches / atSeq / probeTxPrefix / repairTxId。
 - 预测不授权复用；直接重算沿用 repair 身份、无 validateReuse；两条发布路径均强制 OCC。
 - 策略入口 CAUSAL_REFRESH_MEASURED 返回 telemetrySeq，关联 decisionSeq / validationSeq。
-- listWorkspaceCausalRefreshTelemetry 支持跨 Run / atSeq / 重开；四类回调分别计次数、异常、耗时。
-- 总耗时含快照/OCC/清理；保留 unchanged/failed/committed/conflict/threw，未知提交查事务journal。
-- 遥测落盘失败报告执行状态，双失败AggregateError；缺失不算零成本；仅覆盖策略入口。
-- 策略可选 taskKey 标记可比较任务；estimateWorkspaceCausalRefreshHistory 按类别跨Run聚合。
-- 固定 trainingAtSeq；训练须决策和遥测均已完成，后续决策为验证集；迟到完成只计训练缺失。
-- 成功探测同时有 changed / unchanged 才输出forecast；failed / missing / recompute独立统计。
-- 单位 callback_duration_ms；验证集报告成本MAE；宿主显式采用并提供同单位costModel，选择偏差仍在。
+- listWorkspaceCausalRefreshTelemetry 跨Run/atSeq/重开；计回调次数/异常/耗时；落盘失败不撤销提交。
+- 策略 taskKey 分类；estimateWorkspaceCausalRefreshHistory 跨Run按类别估计回调毫秒成本。
+- 固定 trainingAtSeq；决策和遥测均完成才入训练，迟到只计缺失；须同时有 changed/unchanged。
+- 后续独立探测计算成本MAE；failed/missing/recompute分开统计，宿主显式采用同单位预测。
+- benchmark:refresh-history：真实journal训练→冻结窗口→独立探测验证→历史/静态策略同扰动对照。
+- 新鲜文件夹具，策略交替顺序；每节点成本仅训练校准；单列训练开销、回调/总耗时与正确性。 强制probe的零预测是控制哨兵；MAE读estimate.evaluation；临时journal序号只在单次报告有效。
 - 历史预测 trainingAfterSeq：按决策序号冻结滑动训练窗口；excludedDecisions 计过时任务。
 - drift：独立验证变化率差值、Brier分数与样本量；单类别仍可统计，不自动改变策略。
-- 下一步：基准固定分布漂移，对照全历史/近期窗口，多重复评估后再接真实模型token。
-- 最新验证：typecheck通过；全量706通过/7跳过；既有暂存基准改动保留。
+- 新增 causal-drift 独立基准：冻结旧/近期窗口，多重复成对对照、Brier/MAE与实测成本；见 docs/causal-drift-benchmark.md。下一步：异质工具成本与双向漂移。
+- explainRecomputation(changed, atSeq?, heads?)：逐失效节点列出所有变化源及各自最短依赖路径。
+- 路径含端点，等长按seq字典序；去重种子、跨agent、历史切片与重开可复现；纯查询不授权复用。见 docs/causal-explanations.md。
+- 最新验证：基线713通过；定向20项、typecheck与最终715项通过（7跳过）；下一步将解释路径接入checkpoint恢复预览。原有暂存基准改动保留。

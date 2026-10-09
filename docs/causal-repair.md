@@ -2,6 +2,8 @@
 
 `prepareWorkspaceRepair` 把 `WorkspaceCausalGraph.planRecomputation` 的失效闭包变成可执行的修复事务。它从**当前主工作区**创建 snapshot / fork，按拓扑顺序执行受影响工具，把下游依赖指向新结果，保留独立节点的历史身份。返回的事务仍然打开，宿主可以检查结果，再用现有 OCC 提交。
 
+修复前可用 [`graph.explainRecomputation`](causal-explanations.md) 查询每个失效节点的变化源和最短依赖路径，解释跨 agent 的重算原因。
+
 适用场景：已有输出已落入主工作区，某个输入发生变化，宿主确定失效种子后，只重算依赖该输入的分支。未提交的投机分支输出不会自动出现在新基线；宿主必须先物化可复用输出，或将相关节点也列为失效种子。
 
 ```ts

@@ -25,6 +25,17 @@ export interface RecomputationPlan {
   unaffected: CausalNode[];
 }
 
+export interface CausalInvalidationCause {
+  changedSeq: number;
+  /** Inclusive seed-to-result path; every adjacent pair is a declared dependency. */
+  path: number[];
+}
+
+export interface ExplainedRecomputationPlan extends RecomputationPlan {
+  /** Journal order; causes are deduplicated and ordered by changedSeq. */
+  explanations: { nodeSeq: number; causes: CausalInvalidationCause[] }[];
+}
+
 export interface CausalView {
   /** Selected results, including independent outputs that should survive repair. */
   heads: number[];
@@ -116,6 +127,49 @@ export class WorkspaceCausalGraph {
       (invalid.has(node.seq) ? invalidated : unaffected).push(node);
     }
     return { invalidated, unaffected };
+  }
+
+  /** Explain each invalidated result with one shortest declared dependency path per seed.
+   * Equal-length paths are visited in ascending journal sequence order.
+   * Pure historical query: this neither detects changes nor validates reuse.
+   */
+  public explainRecomputation(
+    changed: readonly number[], atSeq = Number.MAX_SAFE_INTEGER, heads?: readonly number[],
+  ): ExplainedRecomputationPlan {
+    const plan = this.planRecomputation(changed, atSeq, heads);
+    const explanations = plan.invalidated.map((node) => ({
+      nodeSeq: node.seq, causes: [] as CausalInvalidationCause[],
+    }));
+    const bySeq = new Map(explanations.map((explanation) => [explanation.nodeSeq, explanation]));
+    const children = new Map<number, number[]>();
+    for (const node of plan.invalidated) {
+      for (const dependency of node.dependsOn) {
+        const dependents = children.get(dependency) ?? [];
+        dependents.push(node.seq);
+        children.set(dependency, dependents);
+      }
+    }
+    // BFS stores one predecessor per result, rather than enumerating diamond paths.
+    for (const changedSeq of [...new Set(changed)].sort((a, b) => a - b)) {
+      const parents = new Map<number, number | null>([[changedSeq, null]]);
+      const queue = [changedSeq];
+      for (let index = 0; index < queue.length; index++) {
+        const seq = queue[index];
+        const path: number[] = [];
+        let cursor: number | null = seq;
+        while (cursor !== null) {
+          path.push(cursor);
+          cursor = parents.get(cursor)!;
+        }
+        bySeq.get(seq)!.causes.push({ changedSeq, path: path.reverse() });
+        for (const child of children.get(seq) ?? []) {
+          if (parents.has(child)) continue;
+          parents.set(child, seq);
+          queue.push(child);
+        }
+      }
+    }
+    return { ...plan, explanations };
   }
 
   /** Adapter to existing observation replay. Completeness/closedWorld remains a host assertion. */
