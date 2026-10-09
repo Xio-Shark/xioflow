@@ -578,3 +578,10 @@
 - 新增5项测试覆盖隔离与外部扰动、重开身份、null/[]、工具异常后再次执行及伪造heads/迟到回调。
 - 尚未导出公开入口；executed不等同prepared，M2仍缺覆盖/产物适配、refresh/strict commit/explain/close与完整验收。
 - 验证：基线835通过/7跳过，新增5项与pnpm typecheck通过；最终全量结果待更新。
+
+## 2026-10-09 — M2 WorldAgent 候选准备
+- 内部prepareWorldStep复用隔离执行，将WorldAgent覆盖/产物声明收敛到prepared/unknown候选；共享类型取代两份契约。
+- 覆盖哈希不匹配、未跟踪依赖及heads遗漏返回unknown；伪造依赖与畸形产物声明失败，保留证据且不发布。
+- checkpoint与候选事件保存覆盖/产物引用、固定版本、输出指纹及身份；重开保持原journal。
+- 产物正文仍由宿主保存，未声称内容引用已验真；M2还缺统一句柄、正文恢复、refresh/strict commit/explain/close及完整验收。
+- 验证：基线840通过/7跳过；最终typecheck与全量测试结果待回填。

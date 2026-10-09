@@ -111,7 +111,7 @@ M2 从持久身份与覆盖检查开始（当前进度见下节），随后串�
 snapshot 的 opId 必须属于当前世界，coverage 必须保持创建时的 worktree_non_ignored；保存的
 commitHash 必须存在且与私有 ref 指向的提交一致，避免 materialize 按 ref、restore 按元数据
 读到不同基线。同树不同提交也不替代原提交身份；校验失败释放租约，修复原证据后可以重开。
-下一步连接隔离执行及 AgentRuntime，再收敛 refresh、strict commit、explain 与 close 状态机。
+隔离执行及 AgentRuntime 已接入；下一步收敛 refresh、strict commit、explain 与 close 状态机。
 
 内部 `src/world/step.ts` 的 `executeWorldStep` 现已连接固定世界基线、WorkspaceTransactions
 与 AgentRuntime：每次创建独立 Run/事务/fork，记录输入、工具依赖、宿主响应 checkpoint、
@@ -123,3 +123,14 @@ commitHash 必须存在且与私有 ref 指向的提交一致，避免 materiali
 checkpoint，响应本身不会进入工具重放。异常记 WORLD_STEP_FAILED，保留事务/fork 和预算证据，
 不写主目录、不自动重试或清理。重开可读取原 journal 和因果节点；本切片无自动续执行。
 内部调用者须等待执行结束再 close；并发步骤拒绝，句柄级 close 等待与资源报告仍待实现。
+
+内部 `src/world/prepare.ts` 的 `prepareWorldStep` 现将冻结的 WorldAgent 声明适配到
+executeWorldStep；类型集中在 `src/world/contract.ts`，原 spec 仅重导出，仍无公开入口。
+宿主在固定版本 fork 执行，覆盖声明和产物 id/kind/hash/dependsOn 保存为 checkpoint，
+候选身份、版本、输出指纹及声明另以 WORLD_STEP_PREPARED/WORLD_STEP_UNKNOWN 持久化。
+manifestHash 不匹配、宿主 unknown、null 依赖、产物依赖或 mutation 未包含于 heads 祖先
+均返回 unknown；伪造节点、重复产物 id、空 hash 等格式错误返回 failed，保留执行证据。
+明确的 [] 仍可 prepared；未跟踪的观测序号作为 head 时保留 null，不误报为伪造节点。
+prepared 仅表示声明和隔离产物已准备，不表示通过重放、业务验收或允许发布；本入口不写主目录。
+产物声明是宿主提供的内容引用，当前不读取模型响应正文或验证引用内容的 hash；宿主仍须保存
+响应正文，文件输出由 fork 树指纹固定。内容存储/恢复、refresh、strict commit 和资源报告仍待接通。

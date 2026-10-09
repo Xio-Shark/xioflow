@@ -1,9 +1,9 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；以 docs/NORTH_STAR.md 为最高方向，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环），尚未完成；M1 的设计交付物已齐备，不代表统一入口已实现。
-- M1：docs/world-contract.md 冻结六入口状态表、适配器覆盖及六类失败/重试/资源归属；spec/world-contract.ts 是非公开类型草案，tests/world-contract.types.ts 随 typecheck 检查。
-- 下一轮最小切片：把内部 executeWorldStep 接入 WorldAgent 覆盖/产物声明，形成 prepared/unknown；随后收敛 refresh/strict commit，不扩成本策略。
-- M2 缺口：隔离执行到统一句柄的覆盖/产物适配、refresh/explain/strict commit、独立key绑定与close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。M3/M4均未完成。
+- M1：docs/world-contract.md 冻结六入口状态表、适配器覆盖及六类失败/重试/资源归属；src/world/contract.ts 是共享非公开契约，spec/world-contract.ts 重导出草案，tests/world-contract.types.ts 随 typecheck 检查。
+- 下一轮最小切片：将 prepared/unknown 候选接入既有观测验证/refresh，持久保存刷新关系与未知原因；不扩成本策略。
+- M2 缺口：统一句柄、产物正文存储/恢复、refresh/explain/strict commit、独立key绑定与close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。M3/M4均未完成。
 - 基础能力：WorkspaceTransactions 文件读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph 持久节点、祖先/历史切片/失效闭包；explainRecomputation 列变化源与最短依赖路径，explainCausalRecovery关联checkpoint。
 - prepareWorkspaceRepair 拓扑重算与独立结果复用；view(heads)支持连续修复；共享多分支按源seq去重。
@@ -38,4 +38,7 @@
 - 内部 executeWorldStep 复用固定基线事务与AgentRuntime，保存输入、工具因果节点、响应checkpoint及输出指纹；仅executed，不声称prepared或可发布。
 - null观测单独保存WORLD_OBSERVATION_UNTRACKED并使checkpoint heads=null；[]保留空依赖。仅接收本步骤节点；执行后record回调失效。
 - 失败持久记录并保留fork/事务/预算，不自动重试；重开可读原journal。内部调用必须等待执行后close，句柄资源状态机尚未接通。
-- 本轮验证：基线835通过/7跳过；新增隔离执行5项与pnpm typecheck通过；最终全量结果待本轮结束更新。
+- 内部 prepareWorldStep 复用 executeWorldStep 接入 WorldAgent，固定version/refresh=null；声明保存checkpoint，prepared/unknown候选与产物引用持久留证。
+- 覆盖hash不匹配、null依赖、heads遗漏产物依赖/写节点均unknown；伪造依赖、重复产物id、空hash失败；[]可prepared，不发布。
+- 产物仍是宿主id/hash引用，未存储或读取模型响应正文验证其hash；正文恢复、刷新提交及资源状态机仍属M2缺口。
+- 本轮验证：基线840通过/7跳过；准备层针对性测试通过，最终全量及typecheck结果待回填。

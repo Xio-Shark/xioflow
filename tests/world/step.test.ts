@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { openWorldState } from '../../src/world/state.js';
+import { prepareWorldStep } from '../../src/world/prepare.js';
 import { executeWorldStep } from '../../src/world/step.js';
 import { WorkspaceCausalGraph } from '../../src/workspace/causal-graph.js';
 
@@ -91,4 +92,61 @@ it('rejects invented heads and closes retained record callbacks after execution'
   const before = world.domain.getStore().getJournalEvents('world');
   expect(lateRecord).toThrow('recording is closed');
   expect(world.domain.getStore().getJournalEvents('world')).toEqual(before);
+});
+
+it('prepares WorldAgent declarations and retains identical evidence after reopen', async () => {
+  const result = await prepareWorldStep(world, { execute: async ({ record, forkRoot, version, refresh }) => {
+    expect(refresh).toBeNull();
+    const read = await record({ kind: 'observe', call: { tool: 'read', args: {} }, resultHash: 'original' }, []);
+    await fs.writeFile(path.join(forkRoot, 'output'), 'original');
+    const write = await record({ kind: 'mutate', call: { tool: 'write', args: {} }, resultHash: 'original' }, [read]);
+    return { coverage: { status: 'complete', manifestHash: version.manifestHash }, heads: [write],
+      artifacts: [{ id: 'response', kind: 'model_response', hash: 'saved-response-hash', dependsOn: [read] }] };
+  } }, { task: 'copy' });
+  expect(result.status).toBe('prepared');
+  if (result.status !== 'prepared') throw new Error('not prepared');
+  const events = world.domain.getStore().getJournalEvents('world');
+  expect(events.find(e => e.seq === result.candidate.atSeq)).toMatchObject({ type: 'WORLD_STEP_PREPARED',
+    payload: { id: result.candidate.id, artifacts: [{ id: 'response', hash: 'saved-response-hash' }] } });
+  await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
+  const root = world.state.root;
+  world.close();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+});
+
+it.each(['manifest', 'host', 'heads', 'artifact', 'observation', 'untracked_head', 'omitted', 'mutation'])
+  ('preserves unknown evidence for %s without publishing', async mode => {
+    const result = await prepareWorldStep(world, { execute: async ({ record, version }) => {
+      const node = await record({ kind: mode === 'mutation' ? 'mutate' : 'observe',
+        call: { tool: 'test', args: {} }, resultHash: 'value' }, ['observation', 'untracked_head'].includes(mode) ? null : []);
+      return { coverage: mode === 'host' ? { status: 'unknown', reasons: ['network_read'] }
+        : { status: 'complete', manifestHash: mode === 'manifest' ? 'wrong' : version.manifestHash },
+      heads: mode === 'heads' ? null : mode === 'untracked_head' ? [node] : [], artifacts: [{ id: 'response', kind: 'model_response', hash: 'hash',
+        dependsOn: mode === 'artifact' ? null : mode === 'omitted' ? [node] : [] }] };
+    } }, { task: 'unknown' });
+    expect(result.status).toBe('unknown');
+    if (result.status !== 'unknown') throw new Error('not unknown');
+    expect(result.reasons.length).toBeGreaterThan(0);
+    expect(world.domain.getStore().getJournalEvents('world').find(e => e.seq === result.candidate.atSeq)?.type)
+      .toBe('WORLD_STEP_UNKNOWN');
+    expect(await fs.readFile(path.join(world.state.root, 'input'), 'utf8')).toBe('original');
+  });
+
+it.each(['foreign', 'duplicate', 'empty_hash'])('fails malformed artifact declarations: %s', async mode => {
+  const result = await prepareWorldStep(world, { execute: async ({ version }) => {
+    const artifact = { id: 'response', kind: 'model_response' as const,
+      hash: mode === 'empty_hash' ? '' : 'hash', dependsOn: mode === 'foreign' ? [999999] : [] };
+    return { coverage: { status: 'complete', manifestHash: version.manifestHash }, heads: [],
+      artifacts: mode === 'duplicate' ? [artifact, artifact] : [artifact] };
+  } }, { task: 'invalid' });
+  expect(result.status).toBe('failed');
+  expect(world.domain.getStore().getJournalEvents('world').some(e => e.type === 'WORLD_STEP_PREPARED')).toBe(false);
+});
+
+it('accepts explicitly empty dependencies', async () => {
+  const result = await prepareWorldStep(world, { execute: async ({ version }) => ({
+    coverage: { status: 'complete', manifestHash: version.manifestHash }, heads: [], artifacts: [],
+  }) }, { task: 'no-op' });
+  expect(result).toMatchObject({ status: 'prepared', candidate: { heads: [], coverage: { status: 'complete' } } });
 });
