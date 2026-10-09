@@ -4,6 +4,7 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, expect, it } from 'vitest';
+import { explainWorldPreparation } from '../../src/world/explain.js';
 import { openWorldState } from '../../src/world/state.js';
 import { prepareWorldStep } from '../../src/world/prepare.js';
 import { refreshWorldCandidate, readWorldRefresh } from '../../src/world/refresh.js';
@@ -139,4 +140,66 @@ it('blocks recomputation when an independent tool fails after a changed observat
   expect(calls).toBe(0);
   expect(readWorldRefresh(world, report.ref)).toEqual(report);
   await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it.each([false, true])('explains changed=%s from a frozen cutoff without replay or budget changes', async changed => {
+  const previous = await prepare();
+  if (changed) await fs.writeFile(path.join(world.state.root, 'input'), 'new price');
+  const report = await refreshWorldCandidate(world, previous, adapter, agent, { onUnknown: 'reject' });
+  const explanation = explainWorldPreparation(world, report.ref);
+  expect(explanation.refresh).toEqual(report);
+  expect(explanation.validation?.previous).toEqual({ worldId: previous.worldId, id: previous.id, atSeq: previous.atSeq });
+  expect(explanation.plan?.invalidated.length).toBe(changed ? 2 : 0);
+  if (changed) {
+    const nodes = explanation.plan!.invalidated;
+    expect(explanation.plan!.explanations).toContainEqual({ nodeSeq: nodes[1].seq,
+      causes: [{ changedSeq: nodes[0].seq, path: [nodes[0].seq, nodes[1].seq] }] });
+    expect(explanation.candidate.id).not.toBe(previous.id);
+  }
+  expect(explainWorldPreparation(world, previous).plan).toBeNull();
+  expect(explainWorldPreparation(world, report.validation!).plan).toEqual(explanation.plan);
+  await fs.writeFile(path.join(world.state.root, 'input'), 'later change');
+  await prepare(); // Later independent history must not enter this explanation.
+  const events = world.domain.getStore().getJournalEvents('world');
+  const run = world.domain.getStore().getRun(previous.id);
+  const callCount = calls;
+  const root = world.state.root;
+  world.close();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(explainWorldPreparation(world, report.ref)).toEqual(explanation);
+  const copy = explainWorldPreparation(world, report.ref);
+  copy.plan!.invalidated.length = 0;
+  expect(explainWorldPreparation(world, report.ref)).toEqual(explanation);
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+  expect(world.domain.getStore().getRun(previous.id)).toEqual(run);
+  expect(calls).toBe(callCount);
+  expect(await fs.readFile(path.join(root, 'input'), 'utf8')).toBe('later change');
+  await expect(fs.stat(path.join(root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
+});
+
+it('explains unknown and validation failure without inventing a plan or a successful result', async () => {
+  unknown = true;
+  const previous = await prepare();
+  const rejected = await refreshWorldCandidate(world, previous, adapter, agent, { onUnknown: 'reject' });
+  expect(explainWorldPreparation(world, rejected.ref)).toMatchObject({ plan: null,
+    coverage: { status: 'unknown' }, refresh: { strategy: 'reject' }, validation: { status: 'unknown' } });
+  unknown = false;
+  const tracked = await prepare();
+  const failed = await refreshWorldCandidate(world, tracked,
+    { ...adapter, replay: async () => { throw new Error('offline'); } }, agent, { onUnknown: 'recompute' });
+  expect(explainWorldPreparation(world, failed.ref)).toMatchObject({ candidate: tracked, plan: null,
+    validation: { status: 'failed', reasons: ['offline'] }, refresh: { result: { status: 'failed' } } });
+});
+
+it('rejects foreign, mismatched and unfinished explanation references without advancing history', async () => {
+  const candidate = await prepare();
+  const events = world.domain.getStore().getJournalEvents('world');
+  const started = events.find(event => event.type === 'WORLD_STEP_STARTED')!;
+  for (const ref of [{ ...candidate, worldId: 'foreign' }, { ...candidate, id: 'other' },
+    { ...candidate, atSeq: started.seq }, { ...candidate, atSeq: 999999 }]) {
+    expect(() => explainWorldPreparation(world, ref)).toThrow();
+  }
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+  world.close();
+  expect(() => explainWorldPreparation(world, candidate)).toThrow('World is closed');
 });

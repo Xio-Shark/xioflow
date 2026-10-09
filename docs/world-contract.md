@@ -181,3 +181,13 @@ readWorldRefresh 按固定引用只读查询，关闭重开后不调用模型或
 验证报告持久保存 scope；旧报告缺 scope 时按 prefix 读取。unknown、产物完整性检查及
 只读历史规则不变；无新公开入口、无发布许可。逐节点验证会重复祖先工作，尚无性能收益承诺。
 此计划只描述探测基线；尚未接通实际修复基线上的复用重验、产物物化和增量执行。
+
+内部 `explainWorldPreparation` 将候选、验证报告和完成的 refresh 汇入固定截止点的只读解释。
+只接受准确的 `worldId/id/atSeq`，从 journal 解析候选覆盖、验证原因、变化源和依赖路径；
+不读取当前文件、不调用适配器或模型、不追加事件，返回对象修改不影响历史。
+刷新全量重算后，`candidate` 指向新成果，而 `validation.previous` 明确标识失效计划所属的
+旧成果；`refresh.strategy/result` 说明实际执行路径，`plan.unaffected` 不代表已经增量复用。
+unknown 或验证异常没有计划；失败刷新仍保留旧候选及实际失败结果，不冒充准备成功。
+候选自身截止点早于后续验证，因此直接解释候选时 plan 为 null，不隐式取最新验证。
+该内部视图尚不包含发布、checkpoint 绑定或资源清理事实；完整 WorldExplanation/公开句柄
+仍待这些状态机接入，不把未实现字段填成虚假的成功或资源已回收状态。
