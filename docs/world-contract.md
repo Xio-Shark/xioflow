@@ -161,3 +161,13 @@ fork/快照；异常保留 started/事务证据，尚无自动恢复或统一资
 未知候选可显式重算，但新执行仍必须提供完整依赖和产物证据，否则继续 unknown；宿主异常为 failed。
 准备不发布文件，失败保留 journal、快照及既有执行资源；尚无自动续跑、幂等重算或统一资源回收。
 本入口仍为内部实现，未自动选择策略，未接增量刷新或公开 WorldHandle。
+
+内部 `refreshWorldCandidate` 现将持久探测与全量重算收敛为同一流程：matched 复用原候选，
+unknown 按 onUnknown 返回 unknown 或完整重算；工具异常、产物篡改直接 failed，不自动重试。
+changed 暂时完整重算：首差探测不能证明其余节点有效，接入增量修复前不复用这些节点。
+全量路径仍调用 recomputeWorldCandidate，保持新证据、版本、原 task 和隔离执行规则。
+WORLD_REFRESH_STARTED/RECOMPUTING/FAILED/COMPLETED 保存原引用、验证引用、选择路径和结果；
+readWorldRefresh 按固定引用只读查询，关闭重开后不调用模型或推进 journal。
+此内部流程在 matched 时返回原候选身份，不创建刷新版本，也不授予发布许可；strict commit
+仍须重验，尤其是刷新后再次发生变化时。它尚非公开 WorldHandle 的完整实现，未提供断点续跑、
+幂等刷新或统一资源清理；中断后只有 started 的操作不被当作完成，已有资源保留供后续恢复。

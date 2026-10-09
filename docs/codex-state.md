@@ -1,8 +1,8 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1 契约设计齐备，统一公开入口仍未实现；M3/M4未完成。
-- 下一轮最小切片：把持久探测、显式全量重算及unknown拒绝收敛进内部refresh状态机；changed增量修复须校验首差之外的复用证据。
-- M2 完成标准仍缺：统一句柄、增量refresh与全量重算策略接入、explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
+- 下一轮最小切片：为changed增量refresh补齐首差之外的复用证据校验，再接既有修复准备；保持异常阻断，不扩大公开入口。
+- M2 完成标准仍缺：统一句柄、增量refresh、explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md 冻结六入口状态表、适配器覆盖和六类失败/重试/资源归属；src/world/contract.ts 共享非公开契约，spec重导出，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph持久节点、祖先/历史切片/失效闭包；explainRecomputation返回变化源及最短路径，explainCausalRecovery关联checkpoint。
@@ -42,4 +42,6 @@
 - 本轮recomputeWorldCandidate按持久旧候选/task显式全量重算；捕获当前固定新版本，复用prepareWorldStep，保存旧候选→新结果关系，不复用旧产物。
 - captureWorldRevision复用精确覆盖/快照校验，原句柄基线不变；版本及重算started/completed/failed持久化。unknown重算仍须新证据完整；失败保留资源。
 - 新候选重开后可重验，再次改输入检出changed；尚无自动策略、重算幂等、断点续跑或统一资源清理，不新增公开入口。
-- 本轮验证：基线868通过/7跳过；新增7项、相关31项及pnpm typecheck通过；最终全量复验运行中，提交前回填。
+- 本轮内部refreshWorldCandidate组合validate/recompute：matched复用原身份，unknown拒绝或重算，changed保守全量；工具/产物异常不触发重算。
+- refresh保存原候选、验证引用、路径和结果；readWorldRefresh重开只读查询。仍无增量复用、新matched版本、公开句柄或中断自动续跑。
+- 本轮验证：基线875通过/7跳过；新增9项及pnpm typecheck通过；最终全量复验待完成。
