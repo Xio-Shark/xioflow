@@ -57,4 +57,4 @@
 - 本轮M2：内部openWorld组合runAgentStep/refresh/explain/strict commit/close；同步停止接收并等待全部已接收操作结束后清理，失败操作不阻断关闭。
 - close重复调用返回独立报告；落盘失败可重试close但不恢复接收；refresh传递agent，重开缺驱动仅新推理failed，查询/复用可用。
 - 未公开API；explain组合结构未符合冻结WorldHandle全部类型/失败查询；未发布候选仍保留；初始化中断仍拒绝重开，无自动恢复。
-- 验证：handle/resources共13项及typecheck通过；本轮末尾补跑一次全量，结果待更新。
+- 验证：handle/resources共13项及typecheck通过；全量pnpm test通过：66文件、969测试，1文件/7测试跳过，273.18秒。
