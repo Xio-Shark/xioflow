@@ -1,6 +1,5 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；受监督执行是底座。
-- 分支：codex/evolve；复用 snapshot / fork / rollback、AgentRuntime、journal。
 - WorkspaceTransactions：文件读写集与观测重放 OCC；同基线隔离投机执行。
 - WorkspaceCausalGraph：持久因果节点、上游查询、历史切片、失效闭包。
 - prepareWorkspaceRepair：拓扑重算失效节点、复用独立结果、记录替代关系。
@@ -10,22 +9,19 @@
 - AgentRuntime create / step 原子持久化 causalHeads 与 checkpoint。
 - heads 引用同 domain 已有节点；null 未跟踪，[] 显式空分支。
 - checkpoints / checkpointCausalView 查询历史；restore / recover 不回退预算。
-- planCausalRecovery(changed)：跨 agent 失效与历史候选查询，不证明当前世界有效。
-- recoverCausalCheckpoint：检查 checkpoint 序号、独占恢复、绑定宿主重建结果。
+- planCausalRecovery 查询跨 agent 失效；recoverCausalCheckpoint 校验版本、独占绑定宿主重建。
 - causal_repaired 原子保存上下文 / heads / workspace；成功后 paused。
 - recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。
 - prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。
 - recoverAgentSharedCausalBatch：一次共享重算，逐项绑定独立事务与上下文。
 - 校验分支 id / sourceHeads 与 checkpoint；新 heads 自动绑定，回调收到副本。
-- 单事务单活跃 agent；宿主 bind 负责独立输出分发和上下文重建。
-- 拒绝直接绑定共享事务且不调用其 discard；其他失败回收独立资源。
+- 单事务单活跃 agent；bind 分发独立输出和重建上下文；拒绝绑定或回收共享事务。
 - forkAgentCheckpoint：历史 TX_BEGUN 基线重放，创建同 Run 新 agent，保留累计预算。
 - 要求 deterministic、完整 closedWorld 前缀及逐步哈希；基线缺失失败。
 - compareAgentCheckpoints：跨 agent / 事务 / Run 对比上下文 JSON Pointer 与因果分支。
 - compareAgentCheckpointFiles：重建历史工作区并比较实际文件 A/D/M/T。
 - 共享重建 src/agents/checkpoint-workspace.ts；不创建 agent / 消耗 agent step 预算。
-- 宿主保证依赖完整性、确定性和文件效果，哈希匹配不能证明这些声明。
-- 时间旅行是 checkpoint 粒度，不是任意序号回滚，不重放模型或外部系统。
+- 宿主保证依赖完整、确定性和文件效果；时间旅行仅 checkpoint 粒度，不重放模型/外部系统。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。
 - validateWorkspaceCausalBranches：同一当前基线，逐分支独立 fork 重放，自动发现因果修复种子。
 - 返回 matched / changed / failed、首个差异 seq、去重 changed、联合 plan 与实际 replayedSteps。
@@ -52,9 +48,13 @@
 - recomputeWorkspaceCausalBranches：显式跳过探测，完整重算所选联合祖先并强制 OCC 提交。
 - 共用刷新发布路径；共享节点一次、无复用；返回 preparationSeq / repair / commit，无 validation。
 - CAUSAL_RECOMPUTATION_PREPARED 记录来源与 full 策略；关联失败回收、未知提交保留资源。
-- benchmark:refresh 六模式含 causal-recompute；schemaVersion=3，计数包含探测/复用/提交重放。
-- 新 journal 计数 causalStepsRecorded / validationsCompleted / recomputationsPrepared。
+- benchmark:refresh 六模式 schemaVersion=3；完整阶段成本及因果/验证/重算 journal 计数。
 - 四种共享输入场景各三轮：受验证模式60/60正确，原始样本 causal-recompute.sample.json。
 - 直接重算与手工重跑同为18次调用；局部变化自适应26→18，无变化9→18；无token数据。
-- 下一步：基于变化概率设计探测前策略选择，并用当前六模式基准验证成本与正确性。
-- 最新验证：typecheck / build通过；针对性23项；pnpm test 658通过/7跳过（147.86秒）。
+- refreshWorkspaceCausalBranchesWithPolicy：探测前按宿主概率和条件成本选择 probe / recompute。
+- planWorkspaceCausalRefreshPolicy 纯查询；联合节点去重、持平探测、拒绝非法估算与溢出。
+- CAUSAL_REFRESH_POLICY_SELECTED 先记意图，关联源 branches / atSeq / probeTxPrefix / repairTxId。
+- 预测不授权复用；直接重算沿用 repair 身份、无 validateReuse；两条发布路径均强制 OCC。
+- 概率不自动学习；forecast 与 costModel 同单位，条件刷新成本含复用和完整提交重放。
+- 下一步：六模式基准加入探测前策略、独立预测与失准场景，报告实际总成本和正确性。
+- 最新验证：补齐gcc/libc；typecheck/build通过；pnpm test 670通过/7跳过（127.48秒）。

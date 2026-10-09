@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, validateWorkspaceCausalBranches, prepareWorkspaceBranchRepair, listWorkspaceCausalValidations, prepareWorkspaceCausalRefresh, refreshWorkspaceCausalBranches, recomputeWorkspaceCausalBranches, planWorkspaceCausalRefresh } from '../../src/index.js';
+import { ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, validateWorkspaceCausalBranches, prepareWorkspaceBranchRepair, listWorkspaceCausalValidations, prepareWorkspaceCausalRefresh, refreshWorkspaceCausalBranches, recomputeWorkspaceCausalBranches, planWorkspaceCausalRefresh, refreshWorkspaceCausalBranchesWithPolicy, planWorkspaceCausalRefreshPolicy } from '../../src/index.js';
 import type { CausalStep } from '../../src/index.js';
 
 describe('workspace causal validation', () => {
@@ -45,6 +45,80 @@ describe('workspace causal validation', () => {
     replayPolicy: 'deterministic' as const,
     replay: async (_entry: unknown, dir: string) => fs.readFileSync(path.join(dir, 'input.txt'), 'utf8'),
   });
+
+  it.each([
+    { probability: 0, value: 'old', strategy: 'probe', status: 'unchanged', calls: 1 },
+    { probability: 0, value: 'new', strategy: 'probe', status: 'committed', calls: 2 },
+    { probability: 1, value: 'new', strategy: 'recompute', status: 'committed', calls: 1 },
+    { probability: 1, value: 'old', strategy: 'recompute', status: 'committed', calls: 1 },
+    { probability: 1, value: 'new', strategy: 'recompute', status: 'conflict', calls: 1 },
+  ])('dispatches before probing without trusting forecasts: %j', async (scenario) => {
+    const input = graph.record(step('a'));
+    fs.writeFileSync(path.join(root, 'input.txt'), scenario.value);
+    const replay = vi.fn(async (_entry, dir: string) => fs.readFileSync(path.join(dir, 'input.txt'), 'utf8'));
+    const validateReuse = vi.fn(async () => {});
+    const execute = vi.fn(async (node: CausalStep, tx: { forkRoot: string }) => {
+      const resultHash = fs.readFileSync(path.join(tx.forkRoot, 'input.txt'), 'utf8');
+      if (scenario.status === 'conflict') fs.writeFileSync(path.join(root, 'input.txt'), 'raced');
+      return { actorId: node.actorId, observation: { ...node.observation, resultHash } };
+    });
+    const result = await refreshWorkspaceCausalBranchesWithPolicy(supervisor, {
+      ...options([{ id: 'a', heads: [input.seq] }]), replay,
+      forecast: { changeProbability: scenario.probability, probeUnchanged: 1, probeChanged: 1, refreshChanged: 2 },
+      costModel: () => ({ execute: 1, reuse: 1, replay: 1 }),
+      repair: { txId: 'policy-repair', forkPath: path.join(temp, 'policy-repair'), validateReuse, execute },
+    });
+    expect(result.strategy).toBe(scenario.strategy);
+    expect(result.result.status).toBe(scenario.status);
+    expect(replay).toHaveBeenCalledTimes(scenario.calls);
+    expect(execute).toHaveBeenCalledTimes(scenario.status === 'unchanged' ? 0 : 1);
+    if (result.result.status === 'committed') expect(result.result.commit).toMatchObject({ status: 'committed', validation: 'observations' });
+    if (result.result.status === 'conflict') {
+      expect(result.result.repair.transaction.status).toBe('aborted');
+      expect(fs.existsSync(path.join(temp, 'policy-repair'))).toBe(false);
+    }
+    if (result.strategy === 'recompute') {
+      expect(validateReuse).not.toHaveBeenCalled();
+      expect('validation' in result.result).toBe(false);
+    }
+    domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal');
+    const events = domain.getStore().getJournalEvents(domain.domainId);
+    expect(events.find(event => event.seq === result.decisionSeq)).toMatchObject({
+      type: 'CAUSAL_REFRESH_POLICY_SELECTED', payload: { policy: result.policy,
+        sourceBranches: [{ id: 'a', heads: [input.seq] }], repairTxId: 'policy-repair', probeTxPrefix: 'validate' },
+    });
+    expect(events.filter(event => event.type === 'TX_BEGUN' && event.seq > result.decisionSeq)
+      .map(event => event.payload.txId)).toEqual(scenario.strategy === 'recompute' ? ['policy-repair']
+      : scenario.status === 'unchanged' ? ['validate-0'] : ['validate-0', 'policy-repair']);
+  });
+
+  it('deduplicates cost estimates and preserves probing on expected-cost ties', () => {
+    const node = graph.record(step('a'));
+    const costModel = vi.fn(() => ({ execute: 1, reuse: 1, replay: 1 }));
+    const forecast = { changeProbability: 0.5, probeUnchanged: 1, probeChanged: 1, refreshChanged: 2 };
+    expect(planWorkspaceCausalRefreshPolicy([node, node], forecast, costModel)).toMatchObject({
+      strategy: 'probe', expectedProbeCost: 2, recomputeCost: 2,
+    });
+    expect(costModel).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['probability', 'negative', 'nan', 'overflow', 'cost', 'journal'])(
+    'rejects invalid policy or persistence failure before workspace allocation: %s', async (mode) => {
+      const node = graph.record(step('a'));
+      const forecast = { changeProbability: mode === 'probability' ? 2 : 1,
+        probeUnchanged: mode === 'negative' ? -1 : 1,
+        probeChanged: mode === 'nan' ? NaN : mode === 'overflow' ? Number.MAX_VALUE : 1,
+        refreshChanged: mode === 'overflow' ? Number.MAX_VALUE : 2 };
+      const begin = vi.spyOn(supervisor, 'beginWorkspaceTransaction');
+      if (mode === 'journal') vi.spyOn(domain.getStore(), 'recordJournalEvent').mockImplementation(() => { throw new Error('disk'); });
+      await expect(refreshWorkspaceCausalBranchesWithPolicy(supervisor, {
+        ...options([{ id: 'a', heads: [node.seq] }]), forecast,
+        costModel: () => ({ execute: mode === 'cost' ? Infinity : 1, reuse: 1, replay: 1 }),
+        repair: { txId: 'policy', forkPath: path.join(temp, 'policy'), validateReuse: vi.fn(), execute: vi.fn() },
+      })).rejects.toThrow();
+      expect(begin).not.toHaveBeenCalled();
+    });
 
   it.each(['old', 'new'])('reuses shared baseline evidence for %s inputs and preserves repair plans', async (value) => {
     const input = graph.record(step('a'));

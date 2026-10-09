@@ -195,4 +195,31 @@ console.log(result.status, result.repair.branches);
 
 返回 `committed` / `conflict`、`repair`、`commit` 和持久关联事件的 `preparationSeq`，没有探测报告。即使世界未变化也重算，不能返回 `unchanged`。`CAUSAL_RECOMPUTATION_PREPARED` 记录来源分支、历史序号、策略及事务 ID，可沿 `txId` 查询最终提交状态；修复中的全部种子表示计划重算范围，不是探测出的失效证据。冲突回收资源，未知提交错误保留恢复资源，规则与刷新入口一致。不会更新 agent checkpoint。
 
-这是显式策略入口，尚不自动预测失效率或选择探测前策略；省去探测调用不等于保证端到端提速。
+这是显式策略入口；下方策略包装器可根据宿主预测选择它。省去探测调用不等于保证端到端提速。
+
+## 探测前按预期成本选择执行路径
+
+`refreshWorkspaceCausalBranchesWithPolicy` 在创建工作区前比较探测刷新与直接重算，复用以上两个入口。宿主提供变化概率和条件成本；内核不从历史样本自动学习概率，也不把概率当作观测有效性证据。
+
+```ts
+const outcome = await refreshWorkspaceCausalBranchesWithPolicy(supervisor, {
+  ...refreshOptions,
+  costModel: () => ({ execute: 1, reuse: 1, replay: 1 }),
+  // All costs use tool-call units, calibrated for the selected branches and adapter.
+  forecast: {
+    changeProbability: 0.8, // probability ANY selected branch has changed
+    probeUnchanged: 9,      // total probe cost conditional on no change
+    probeChanged: 6,        // total probe cost conditional on a change
+    refreshChanged: 14,     // remaining repair + reuse validation + commit replay
+  },
+});
+console.log(outcome.policy, outcome.result.status, outcome.decisionSeq);
+```
+
+比较公式为 `(1-p) × probeUnchanged + p × (probeChanged + refreshChanged)` 与选中联合祖先的 `Σ(execute + replay)`；共享节点只计一次，相等时选择探测。概率必须在 `[0,1]`，所有成本必须有限非负，拒绝溢出。条件成本需要计入分支重复探测、首差即停与探测缓存；这里不自动推断这些分布。两边应使用同一单位、同一固定开销口径；需要比较事务固定开销时由宿主分摊到相应估算。
+
+返回 `{ strategy, policy, decisionSeq, result }`：`strategy: 'probe'` 的 `result` 是原刷新结果（可为 `unchanged` / `failed`）；`recompute` 则返回原直接重算结果。直接重算使用 `repair.txId` / `repair.forkPath` / `repair.execute`，不会调用 `validateReuse`；探测路径继续使用 `costModel` 做探测后的增量/完整选择。估算器应稳定、无副作用，允许前后两次估算。
+
+`CAUSAL_REFRESH_POLICY_SELECTED` 在执行前记录预测、选择、源分支、历史序号、探测事务前缀和修复事务 ID。日志写入失败时不会分配工作区。该事件仅证明执行意图，不能证明完成；按事务 ID 关联后续验证、准备和提交事件。失败不自动切换另一条路径，资源回收及未知提交保留规则沿用底层入口。
+
+预测错误可能增加成本，但概率为零仍实际探测，概率为一也仍强制重放提交；不会仅因预测返回 `unchanged` 或跳过 OCC。当前未测量真实模型 token 收益；下一步在六模式基准中增加独立预测与失准场景。
