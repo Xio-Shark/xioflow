@@ -1,8 +1,8 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
-- 下一步最小切片：补 world 统一解释入口累计预算只读断言（getRun 元数据不等于 getRunUsage），按 docs/world-acceptance.md 证据索引复核后再验收 M2。
-- 当前里程碑：M2（单世界正确性闭环）未完成；M1契约冻结，M3/M4待推进。
-- M2完成标准仍缺：world解释累计预算只读直接断言与索引逐项运行复核；六场景各10次已覆盖，统一证据索引见docs/world-acceptance.md。
+- 下一步最小切片：M3报价demo的可复现20客户/SKU输入、扰动与独立整数分oracle，复用统一world句柄和报告口径；先安排补跑全量（不作开发基线）。
+- 当前里程碑：M3（报价demo）待实现；M1契约冻结、M2有界文件世界正确性验收通过，M4待推进。
+- M3完成标准仍缺：真实模型20客户报价、同初始产物公平全量对照、端到端JSON成本总账、局部/无变化/全失效各30对与再次改价10次；真实usage及延迟门槛均未验证。
 - WorkspaceCausalGraph持久节点、祖先/历史切片/失效闭包；explainRecomputation返回变化源及最短路径，explainCausalRecovery关联checkpoint。
 - prepareWorkspaceRepair拓扑重算与独立结果复用；view(heads)连续修复；共享多分支按源seq去重。
 - validateWorkspaceCausalBranches同一基线逐分支隔离重放，首差即停，工具异常不算changed；持久报告可重开查询。
@@ -56,5 +56,5 @@
 - 本轮M2：失败step/refresh/recompute引用可explain，返回阶段/原因、空候选或旧候选、验证与资源；固定截止点只读且重开一致。
 - 本轮M2：新增统一句柄六场景60例，独立BigInt oracle核对发布正文，检查隔离、生成次数、重开固定解释与终态key。
 - 本轮M2：refresh返回WorldRefreshResult.ref，成功/unknown指向完成报告，失败保留原失败ref；explain(refreshed.ref)在发布前给出计划与变化路径。
-- 本轮M2：汇总第3节不变式证据索引；竞争提交改为同基线不同正文，核对仅胜者发布及双方幂等重试。
-- 验证：commit专项22项、pnpm typecheck、git diff --check通过；剩余不足5分钟，未跑全量，下一轮优先安排补跑（不作开发基线）。
+- M2验收：六场景每次explain直接比较原始/刷新Run非零getRunUsage、完整journal、覆盖正文和调用次数；重开预算不变。证据索引11文件统一复核通过，见docs/world-acceptance.md。
+- 验证：M2索引11文件294/294通过（103.43s），pnpm typecheck及git diff --check通过；补装gcc/libc6-dev。剩余不足5分钟未跑全量，下一轮优先安排补跑。

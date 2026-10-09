@@ -3,7 +3,9 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
+import { ExecutionDomain } from '../../src/domain.js';
+import { AgentRuntime } from '../../src/agents/runtime.js';
 import { openWorld } from '../../src/world/handle.js';
 import type { FileWorldAdapter, WorldAgent } from '../../src/world/contract.js';
 
@@ -25,6 +27,27 @@ it.each(cases)('M2 $scenario trial $trial: publication, isolation and frozen his
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'world-acceptance-'));
   const root = path.join(temp, 'repo');
   let world: Awaited<ReturnType<typeof openWorld>> | undefined;
+  // Observe the real domain without exposing storage through the world API.
+  const acquired = vi.spyOn(ExecutionDomain, 'acquire');
+  const runIds = new Set<string>();
+  const audit = async () => {
+    const domain = acquired.mock.results.at(-1)!.value as ExecutionDomain;
+    const runtime = new AgentRuntime(domain, { maxConcurrentAgents: 1,
+      step: async () => { throw new Error('History audit must not execute agents'); } });
+    try {
+      const usage = [...runIds].map(id => runtime.getRunUsage(id));
+      for (const run of usage) expect(run).toMatchObject({ stepsUsed: 1, agentsCreated: 1, pendingCommands: 0 });
+      return { usage, journal: domain.getStore().getJournalEvents('world'),
+        files: await Promise.all(['a', 'b', 'a.out', 'b.out'].map(name => fs.readFile(path.join(root, name), 'utf8'))),
+        generated, replays };
+    } finally { runtime.close(); }
+  };
+  const explain = async (target: Parameters<NonNullable<typeof world>['explain']>[0]) => {
+    const before = await audit();
+    const evidence = await world!.explain(target);
+    expect(await audit()).toEqual(before);
+    return evidence;
+  };
   let offline = false;
   let generated = 0;
   let replays = 0;
@@ -77,14 +100,16 @@ it.each(cases)('M2 $scenario trial $trial: publication, isolation and frozen his
     const initial = await world.runAgentStep(agent, { task: 'double independent inputs' });
     if (initial.status === 'failed') throw new Error(initial.reason);
     expect(initial.status).toBe(untracked ? 'unknown' : 'prepared');
+    runIds.add(initial.candidate.id);
     if (['local', 'all', 'stale'].includes(scenario)) await fs.writeFile(path.join(root, 'a'), String(120 + trial));
     if (scenario === 'all') await fs.writeFile(path.join(root, 'b'), String(240 + trial));
     offline = scenario === 'tool_error';
     const refreshed = await world.refresh(initial.candidate, { onUnknown: 'reject' });
     expect(await outputs(root)).toEqual(['unpublished a', 'unpublished b']);
     expect(generated).toBe(scenario === 'all' ? 4 : ['local', 'stale'].includes(scenario) ? 3 : 2);
+    if (refreshed.status !== 'failed') runIds.add(refreshed.candidate.id);
     const ref = refreshed.ref;
-    const evidence = await world.explain(ref);
+    const evidence = await explain(ref);
     if (scenario === 'tool_error') {
       expect(refreshed.status).toBe('failed');
       expect(evidence.preparation.validation?.status).toBe('failed');
@@ -103,7 +128,7 @@ it.each(cases)('M2 $scenario trial $trial: publication, isolation and frozen his
       }
       if (refreshed.status !== 'prepared') throw new Error('expected preparation');
       expect(ref.atSeq).toBeGreaterThan(refreshed.candidate.atSeq);
-      expect((await world.explain(refreshed.candidate)).plan).toBeNull();
+      expect((await explain(refreshed.candidate)).plan).toBeNull();
     }
     if (scenario === 'stale') await fs.writeFile(path.join(root, 'a'), String(150 + trial));
     expected = await oracle(root);
@@ -112,16 +137,18 @@ it.each(cases)('M2 $scenario trial $trial: publication, isolation and frozen his
     expect(result.status).toBe(untracked ? 'unknown' : offline ? 'validation_failed' : scenario === 'stale' ? 'conflict' : 'committed');
     expect(await outputs(root)).toEqual(result.status === 'committed' ? expected : ['unpublished a', 'unpublished b']);
     expect(await oracle(root)).toEqual(expected);
-    const publication = await world.explain({ identity: result.identity });
+    const publication = await explain({ identity: result.identity });
     if (!untracked && !offline) {
       expect(publication.plan?.invalidated).toHaveLength(scenario === 'stable' ? 0 : scenario === 'all' ? 4 : 2);
     }
     const calls = { generated, replays };
-    expect(await world.explain(ref)).toEqual(evidence);
+    expect(await explain(ref)).toEqual(evidence);
+    const usage = (await audit()).usage;
     await world.close();
     world = await openWorld(options);
-    expect(await world.explain(ref)).toEqual(evidence);
-    expect(await world.explain({ identity: result.identity, atSeq: publication.ref.atSeq })).toEqual(publication);
+    expect((await audit()).usage).toEqual(usage);
+    expect(await explain(ref)).toEqual(evidence);
+    expect(await explain({ identity: result.identity, atSeq: publication.ref.atSeq })).toEqual(publication);
     expect({ generated, replays }).toEqual(calls);
     // Tool errors are retryable, so only terminal results must return without replay.
     if (!offline) {
@@ -130,6 +157,7 @@ it.each(cases)('M2 $scenario trial $trial: publication, isolation and frozen his
     }
     expect(await outputs(root)).toEqual(result.status === 'committed' ? expected : ['unpublished a', 'unpublished b']);
   } finally {
+    acquired.mockRestore();
     await world?.close();
     await fs.rm(temp, { recursive: true, force: true });
   }

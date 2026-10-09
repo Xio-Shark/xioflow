@@ -819,3 +819,10 @@
 - 补强同基线 OCC 竞争：不同正文、仅胜者发布、双方终态重试不增加 journal。
 - 找到剩余验收缺口：world explain 检查 Run 元数据但未直接比较累计预算，M2继续保持未完成。
 - 验证：commit专项22项、pnpm typecheck、git diff --check通过；不足5分钟未跑全量，下一轮优先安排。
+
+### 2026-10-09 — M2 read-only usage acceptance
+- 六场景统一句柄每次explain前后直接比较原始/刷新Run累计预算、完整journal、覆盖文件及agent/工具计数。
+- 预算基线明确非零，关闭重开保持累计usage；不修改生产入口或扩大覆盖承诺。
+- 统一复核北极星第3节证据索引11文件294/294通过（103.43s），typecheck与diff --check通过。
+- M2有界文件世界正确性验收完成；下一轮推进M3报价demo可复现输入/扰动/独立oracle，真实模型及收益仍未验证。
+- 补装gcc/libc6-dev；剩余不足5分钟未跑全量，下轮优先安排（不作开发基线）。
