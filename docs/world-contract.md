@@ -266,7 +266,7 @@ explainWorldPreparation.reuse 从固定截止点读取实际 matched/incremental
 WORLD_PUBLICATION_KEY_RESULT 持久保存带 worldId/candidateId/txId/key 的结果；validation_failed 可用原 key 重试。
 `readWorldPublication(world, key, atSeq?)` 固定截止点只读查询；绑定前为 null，绑定后缺结果为 undetermined，
 若截止点内已有 TX_COMMITTED 则直接恢复 committed（即使 world 结果未写入）。查询不依赖候选文件。
-这是内部桥接，不是冻结的 WorldHandle.commit 实现：仍缺 checkpoint 绑定状态及 close 资源报告；
+这是内部桥接，不是冻结的 WorldHandle.commit 实现：checkpoint 关联见下节，仍缺 close 资源报告；
 strict publication 的工具异常保存 TX_REPLAY_FAILED（失败索引、已匹配步数与错误），清理临时重放 fork/快照，
 底层事务保持 open；原候选原 key 在关闭重开后可重试，重新完整重放并核验所有门禁。
 异常发生在写入一部分之后也不发布临时内容；重试前世界变化仍须判冲突。旧的非 publication 入口保持既有冲突语义。
@@ -281,4 +281,15 @@ strict publication 的工具异常保存 TX_REPLAY_FAILED（失败索引、已�
 绑定后缺结果为 undetermined；TX_COMMITTED 截止点即可报告发布，不依赖后续 world 结果事件。
 刷新候选的提交解释关联其 WORLD_REFRESH_COMPLETED，保留变化路径、实际复用映射和验证基线。
 查询不读取当前工作区、不执行工具、不写 journal 或改变 Run 预算；固定截止点重开结果一致。
-这是内部组合视图，尚未实现 checkpoint 绑定或 close 资源事实，也未新增公开 API。
+这是内部组合视图，checkpoint 关联见下节；尚缺 close 资源事实，也未新增公开 API。
+
+
+### 内部 checkpoint publication binding（M2 部分实现）
+文件发布后，commitWorldCandidate 将候选已有的 AgentRuntime 完成 checkpoint 序号与 commitSeq
+关联为 WORLD_CHECKPOINT_BINDING；核对 Run/事务归属、响应、heads 以及当前 checkpoint 未改变。
+这是内核保存的候选 checkpoint 与发布事实的关联，不调用宿主 checkpoint 存储，也不恢复 AgentRuntime
+到已提交的事务；不会重写 checkpoint 或回退预算。关联失败保存 failed 和原因，文件回执仍为 committed。
+explainWorldPublication.bindings 独立报告 pending/bound/failed；TX_COMMITTED 后尚无绑定记录时为 pending，
+同 key 重试或关闭重开后重试补齐关联，不重放工具、不重新发布；已有 bound/failed 记录保持不变。
+绑定记录落盘抛错会让调用抛错，但 readWorldPublication 仍返回原 committed 身份；宿主可据此重试。
+固定截止点查询不混入后续关联。尚无跨进程故障验收、外部宿主绑定或失败绑定重规划，M2/M4 未完成。

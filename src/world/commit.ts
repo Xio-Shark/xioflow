@@ -1,6 +1,7 @@
 import { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { WorkspaceCausalGraph } from '../workspace/causal-graph.js';
 import { WorkspacePublicationError, type WorkspaceCommitReceipt } from '../workspace/transactions.js';
+import { bindWorldCheckpoint } from './binding.js';
 import { readWorldArtifacts } from './artifacts.js';
 import type { CommitIdentity, FileWorldAdapter, WorldCandidate, WorldRef } from './contract.js';
 import { fingerprintWorldOutput, restoreWorldRevision, type openWorldState } from './state.js';
@@ -143,7 +144,10 @@ export function commitWorldCandidate(world: WorldState, ref: WorldRef,
         || event.payload.worldId !== ref.worldId || event.payload.id !== ref.id) {
       throw new Error('Candidate history reference mismatch');
     }
-    if (prior && !['validation_failed', 'undetermined'].includes(prior.status)) return prior;
+    if (prior && !['validation_failed', 'undetermined'].includes(prior.status)) {
+      if (prior.status === 'committed') bindWorldCheckpoint(world, ref, prior.identity, prior.receipt.commitSeq);
+      return prior;
+    }
     const candidate = event.payload as unknown as WorldCandidate;
     let identity = prior?.identity;
     if (!identity) {
@@ -152,7 +156,10 @@ export function commitWorldCandidate(world: WorldState, ref: WorldRef,
       for (const binding of bindings) {
         const existing = readWorldPublication(world, binding.payload.key as string).result;
         // Keep one recovery identity per candidate; retries use the original key.
-        if (existing) return existing;
+        if (existing) {
+          if (existing.status === 'committed') bindWorldCheckpoint(world, ref, existing.identity, existing.receipt.commitSeq);
+          return existing;
+        }
       }
       identity = { worldId: state.worldId, candidateId: ref.id, txId: candidate.txId, key: options.key };
       store.recordJournalEvent({ domainId: domain.domainId, runId: ref.id, type: 'WORLD_PUBLICATION_KEY_BOUND',
@@ -162,6 +169,7 @@ export function commitWorldCandidate(world: WorldState, ref: WorldRef,
     const result = { ...await publishWorldCandidate(world, ref, adapter), identity };
     store.recordJournalEvent({ domainId: domain.domainId, runId: ref.id, type: 'WORLD_PUBLICATION_KEY_RESULT',
       payload: { worldId: state.worldId, key: identity.key, result }, timestamp: new Date().toISOString() });
+    if (result.status === 'committed') bindWorldCheckpoint(world, ref, identity, result.receipt.commitSeq);
     return result;
   });
   publicationQueues.set(world.domain, operation);

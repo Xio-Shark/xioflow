@@ -3,7 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { commitWorldCandidate, readWorldPublication } from '../../src/world/commit.js';
 import { explainWorldPublication } from '../../src/world/explain.js';
 import { openWorldState } from '../../src/world/state.js';
@@ -240,6 +240,7 @@ it.each([false, true])('explains publication and refresh evidence read-only acro
   expect(pending.publication).toMatchObject({ status: 'undetermined' });
   const saved = explainWorldPublication(world, { identity: result.identity, atSeq: result.receipt.commitSeq });
   expect(saved.publication).toEqual(result);
+  expect(saved.bindings).toMatchObject([{ status: 'pending', commitSeq: result.receipt.commitSeq }]);
   expect(saved.preparation.refresh).toEqual(refresh);
   expect(saved.preparation.reuse?.mode).toBe(changed ? 'incremental' : 'matched');
   expect(saved.preparation.plan).toEqual(before.preparation.plan);
@@ -248,6 +249,7 @@ it.each([false, true])('explains publication and refresh evidence read-only acro
   await fs.writeFile(path.join(root, 'input'), 'later');
   const latest = explainWorldPublication(world, { identity: result.identity });
   expect(latest.ref.atSeq).toBe(events.at(-1)!.seq);
+  expect(latest.bindings).toMatchObject([{ agentId: candidate.id, status: 'bound', commitSeq: result.receipt.commitSeq }]);
   for (const field of ['worldId', 'candidateId', 'txId', 'key'] as const) {
     expect(() => explainWorldPublication(world, { identity: { ...result.identity, [field]: 'forged' } }))
       .toThrow('identity mismatch');
@@ -265,4 +267,54 @@ it.each([false, true])('explains publication and refresh evidence read-only acro
   expect(explainWorldPublication(world, { identity: result.identity, atSeq: saved.ref.atSeq })).toEqual(saved);
   expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
   expect(world.domain.getStore().getRun(candidate.id)).toEqual(run);
+});
+
+
+it('resumes missing checkpoint binding after reopen without republishing or spending budget', async () => {
+  const candidate = await prepare();
+  const store = world.domain.getStore();
+  const record = store.recordJournalEvent.bind(store);
+  const fault = vi.spyOn(store, 'recordJournalEvent').mockImplementation(event => {
+    if (event.type === 'WORLD_CHECKPOINT_BINDING') throw new Error('binding persistence interrupted');
+    return record(event);
+  });
+  await expect(commitWorldCandidate(world, candidate, adapter)).rejects.toThrow('binding persistence interrupted');
+  fault.mockRestore();
+  const published = readWorldPublication(world, candidate.id).result!;
+  expect(published.status).toBe('committed');
+  const pending = explainWorldPublication(world, { identity: published.identity });
+  expect(pending.bindings).toMatchObject([{ status: 'pending' }]);
+  const agentEvents = store.getJournalEvents('world').filter(e => e.type === 'AGENT_STATE');
+  const root = world.state.root;
+  world.close();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(await commitWorldCandidate(world, candidate, { ...adapter,
+    replay: async () => { throw new Error('must not replay'); },
+    accept: async () => { throw new Error('must not accept again'); } })).toEqual(published);
+  expect(explainWorldPublication(world, { identity: published.identity }).bindings).toMatchObject([{ status: 'bound' }]);
+  expect(explainWorldPublication(world, { identity: published.identity, atSeq: pending.ref.atSeq })).toEqual(pending);
+  const events = world.domain.getStore().getJournalEvents('world');
+  expect(events.filter(e => e.type === 'AGENT_STATE')).toEqual(agentEvents);
+  expect(events.filter(e => e.type === 'TX_COMMITTED')).toHaveLength(1);
+  expect(events.filter(e => e.type === 'WORLD_CHECKPOINT_BINDING')).toHaveLength(1);
+  expect(await commitWorldCandidate(world, candidate, adapter)).toEqual(published);
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+});
+
+it('records a changed checkpoint as binding failure while retaining publication and the newer checkpoint', async () => {
+  const candidate = await prepare();
+  const store = world.domain.getStore();
+  const checkpoint = store.getJournalEvents('world').filter(e => e.type === 'AGENT_STATE').at(-1)!;
+  store.recordJournalEvent({ domainId: 'world', runId: candidate.id, type: 'AGENT_STATE',
+    payload: structuredClone(checkpoint.payload), timestamp: new Date().toISOString() });
+  const before = store.getJournalEvents('world').filter(e => e.type === 'AGENT_STATE');
+  const published = await commitWorldCandidate(world, candidate, adapter);
+  expect(published.status).toBe('committed');
+  expect(explainWorldPublication(world, { identity: published.identity }).bindings)
+    .toMatchObject([{ status: 'failed', reason: 'checkpoint_changed', checkpointSeq: checkpoint.seq }]);
+  expect(await fs.readFile(path.join(world.state.root, 'output'), 'utf8')).toBe('original');
+  expect(store.getJournalEvents('world').filter(e => e.type === 'AGENT_STATE')).toEqual(before);
+  const events = store.getJournalEvents('world');
+  expect(await commitWorldCandidate(world, candidate, adapter)).toEqual(published);
+  expect(store.getJournalEvents('world')).toEqual(events);
 });

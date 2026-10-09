@@ -1,8 +1,8 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约已冻结，统一公开入口待M2实现；M3/M4未完成。
-- 下一步最小切片：收敛commit后的checkpoint绑定事实并接入已有只读解释；随后统一句柄/close资源记录。
-- M2完成标准仍缺：统一句柄、完整explain/strict commit、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
+- 下一步最小切片：统一句柄/close资源记录，接通现有准备、刷新、提交和解释；随后补齐M2场景验收。
+- M2完成标准仍缺：统一句柄、close资源事实；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md冻结六入口状态表、覆盖和六类失败/重试/资源归属；src/world/contract.ts共享非公开契约，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph持久节点、祖先/历史切片/失效闭包；explainRecomputation返回变化源及最短路径，explainCausalRecovery关联checkpoint。
@@ -50,9 +50,11 @@
 - 验证：新增commit测试9项（含刷新后再次改价10次全部冲突）及pnpm typecheck通过；本轮全量已补跑通过。M2未完成。
 - 本轮M2：独立key持久绑定/结果，串行并发重试，冲突返回原身份，终态不重验；新key不能绕过原终态/未决。
 - readWorldPublication固定截止点只读查询，绑定前null、缺结果undetermined，TX_COMMITTED优先；重开身份不变。
-- 本轮验证：commit相关13项及typecheck通过；本轮全量已补跑通过。M2仍缺统一句柄/绑定/close及完整验收。
 - 本轮M2：strict publication记录TX_REPLAY_FAILED及步骤/错误，清理临时重放资源；异常不再终止为conflicted，重开后原身份重试全部门禁。
 - 验证：观测/部分写入异常各10次跨重开重试、异常后改文件冲突；相关43项及typecheck通过。全量已于本轮补跑通过。
 - 本轮M2：explainWorldPublication组合准备/刷新与发布事实，身份四字段核验，固定截止点保留变化路径、复用映射和原回执。
 - 绑定前身份查询拒绝；准备引用可查null，绑定后无结果undetermined，TX_COMMITTED立即可查；不读当前文件、不改变journal/预算。
-- 本轮验证：相关38项及typecheck通过；全量953通过、7跳过（64文件通过、1跳过，272.13秒）。M2仍缺checkpoint绑定、资源事实、统一句柄及完整验收。
+- 本轮M2：文件发布后持久关联候选完成checkpoint与commitSeq，核对归属/响应/heads及当前checkpoint；失败独立记录，不改原回执。
+- explain.bindings在固定截止点报告pending/bound/failed；重开原key补齐缺失记录，不重放/重复发布或回退预算；已记录结果幂等。
+- 绑定仅关联内核候选checkpoint，未接外部宿主存储；落盘异常可查原发布身份后重试，失败绑定暂无重规划。
+- 本轮验证：commit相关20项及typecheck通过；未跑全量，下一轮第一件事补跑。

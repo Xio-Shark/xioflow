@@ -1,3 +1,4 @@
+import { readWorldCheckpointBinding, type WorldCheckpointBinding } from './binding.js';
 import type { CommitIdentity, WorldCandidate, WorldExplanation, WorldRef } from './contract.js';
 import { readWorldPublication, type KeyedWorldPublication } from './commit.js';
 import type { openWorldState } from './state.js';
@@ -6,11 +7,12 @@ import { readWorldRefresh, type WorldRefreshReport } from './refresh.js';
 
 type WorldState = Awaited<ReturnType<typeof openWorldState>>;
 
-/** Internal evidence view; checkpoint binding and resource disposition remain separate work. */
+/** Internal evidence view; resource disposition remains separate work. */
 export interface WorldPublicationExplanation {
   ref: WorldRef;
   preparation: WorldPreparationExplanation;
   publication: KeyedWorldPublication | null;
+  bindings: WorldCheckpointBinding[];
 }
 
 /** Resolve publication and its preparation from one immutable journal prefix. */
@@ -49,7 +51,8 @@ export function explainWorldPublication(world: WorldState,
   }
   const preparation = explainWorldPreparation(world, preparationRef);
   return structuredClone({ ref: { worldId: world.state.worldId, id: preparation.candidate.id, atSeq: cutoff },
-    preparation, publication });
+    preparation, publication, bindings: publication?.status === 'committed'
+      ? [readWorldCheckpointBinding(world, publication.identity, publication.receipt.commitSeq, cutoff)] : [] });
 }
 
 /** Preparation evidence only; publication, binding and cleanup are not yet integrated. */

@@ -732,3 +732,11 @@
 - 无变化/局部变化回归验证文件、journal、Run预算不变，历史与身份跨重开稳定，拒绝伪造身份。
 - 验证：commit/refresh相关38项及pnpm typecheck通过；全量953通过、7跳过（64文件通过、1跳过，272.13秒）。
 - M2仍缺checkpoint绑定、资源事实、统一句柄和完整验收；未新增公开API。
+
+### 2026-10-09 — M2 publication checkpoint association
+- 提交后关联已有完成 checkpoint 与 commitSeq，核验归属、响应、heads 和当前 checkpoint。
+- WORLD_CHECKPOINT_BINDING 独立保存 bound/failed；解释固定截止点报告 pending/bound/failed。
+- 原 key 重试补齐中断关联，已绑定幂等；不重复发布、不恢复事务或回退预算。
+- 新增落盘中断跨重开重试、checkpoint 变化失败测试，扩展刷新解释的历史状态断言。
+- 验证：commit 20项和 pnpm typecheck 通过；未跑全量，下一轮先补跑。
+- M2 仍缺统一句柄、close 资源事实和完整场景验收；无外部宿主绑定/失败重规划承诺。
