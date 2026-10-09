@@ -1,3 +1,4 @@
+import type { ProcessSupervisor } from '../supervisor/supervisor.js';
 import type { ExecutionDomain } from '../domain.js';
 import type { AgentState } from './runtime.js';
 import { isAgentCheckpoint } from './journal.js';
@@ -58,6 +59,8 @@ export interface AgentCausalResourceReview {
   references: AgentCheckpointWorkspaceReference[];
   disposition: 'retain' | 'review';
   reasons: AgentCausalResourceRetentionReason[];
+  /** Fork-only review; baseline snapshots are never released by this API. */
+  fork?: { disposition: 'retain' | 'review'; reasons: AgentCausalResourceRetentionReason[] };
 }
 
 /** Freeze a review plan, never a deletion authorization. Scope filters select owners;
@@ -111,7 +114,37 @@ export function planAgentCausalResourceCleanup(
       resource.reasons.push('pending_publication');
     }
   }
-  return { atSeq, resources: [...resources.values()].map(resource => ({ ...resource,
-    disposition: resource.reasons.length ? 'retain' : 'review', reasons: [...new Set(resource.reasons)],
-  })) };
+  return { atSeq, resources: [...resources.values()].map(resource => {
+    const reasons = [...new Set(resource.reasons)];
+    const forkReasons = reasons.filter(reason => reason !== 'historical_checkpoint' && reason !== 'referenced_baseline');
+    return { ...resource, disposition: reasons.length ? 'retain' as const : 'review' as const, reasons,
+      ...(resource.forkRoot ? { fork: { disposition: forkReasons.length ? 'retain' as const : 'review' as const,
+        reasons: forkReasons } } : {}),
+    };
+  }) };
+}
+
+/** Explicit host reconciliation: call while workspace writers and agent publication are quiescent.
+ * The cutoff is an optimistic preflight, not a lock over asynchronous filesystem operations.
+ * Only registered open/conflicted forks are released; historical baseline snapshots survive.
+ */
+export async function cleanupAgentCausalFork(
+  supervisor: ProcessSupervisor, options: { txId: string; atSeq: number },
+): Promise<{ txId: string; requestSeq: number }> {
+  const domain = supervisor.getDomain();
+  const plan = planAgentCausalResourceCleanup(domain);
+  if (!Number.isSafeInteger(options.atSeq) || options.atSeq < 0) throw new Error('Invalid cleanup sequence');
+  if (plan.atSeq !== options.atSeq) throw new Error('Causal resource cleanup evidence is stale; replan');
+  const resource = plan.resources.find(entry => entry.txId === options.txId);
+  if (!resource) throw new Error('Unknown registered causal resource');
+  if (resource.fork?.disposition !== 'review') throw new Error('Causal workspace fork must be retained');
+  if (resource.state !== 'open' && resource.state !== 'conflicted') {
+    throw new Error('Causal workspace fork requires an open or conflicted transaction');
+  }
+  const requestSeq = domain.getStore().recordJournalEvent({ domainId: domain.domainId,
+    type: 'AGENT_CAUSAL_FORK_CLEANUP_REQUESTED', timestamp: new Date().toISOString(),
+    payload: { txId: resource.txId, atSeq: plan.atSeq, forkRoot: resource.forkRoot,
+      baseSnapshotId: resource.baseSnapshotId, preserveBaseline: true } });
+  await supervisor.abortWorkspaceTransaction(resource.txId, `causal fork cleanup request ${requestSeq}`);
+  return { txId: resource.txId, requestSeq };
 }

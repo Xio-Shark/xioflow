@@ -12,7 +12,7 @@ xioflow 的目标是让多个 agent 在同一个不断变化的世界中投机�
 
 `planAgentCausalResourceCleanup` 将中断绑定的事务归属与当前、历史 checkpoint 及跨 Run
 共享基线引用接通，输出带 journal 截止点的资源保留和人工核对预览；保护时间旅行依据，
-不自动删除资源。见[历史资源预览](causal-recovery-batches.md#历史工作区引用与回收预览)。
+`cleanupAgentCausalFork` 在宿主核对后按冻结证据回收可释放 fork，保留时间旅行基线。见[历史资源预览](causal-recovery-batches.md#历史工作区引用与回收预览)。
 
 ## 核心抽象
 

@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCheckpointWorkspaceReferences, planAgentCausalResourceCleanup, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, retryAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCheckpointWorkspaceReferences, planAgentCausalResourceCleanup, cleanupAgentCausalFork, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, retryAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace, AgentSharedCausalRecoveryOptions } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -243,6 +243,11 @@ describe('agent checkpoint causal branches', () => {
     if (mode !== 'reservation_failed') expect(resourcePlan.resources.find(entry => entry.txId === 'second-bound'))
       .toMatchObject({ disposition: 'retain', reasons: ['pending_publication'] });
     expect(planAgentCausalResourceCleanup(domain, { runId: 'other' }).resources).toEqual([]);
+    if (mode === 'allocated') {
+      await expect(cleanupAgentCausalFork(supervisor, { txId: 'shared', atSeq: resourcePlan.atSeq })).rejects.toThrow('retained');
+      await expect(cleanupAgentCausalFork(supervisor, { txId: 'first-bound', atSeq: resourcePlan.atSeq })).rejects.toThrow('retained');
+      await expect(cleanupAgentCausalFork(supervisor, { txId: 'second-bound', atSeq: resourcePlan.atSeq })).rejects.toThrow('retained');
+    }
     expect(attempts).toHaveLength(2);
     expect(attempts[0].reservations[0]).toMatchObject({ txId: 'first-bound', state: 'open', referencedBy: ['first'] });
     if (mode === 'reservation_failed') {
@@ -307,7 +312,30 @@ describe('agent checkpoint causal branches', () => {
         .resources.find(entry => entry.txId === 'second-bound')!;
       expect(protectedResource).toMatchObject({ disposition: 'retain', reasons: ['referenced_baseline'] });
       expect(protectedResource.references).toMatchObject([{ agentId: 'external', runId: 'other', txId: 'external' }]);
-      await new ProcessSupervisor(domain).abortWorkspaceTransaction('second-bound', 'reconciled orphan');
+      expect(protectedResource.fork).toEqual({ disposition: 'review', reasons: [] });
+      await expect(cleanupAgentCausalFork(new ProcessSupervisor(domain), {
+        txId: 'second-bound', atSeq: resourcePlan.atSeq,
+      })).rejects.toThrow('stale');
+      const cleanupPlan = planAgentCausalResourceCleanup(domain);
+      const recordCleanup = domain.getStore().recordJournalEvent.bind(domain.getStore());
+      vi.spyOn(domain.getStore(), 'recordJournalEvent').mockImplementation(event => {
+        if (event.type === 'AGENT_CAUSAL_FORK_CLEANUP_REQUESTED') throw new Error('cleanup journal unavailable');
+        return recordCleanup(event);
+      });
+      await expect(cleanupAgentCausalFork(new ProcessSupervisor(domain), {
+        txId: 'second-bound', atSeq: cleanupPlan.atSeq,
+      })).rejects.toThrow('cleanup journal unavailable');
+      expect(fs.existsSync(path.join(temp, 'second-bound'))).toBe(true);
+      vi.restoreAllMocks();
+      const cleaned = await cleanupAgentCausalFork(new ProcessSupervisor(domain), {
+        txId: 'second-bound', atSeq: cleanupPlan.atSeq,
+      });
+      expect(fs.existsSync(path.join(temp, 'second-bound'))).toBe(false);
+      expect(domain.getStore().getJournalEvents(domain.domainId).find(event => event.seq === cleaned.requestSeq))
+        .toMatchObject({ type: 'AGENT_CAUSAL_FORK_CLEANUP_REQUESTED', payload: { preserveBaseline: true } });
+      await expect(cleanupAgentCausalFork(new ProcessSupervisor(domain), {
+        txId: 'second-bound', atSeq: planAgentCausalResourceCleanup(domain).atSeq,
+      })).rejects.toThrow('open or conflicted');
       expect(listAgentCausalBindingAttempts(domain)[1].reservations[0].state).toBe('aborted');
       expect(listAgentCausalBindingAttempts(domain, { atSeq: attempts[1].reservations[0].seq })[1].reservations[0].state).toBe('reserved');
     }
@@ -326,6 +354,25 @@ describe('agent checkpoint causal branches', () => {
         .find(entry => entry.txId === 'first-bound')!;
       expect(historical).toMatchObject({ disposition: 'retain', reasons: ['historical_checkpoint'] });
       expect(historical.references).toMatchObject([{ checkpointSeq: first!.seq, current: false }]);
+      expect(historical.fork).toEqual({ disposition: 'review', reasons: [] });
+      await cleanupAgentCausalFork(new ProcessSupervisor(domain), {
+        txId: 'first-bound', atSeq: planAgentCausalResourceCleanup(domain).atSeq,
+      });
+      expect(fs.existsSync(path.join(temp, 'first-bound'))).toBe(false);
+      // Replay starts from the preserved baseline after both fork removal and domain reopen.
+      runtime.close(); domain.close();
+      domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+      open();
+      const debug = await forkAgentCheckpoint(runtime, new ProcessSupervisor(domain), {
+        sourceAgentId: 'first', checkpointSeq: first!.seq, agentId: 'debug-cleaned', txId: 'debug-cleaned',
+        forkPath: path.join(temp, 'debug-cleaned'), maxSteps: 1, replayPolicy: 'deterministic',
+        observations: () => ({ closedWorld: true, log: [{ kind: 'observe',
+          call: { tool: 'read', args: {} }, resultHash: 'value' }],
+          replay: async (_entry, root) => fs.readFileSync(path.join(root, 'input'), 'utf8') }),
+      });
+      expect(debug.status).toBe('forked');
+      if (debug.status === 'forked') expect(fs.readFileSync(path.join(debug.transaction.forkRoot, 'input'), 'utf8')).toBe('value');
+
       const cutoff = planAgentCausalResourceCleanup(domain, { planSeq: execution.seq });
       runtime.close(); domain.close();
       domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');

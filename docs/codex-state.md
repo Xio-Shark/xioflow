@@ -11,8 +11,7 @@
 - 宿主保证依赖完整、确定性和文件效果；时间旅行仅 checkpoint 粒度，不重放模型/外部系统。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。
 - validateWorkspaceCausalBranches：同一当前基线，逐分支独立 fork 重放，自动发现因果修复种子。
-- 工具异常不进入 changed；每分支首差即停；验证 fork / 基线回收，不改 checkpoint / 不提交。
-- CAUSAL_VALIDATION_COMPLETED 持久化报告、源分支 heads、基线 SnapshotRef 元数据。
+- 工具异常不进入 changed；每分支首差即停；验证 fork / 基线回收，不改 checkpoint / 不提交。 CAUSAL_VALIDATION_COMPLETED 持久化报告、源分支 heads、基线 SnapshotRef 元数据。
 - listWorkspaceCausalValidations(domain, { runId?, atSeq? }) 支持重开与报告历史切片。
 - prepareWorkspaceCausalRefresh：自动探测→共享修复准备；failed / unchanged 不分配修复。
 - 任一探测失败阻断整批修复；prepared 返回开放事务，由宿主 OCC / 绑定 / 回收。
@@ -54,5 +53,7 @@
 - listAgentCheckpointWorkspaceReferences：跨Run/txId/atSeq查询历史checkpoint工作区、TX_BEGUN基线和当前标志；缺失基线不补造，不保证磁盘仍存在。
 - planAgentCausalResourceCleanup：冻结journal截止点，关联共享修复/登记尝试、事务生命周期、当前及历史checkpoint和跨事务共享基线引用。
 - runId/planSeq只筛资源归属，引用扫描全domain；共享、pending、历史/当前、共享基线与committing均retain，其余review。纯查询不删资源，未登记分配/外部引用仍由宿主核对。
-- 验证：初始基线657通过/7跳过，2套件因缺cc未运行；已安装gcc/libc6-dev。typecheck通过；全量745通过/7跳过、1处新增测试截止点断言失败，修正后定向67通过；修正后未重跑全量。
-- 下一步：把历史基线保留与可释放fork分开规划，接通按冻结证据核对的显式资源回收；仍保留共享输出和未完成发布。
+- planAgentCausalResourceCleanup 新增 fork 独立 retain/review；历史 checkpoint 与跨事务基线引用不再单独阻止 fork 回收，顶层保留语义不变。
+- cleanupAgentCausalFork：整个 domain 最新截止点核对→持久请求→既有 abort；只处理已登记 open/conflicted，保留所有基线。共享/pending/当前/committing拒绝，关闭事务不重复回收。
+- 截止点是前置核对，不锁异步文件操作；宿主须停止相关写入/发布并核对外部使用。请求不代表成功，TX_ABORTED reason关联requestSeq；中断需核对磁盘后重新规划。
+- 下一步：为fork回收请求补充持久结果查询与中断核对，或扩展共享输出完成后的生命周期；不删除时间旅行基线。

@@ -313,8 +313,31 @@ for (const resource of review.resources) {
 `retain`，并给出具体原因。其他资源标为 `review`，需宿主核实部分分配、外部副作用及
 未登记使用者；它不是可直接删除清单。即使 TX_ABORTED 已记录，也不推断磁盘清理成功。
 预览不启动 runtime、不重放工具、不写 journal、不执行回收。`atSeq` 可重建历史结果，
-默认冻结到查询开始时的最后序号；实际操作前重新查询。当前保守地整体保留涉及历史的
-事务资源，尚未把可释放 fork 与必须保留的基线分开规划。
+默认冻结到查询开始时的最后序号。顶层 disposition 仍表示整体资源保留，新增
+`resource.fork` 单独说明 fork 的 retain/review 与原因；只有历史 checkpoint 或其他事务
+共享基线引用时，fork 可以进入 review，基线仍保留。已关闭事务的 review 不表示可再次 abort。
+
+`cleanupAgentCausalFork` 接通显式核对后的 fork 回收：宿主先停止相关文件写入与 agent 发布，
+核实外部使用者和未登记分配，再调用。截止点检查是 OCC 式前置检查，不是跨异步文件操作的锁。
+
+```ts
+import { planAgentCausalResourceCleanup, cleanupAgentCausalFork } from '@xioflow/kernel';
+
+const plan = planAgentCausalResourceCleanup(domain);
+const candidate = plan.resources.find(resource => resource.txId === reconciledTxId);
+if (candidate?.fork?.disposition === 'review' &&
+    (candidate.state === 'open' || candidate.state === 'conflicted')) {
+  await cleanupAgentCausalFork(supervisor, { txId: candidate.txId, atSeq: plan.atSeq });
+}
+```
+
+入口重新查询整个 domain；任何新增 journal 事件使旧截止点失效。共享修复、pending 发布、
+当前 checkpoint 与 committing 事务拒绝回收，仅允许已登记的 open/conflicted 事务。
+先记录 `AGENT_CAUSAL_FORK_CLEANUP_REQUESTED`（含截止点、fork、基线），再走既有 abort；
+返回 requestSeq，成功由 TX_ABORTED 的 reason 关联。意图落盘失败不删除，abort 失败原样抛出；
+意图不代表成功，中断后应检查事务和磁盘再重新规划。每次回收后重取计划。
+不删除基线快照，旧 checkpoint 仍可通过完整确定性观测重放恢复，包含 domain 重开后。
+不支持已 committed/aborted 事务残留目录清理。
 
 ### 显式重试失败绑定
 
