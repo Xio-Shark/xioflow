@@ -86,6 +86,56 @@ describe('persistent world state', () => {
     await expect(open()).rejects.toThrow(/coverage path/i);
   });
 
+  it.each(['missing-commit', 'other-commit', 'coverage', 'owner', 'same-tree-ref'])('rejects inconsistent %s metadata without changing history', async damage => {
+    const first = await open();
+    const state = first.state;
+    const snapshot = first.domain.getStore().getSnapshot(state.snapshotId)!;
+    const events = first.domain.getStore().getJournalEvents('world');
+    first.close();
+    const otherCommit = (await exec('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+      'commit-tree', state.fingerprint, '-m', 'same tree, different identity'], { cwd: root })).stdout.trim();
+    const changed = { ...snapshot };
+    if (damage === 'missing-commit') changed.commitHash = undefined;
+    if (damage === 'other-commit') changed.commitHash = otherCommit;
+    if (damage === 'coverage') changed.coverage = 'full_tree';
+    if (damage === 'owner') changed.opId = 'another-world';
+    const store = new SqliteStore(path.join(statePath, 'domain.db'));
+    store.recordSnapshot(changed);
+    store.close();
+    if (damage === 'same-tree-ref') {
+      await exec('git', ['update-ref', `refs/xioflow/snapshots/${state.snapshotId}`, otherCommit], { cwd: root });
+    }
+    await expect(open()).rejects.toThrow(/baseline.*(mismatch|inconsistent)/i);
+    const after = new SqliteStore(path.join(statePath, 'domain.db'));
+    expect(after.getJournalEvents('world')).toEqual(events);
+    after.recordSnapshot(snapshot);
+    after.close();
+    await exec('git', ['update-ref', `refs/xioflow/snapshots/${state.snapshotId}`, snapshot.commitHash!], { cwd: root });
+    expect((await open()).state).toEqual(state);
+    expect(await fs.readFile(path.join(root, 'input.txt'), 'utf8')).toBe('original');
+  });
+
+  it.each(['blob', 'tree'])('rejects a missing covered %s object and reopens after repair', async kind => {
+    await fs.mkdir(path.join(root, 'nested'));
+    await fs.writeFile(path.join(root, 'nested', 'data'), 'nested content');
+    coverage = { ...coverage, paths: [...coverage.paths, 'nested/data'] };
+    const first = await open();
+    const state = first.state;
+    const events = first.domain.getStore().getJournalEvents('world');
+    first.close();
+    const object = (await exec('git', ['rev-parse', `${state.fingerprint}:${kind === 'blob' ? 'nested/data' : 'nested'}`],
+      { cwd: root })).stdout.trim();
+    const objectPath = path.join(root, '.git', 'objects', object.slice(0, 2), object.slice(2));
+    const saved = await fs.readFile(objectPath);
+    await fs.unlink(objectPath);
+    await expect(open()).rejects.toThrow();
+    await fs.writeFile(objectPath, saved);
+    const repaired = await open();
+    expect(repaired.state).toEqual(state);
+    expect(repaired.domain.getStore().getJournalEvents('world')).toEqual(events);
+    expect(await fs.readFile(path.join(root, 'nested', 'data'), 'utf8')).toBe('nested content');
+  });
+
   it('rejects changed coverage, exclusions, and a different root', async () => {
     const first = await open();
     first.close();

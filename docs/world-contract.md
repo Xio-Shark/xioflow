@@ -105,7 +105,10 @@ M2 从持久身份与覆盖检查开始（当前进度见下节），随后串�
 不会声称已覆盖。文件类型、内容及 Git 可表示的模式由 tree fingerprint 固定；目录枚举覆盖
 和完整 POSIX 权限尚未实现，不能据此声明它们有效。
 
-重开核对 root、适配器 id/version、覆盖哈希、snapshot 元数据、私有 ref 的树指纹和已覆盖 blob
+重开核对 root、适配器 id/version、覆盖哈希、snapshot 元数据、私有 ref 的提交身份与树指纹和已覆盖 blob
 存在性，返回原 worldId 与创建截止点。当前目录的新增或修改不改变原版本；基线缺失、ref 被换或
 覆盖变化均失败，不抓取当前目录顶替历史。重开不追加世界 journal 事件；仍使用既有 domain 租约。
+snapshot 的 opId 必须属于当前世界，coverage 必须保持创建时的 worktree_non_ignored；保存的
+commitHash 必须存在且与私有 ref 指向的提交一致，避免 materialize 按 ref、restore 按元数据
+读到不同基线。同树不同提交也不替代原提交身份；校验失败释放租约，修复原证据后可以重开。
 下一步连接隔离执行及 AgentRuntime，再收敛 refresh、strict commit、explain 与 close 状态机。

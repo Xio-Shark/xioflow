@@ -29,8 +29,10 @@
 - cleanupAgentCausalFork只处理登记open/conflicted；保留基线；请求与TX_ABORTED精确关联，可查pending/aborted/failed。截止点不是文件系统锁。
 - 历史成本策略/窗口/漂移/恢复预测已有实现，北极星要求降级插件，当前不扩展；统一基准按第5节逐项合并，覆盖前不删样本。
 - benchmark:recovery schemaVersion=6：真实SIGKILL、输入/输出扰动、多文件规模、验证/直接续跑/全量重算；无真实模型token收益证明。
-- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；新会话未必保留gcc/libc6-dev，本轮缺失导致基线3套件加载失败，已补装。
+- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；新会话未必保留gcc/libc6-dev，原生编译加载失败时先检查工具链。
 - 内部 src/world/state.ts 已持久化 worldId、适配器/覆盖哈希与快照；原子保存 WORLD_CREATED/snapshot，重开核对原ref/tree/blob及固定截止点，不导出 openWorld。
 - 精确文件覆盖拒绝越界、重复、symlink、目录及忽略漏收；statePath须在工作区外；基线缺失不重抓。初始化中断保留意图并拒绝重开，自动恢复及目录枚举尚未实现。
 - 内部 close 仅释放domain，尚无句柄级资源报告；覆盖模式仅Git可表示的模式，不保证完整POSIX权限。
-- 本轮验证：新增17项世界状态测试与pnpm typecheck通过；补齐原生编译环境后正在运行最终全量测试。
+- 本轮补齐基线一致性：保存的commitHash须与私有ref提交相同（同树不同提交也拒绝）；snapshot.opId绑定worldId，coverage固定为worktree_non_ignored。
+- 损坏元数据、覆盖blob或子树均拒绝重开且不改journal/主目录；恢复原证据后可重开，未新增公开入口。
+- 本轮验证：基线828通过/7跳过；世界状态24项（新增7项）与pnpm typecheck通过；最终全量测试运行中。

@@ -65,8 +65,14 @@ async function git(root: string, args: string[]): Promise<string> {
   return (await exec('git', args, { cwd: root, timeout: 15000, maxBuffer: 50 * 1024 * 1024 })).stdout;
 }
 
-async function checkBaseline(root: string, snapshotId: string, fingerprint: string, coverage: FileCoverage) {
-  const tree = (await git(root, ['rev-parse', '--verify', `refs/xioflow/snapshots/${snapshotId}^{tree}`])).trim();
+async function checkBaseline(root: string, snapshotId: string, fingerprint: string, coverage: FileCoverage,
+  commitHash: string | undefined) {
+  // Materialize uses the private ref, while restore uses the saved commit. Both must
+  // identify the same immutable object, even if another commit has the same tree.
+  const ref = `refs/xioflow/snapshots/${snapshotId}`;
+  const commit = (await git(root, ['rev-parse', '--verify', `${ref}^{commit}`])).trim();
+  if (commit !== commitHash) throw new Error('World baseline commit identity mismatch');
+  const tree = (await git(root, ['rev-parse', '--verify', `${commit}^{tree}`])).trim();
   if (tree !== fingerprint) throw new Error('World baseline fingerprint mismatch');
   // Reading the complete tree also detects missing tree objects. Blob existence is checked below.
   const entries = new Map<string, { mode: string; object: string }>();
@@ -125,9 +131,10 @@ export async function openWorldState(options: {
       }
       const snapshot = store.getSnapshot(record.snapshotId);
       if (!snapshot || snapshot.domainId !== domain.domainId || snapshot.driver !== driver.name
+          || snapshot.opId !== record.worldId || snapshot.coverage !== 'worktree_non_ignored'
           || snapshot.treeFingerprint !== record.fingerprint || snapshot.roots.length !== 1
           || snapshot.roots[0] !== root) throw new Error('World baseline metadata missing or inconsistent');
-      await checkBaseline(root, record.snapshotId, record.fingerprint, coverage);
+      await checkBaseline(root, record.snapshotId, record.fingerprint, coverage, snapshot.commitHash);
     } else {
       if (events.length) throw new Error('World initialization incomplete; retained evidence requires recovery');
       // Inspect ancestors without following symlinks, including for declared absent paths.
@@ -153,7 +160,7 @@ export async function openWorldState(options: {
       // An interrupted capture must never silently allocate a different world on reopen.
       append('WORLD_INITIALIZING', { worldId, snapshotId, root, adapter, coverage, manifestHash });
       const snapshot = await driver.capture([root], { id: snapshotId, domainId: domain.domainId, opId: worldId });
-      const entries = await checkBaseline(root, snapshotId, snapshot.treeFingerprint, coverage);
+      const entries = await checkBaseline(root, snapshotId, snapshot.treeFingerprint, coverage, snapshot.commitHash);
       for (const p of coverage.paths) {
         if (!entries.has(p)) {
           try { await fs.lstat(path.join(root, p)); }

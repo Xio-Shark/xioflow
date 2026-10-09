@@ -564,3 +564,10 @@
 - 编译接入示例检查结果穷尽、非成功无receipt及严格observations验证；不导出或假装实现统一运行入口。
 - M1设计交付物齐备；下一轮进入M2，从持久世界身份、覆盖清单与重开校验开始，尚无M2六类场景验收。
 - 验证：基线与最终pnpm test均811通过/7跳过；pnpm typecheck（含契约编译检查）与git diff --check通过。
+
+## 2026-10-09 — M2 世界基线身份一致性
+- 审查上一轮内部openWorldState后，优先修复私有ref与snapshot.commitHash未交叉核对的缺口，防止materialize/restore读取不同基线。
+- 重开要求原提交身份、snapshot.opId世界归属及worktree_non_ignored覆盖模式一致；同树不同提交也拒绝。
+- 新增7项损坏/修复测试：提交元数据、私有ref、归属、覆盖模式及缺失blob/子树；拒绝不改journal/主目录，修复后保持原身份重开。
+- 保持内部入口；M2仍缺隔离runAgentStep、refresh/strict commit/explain/close状态机与六类场景各10次验收。
+- 验证：基线828通过/7跳过，世界状态24项与pnpm typecheck通过；最终全量测试运行中。
