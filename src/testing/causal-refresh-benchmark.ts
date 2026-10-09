@@ -8,7 +8,7 @@ import { performance } from 'node:perf_hooks';
 import { ExecutionDomain } from '../domain.js';
 import { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { WorkspaceCausalGraph } from '../workspace/causal-graph.js';
-import { refreshWorkspaceCausalBranches } from '../workspace/causal-refresh.js';
+import { recomputeWorkspaceCausalBranches, refreshWorkspaceCausalBranches } from '../workspace/causal-refresh.js';
 import type { CausalRefreshDecision } from '../workspace/causal-refresh-cost.js';
 import type { ObservationEntry, CommitValidation } from '../workspace/transactions.js';
 import type { CausalBenchmarkOptions } from './causal-repair-benchmark.js';
@@ -26,7 +26,7 @@ export interface CausalRefreshBenchmarkOptions extends CausalBenchmarkOptions {
   changeSharedInput?: boolean;
 }
 const exec = promisify(execFile);
-const modes = ['full-rerun', 'causal-refresh', 'causal-refresh-reuse', 'causal-refresh-adaptive', 'unchecked-reuse'] as const;
+const modes = ['full-rerun', 'causal-recompute', 'causal-refresh', 'causal-refresh-reuse', 'causal-refresh-adaptive', 'unchecked-reuse'] as const;
 type Mode = typeof modes[number];
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 function output(value: string, rounds: number): string {
@@ -59,7 +59,7 @@ export async function runCausalRefreshBenchmark(options: CausalRefreshBenchmarkO
       samples.push(await runSample(modes[(trial + offset) % modes.length], trial, config));
     }
   }
-  return { schemaVersion: 2, config, modelTokens: null,
+  return { schemaVersion: 3, config, modelTokens: null,
     environment: { node: process.version, platform: process.platform, arch: process.arch,
       git: (await exec('git', ['--version'])).stdout.trim() },
     samples, summary: modes.map((mode) => {
@@ -159,6 +159,17 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
       if (result.status === 'committed') commitValidation = result.validation;
       else await supervisor.abortWorkspaceTransaction(tx.txId, 'benchmark conflict');
       await supervisor.pruneSnapshots([tx.baseSnapshotId], { runId: 'run' });
+    } else if (mode === 'causal-recompute') {
+      const result = await recomputeWorkspaceCausalBranches(supervisor, {
+        ...txOptions('recompute'), atSeq: view.nodes.at(-1)!.seq, branches,
+        closedWorld: true, replayPolicy: 'deterministic',
+        replay: (entry, dir) => perform(entry, dir, 'commitReplayToolCalls'),
+        execute: async (node, tx) => ({ actorId: node.actorId,
+          observation: { ...node.observation, resultHash: await perform(node.observation, tx.forkRoot, 'executionToolCalls') },
+          writes: node.writes?.map((write) => ({ ...write, status: 'M' as const })) }),
+      });
+      status = result.status;
+      if (result.commit.status === 'committed') commitValidation = result.commit.validation;
     } else if (mode === 'causal-refresh' || mode === 'causal-refresh-reuse' || mode === 'causal-refresh-adaptive') {
       let repairing = false;
       const result = await refreshWorkspaceCausalBranches(supervisor, {
@@ -209,6 +220,9 @@ async function runSample(mode: Mode, trial: number, config: Required<CausalRefre
     };
     return { mode, trial, decision, costPrediction, changedBranches: changed, status, ...counters, reusedProbeSteps,
       totalToolCalls: Object.values(counters).reduce((a, b) => a + b, 0), elapsedMs,
+      causalStepsRecorded: events.filter((event) => event.type === 'CAUSAL_STEP').length,
+      validationsCompleted: events.filter((event) => event.type === 'CAUSAL_VALIDATION_COMPLETED').length,
+      recomputationsPrepared: events.filter((event) => event.type === 'CAUSAL_RECOMPUTATION_PREPARED').length,
       transactionsStarted: events.filter((event) => event.type === 'TX_BEGUN').length,
       snapshotsCaptured: events.filter((event) => event.type === 'SNAPSHOT_CAPTURED').length,
       correctOutputs, totalOutputs: config.branches, outputHashes, commitValidation,

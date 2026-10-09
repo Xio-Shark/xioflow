@@ -37,7 +37,6 @@
 - CAUSAL_VALIDATION_REPAIR_PREPARED 关联 validationSeq / txId；关联失败回收修复。
 - 修复使用新基线；validateReuse 必需；崩溃可能留下尚未关联的准备记录。
 - commitWorkspaceTransaction 支持 observationPolicy: 'always'，无文件冲突也重放。
-- 要求 closedWorld / observe 哈希；无读追踪不降级，成功 validation 为 observations。
 - refreshWorkspaceCausalBranches：探测→共享修复→联合 heads 完整日志→强制重放提交。
 - 包含复用祖先；成功回收基线，冲突中止回收；提交抛错保留恢复资源并报告 txId。
 - 依已有 validationSeq→txId→TX_COMMITTED 追溯；不分发独立事务、不绑定 checkpoint。
@@ -45,16 +44,17 @@
 - validate / prepare refresh / refresh 支持 replayReuse: baseline_observations（默认 none）。
 - 单次基线按 seq 复用 mutation 前纯观测；错误不缓存、不同节点不合并；提交完整重放。
 - 适配器须纯文件观测、与 fork 路径 / 内存副作用无关；缓存不跨调用或修复。
-- refresh 新增 --shared / --change-shared，共享祖先加独立输入，支持四种变化场景。
 - refresh / prepare refresh 可选 costModel；planWorkspaceCausalRefresh 可纯查询比较成本。
 - 每节点 execute / reuse / replay 同单位有限非负估算；溢出或异常在修复事务前拒绝。
 - 比较增量重算+复用验证+完整提交重放与全部重算+完整提交重放；相等保留增量。
 - full 只重算选中联合祖先，共享节点一次；validateReuse 收到 []，保留强制 OCC。
-- 返回 decision；关联事件可选 decision 持久保存策略及成本，旧行为 / 事件兼容。
 - 先探测再决策；估算不包含已发生探测和相同固定开销，不声称实测或 token 收益。
-- benchmark:refresh 新增 adaptive；实际 reusePasses 与估算可独立配置，schemaVersion=2。
 - recomputeWorkspaceCausalBranches：显式跳过探测，完整重算所选联合祖先并强制 OCC 提交。
 - 共用刷新发布路径；共享节点一次、无复用；返回 preparationSeq / repair / commit，无 validation。
 - CAUSAL_RECOMPUTATION_PREPARED 记录来源与 full 策略；关联失败回收、未知提交保留资源。
-- 下一步：将直接重算接入 benchmark:refresh，再探索探测前成本选择或 checkpoint 发布协调。
-- 最新验证：typecheck 通过；pnpm test 657 通过 / 7 跳过（124.73 秒），新增10项。
+- benchmark:refresh 六模式含 causal-recompute；schemaVersion=3，计数包含探测/复用/提交重放。
+- 新 journal 计数 causalStepsRecorded / validationsCompleted / recomputationsPrepared。
+- 四种共享输入场景各三轮：受验证模式60/60正确，原始样本 causal-recompute.sample.json。
+- 直接重算与手工重跑同为18次调用；局部变化自适应26→18，无变化9→18；无token数据。
+- 下一步：基于变化概率设计探测前策略选择，并用当前六模式基准验证成本与正确性。
+- 最新验证：typecheck / build通过；针对性23项；pnpm test 658通过/7跳过（147.86秒）。

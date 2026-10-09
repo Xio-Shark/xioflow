@@ -6,16 +6,24 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 describe('causal refresh benchmark', () => {
   it('measures actual probe, repair, reuse and mandatory publication replay against equal guarantees', async () => {
     const report = await runCausalRefreshBenchmark({ trials: 2, branches: 3, hashRounds: 2 });
+    expect(report.schemaVersion).toBe(3);
     expect(report.modelTokens).toBeNull();
-    expect(report.samples).toHaveLength(10);
+    expect(report.samples).toHaveLength(12);
     for (let trial = 0; trial < 2; trial++) {
       const samples = report.samples.filter((sample) => sample.trial === trial);
       const full = samples.find((sample) => sample.mode === 'full-rerun')!;
+      const recompute = samples.find((sample) => sample.mode === 'causal-recompute')!;
+      expect(recompute).toMatchObject({ success: true, status: 'committed', executionToolCalls: 6,
+        probeToolCalls: 0, reuseToolCalls: 0, commitReplayToolCalls: 6, totalToolCalls: 12,
+        transactionsStarted: 1, snapshotsCaptured: 2, commitValidation: 'observations',
+        causalStepsRecorded: 6, validationsCompleted: 0, recomputationsPrepared: 1,
+        decision: null, costPrediction: null });
+      expect(recompute.outputHashes).toEqual(full.outputHashes);
       const refresh = samples.find((sample) => sample.mode === 'causal-refresh')!;
       const unchecked = samples.find((sample) => sample.mode === 'unchecked-reuse')!;
       expect(full).toMatchObject({ success: true, executionToolCalls: 6, probeToolCalls: 0,
         reuseToolCalls: 0, commitReplayToolCalls: 6, totalToolCalls: 12, transactionsStarted: 1,
-        commitValidation: 'observations', snapshotsCaptured: 2 });
+        commitValidation: 'observations', snapshotsCaptured: 2, causalStepsRecorded: 0 });
       expect(refresh).toMatchObject({ success: true, executionToolCalls: 2, probeToolCalls: 5,
         reuseToolCalls: 4, commitReplayToolCalls: 6, totalToolCalls: 17, transactionsStarted: 4,
         commitValidation: 'observations', snapshotsCaptured: 3 });
@@ -29,8 +37,8 @@ describe('causal refresh benchmark', () => {
         commitValidation: null, transactionsStarted: 0, snapshotsCaptured: 0 });
       expect(refresh.elapsedMs).toBeGreaterThan(0);
     }
-    expect(report.summary.map((row) => row.successRate)).toEqual([1, 1, 1, 1, 0]);
-    expect(report.summary.map((row) => row.meanTotalToolCalls)).toEqual([12, 17, 17, 17, 0]);
+    expect(report.summary.map((row) => row.successRate)).toEqual([1, 1, 1, 1, 1, 0]);
+    expect(report.summary.map((row) => row.meanTotalToolCalls)).toEqual([12, 12, 17, 17, 17, 0]);
   }, 30_000);
 
   it.each([0, 2])('covers %i changed inputs including unchanged fast path and full invalidation', async (changedBranches) => {
@@ -49,6 +57,7 @@ describe('causal refresh benchmark', () => {
     { changedBranches: 1, changeSharedInput: false },
     { changedBranches: 3, changeSharedInput: false },
     { changedBranches: 0, changeSharedInput: true },
+    { changedBranches: 1, changeSharedInput: true },
   ])('measures shared evidence reuse through publication: %j', async (changes) => {
     const report = await runCausalRefreshBenchmark({ trials: 1, branches: 3, hashRounds: 2,
       sharedInput: true, ...changes });
@@ -59,6 +68,12 @@ describe('causal refresh benchmark', () => {
     const probe = changes.changeSharedInput ? 3 : 9 - changes.changedBranches;
     const reuse = changed && !changes.changeSharedInput ? 7 - execution : 0;
     expect(full).toMatchObject({ success: true, executionToolCalls: 7, commitReplayToolCalls: 7, totalToolCalls: 14 });
+    const recompute = report.samples.find(sample => sample.mode === 'causal-recompute')!;
+    expect(recompute).toMatchObject({ success: true, status: 'committed', executionToolCalls: 7,
+      commitReplayToolCalls: 7, totalToolCalls: 14, probeToolCalls: 0, reuseToolCalls: 0,
+      reusedProbeSteps: 0, causalStepsRecorded: 7, validationsCompleted: 0, recomputationsPrepared: 1,
+      transactionsStarted: 1, snapshotsCaptured: 2, commitValidation: 'observations' });
+    expect(recompute.outputHashes).toEqual(full.outputHashes);
     for (const sample of [refresh, cached]) {
       expect(sample).toMatchObject({ success: true, executionToolCalls: execution,
         reuseToolCalls: reuse, commitReplayToolCalls: changed ? 7 : 0,
@@ -96,8 +111,13 @@ describe('causal refresh benchmark', () => {
     expect(fixed.outputHashes).toEqual(full.outputHashes);
     expect(fixed.reuseToolCalls).toBe(5 * scenario.reusePasses);
     expect(adaptive.totalToolCalls).toBe(adaptive.probeToolCalls + adaptive.costPrediction!.actualRemainingToolCalls);
-    if (scenario.strategy === 'full') expect(adaptive.totalToolCalls).toBe(fixed.totalToolCalls - 10);
-    else expect(adaptive.totalToolCalls).toBe(fixed.totalToolCalls);
+    const recompute = report.samples.find(sample => sample.mode === 'causal-recompute')!;
+    expect(recompute.totalToolCalls).toBe(14);
+    expect(recompute.outputHashes).toEqual(adaptive.outputHashes);
+    if (scenario.strategy === 'full') {
+      expect(adaptive.totalToolCalls).toBe(fixed.totalToolCalls - 10);
+      expect(adaptive.totalToolCalls - recompute.totalToolCalls).toBe(adaptive.probeToolCalls);
+    } else expect(adaptive.totalToolCalls).toBe(fixed.totalToolCalls);
   }, 30_000);
 
   it('skips cost selection and publication when every branch is unchanged', async () => {
