@@ -328,3 +328,15 @@ explainWorldPublication.bindings 独立报告 pending/bound/failed；TX_COMMITTE
 报告 cleanup_failed；报告持久化异常抛出，domain 保持打开，不宣称关闭成功。
 `readWorldClose` 用固定 ref 重开只读恢复报告；新 state 可重新关闭以重试失败清理。
 尚未接入统一句柄的接收/等待调度或未发布候选中止，因此不是完整 WorldHandle.close。
+
+
+### 内部统一句柄调度（M2 部分实现）
+`src/world/handle.ts` 的内部 `openWorld` 组合现有准备、刷新、发布解释、严格提交和资源终结器。
+操作接收同步登记，close同步停止接收新操作，等待已接收操作全部结束（包括失败）后
+调用closeWorldResources；提交仍复用既有发布队列。重复close返回独立报告副本，报告落盘
+失败允许再次close，但不重新开放接收。句柄不暴露底层domain，避免绕过排空调度。
+候选关联本进程agent，刷新后传递关联；重开查询、同key续发布和无变化复用无需agent，
+确需新推理但缺宿主驱动时明确failed，不猜测或重放模型。
+这仍是内部集成入口：explain沿用现有完整组合结构，失败准备查询和冻结类型投影尚未收口；
+未发布候选的持久中止仍未实现，close保留其fork/current checkpoint。
+不得将其视为完整WorldHandle或M2验收通过；包导出保持不变。

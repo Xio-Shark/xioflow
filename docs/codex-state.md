@@ -1,8 +1,8 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
-- 下一步最小切片：统一句柄阻止新操作并等待已接收操作结束，持久中止未发布候选后调用closeWorldResources。
+- 下一步最小切片：句柄排空后持久中止未发布候选，按归属释放其current checkpoint对fork的占用；保留历史基线及未决提交。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约冻结，M3/M4待推进。
-- M2完成标准仍缺：统一句柄、close资源事实；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
+- M2完成标准仍缺：未发布候选abandon、句柄与冻结类型/失败explain收口；六类场景各10次、独立oracle、全部不变式及重开验收。
 - M1：docs/world-contract.md冻结六入口状态表、覆盖和六类失败/重试/资源归属；src/world/contract.ts共享非公开契约，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
 - WorkspaceCausalGraph持久节点、祖先/历史切片/失效闭包；explainRecomputation返回变化源及最短路径，explainCausalRecovery关联checkpoint。
@@ -20,7 +20,6 @@
 - cleanup扫描全domain引用；共享/pending/历史/current/committing保留；截止点不是文件锁。fork清理仅登记open/conflicted，保留基线，状态可查。
 - 成本预测/窗口/漂移不再扩展；基准按北极星第5节合并，覆盖前不删样本；benchmark:recovery schemaVersion=6，无真实模型token收益证明。
 - 内部openWorldState持久worldId、覆盖哈希及固定快照，重开核对ref/commit/tree/blob/归属；精确文件覆盖拒绝symlink/目录/忽略漏收，statePath在工作区外。
-- 初始化中断留意图并拒绝重开，无自动恢复；close只释放domain，尚无统一资源报告；Git模式不保证完整POSIX权限。
 - executeWorldStep复用固定基线事务和AgentRuntime，保存输入、因果节点、响应checkpoint、输出指纹；执行前后核验版本身份，物化后核验基线指纹。
 - prepareWorldStep接WorldAgent并保存prepared/unknown；缺覆盖/null依赖/heads遗漏产物依赖或写节点均unknown，伪造依赖/重复id/坏hash失败；[]可prepared，不发布。
 - 文本artifact.body持久并验SHA-256；缺正文unknown，格式/hash错误failed；readWorldArtifacts固定引用只读恢复；无二进制或内容寻址去重。
@@ -30,7 +29,6 @@
 - 内部refreshWorldCandidate组合validate/recompute：matched重建固定验证版本候选，unknown拒绝或重算，changed增量；工具/产物异常不触发重算。
 - changed增量准备使用持久validation固定版本；unknown/显式全量默认新采集，原句柄基线不变。restoreWorldRevision缺失/错配不回退当前目录、不调用agent。
 - readWorldRefresh/readWorldCandidateValidation/explainWorldPreparation固定引用只读恢复，重开和后续历史不影响同截止点；解释区分验证计划与实际full/reuse/incremental结果。
-- 内部入口均未公开；无重算幂等、中断自动续跑或统一资源清理；发布/绑定/资源已接入explain。
 - 候选产物覆盖检查：执行完成及验证前后复用精确路径/Git树核验，拒绝symlink、目录和指纹漏收的忽略文件，failed并保留证据，不发布。
 - 该检查不推断隐性读取或未声明写入，也不是文件系统锁；最终由内部strict commit重验。合法写入/删除、声明不存在路径保持可用。
 - 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，每轮先确认cc；本轮已补齐gcc/libc6-dev，cc可用。
@@ -56,5 +54,7 @@
 - 本轮M2：explain.resources复用共享规划/清理历史；区分保留、回收、失败，带固定恢复身份，重开解释一致。
 - 本轮M2：内部closeWorldResources复用共享规划/清理，持久WORLD_RESOURCES_CLOSED后释放domain；重复调用返回独立副本，不重复回收。
 - readWorldClose按固定ref重开只读查询；清理失败逐项记录，报告落盘失败不宣称关闭；新会话可重试失败清理。
-- 仍需调用方先排空操作；待发布/current checkpoint/未决资源继续保留，未实现候选abandon或统一句柄调度，未新增公开API。
-- 验证：resources共8项及typecheck通过；本轮未跑全量（不足5分钟），下一轮需补跑；gcc/libc6-dev已安装。
+- 本轮M2：内部openWorld组合runAgentStep/refresh/explain/strict commit/close；同步停止接收并等待全部已接收操作结束后清理，失败操作不阻断关闭。
+- close重复调用返回独立报告；落盘失败可重试close但不恢复接收；refresh传递agent，重开缺驱动仅新推理failed，查询/复用可用。
+- 未公开API；explain组合结构未符合冻结WorldHandle全部类型/失败查询；未发布候选仍保留；初始化中断仍拒绝重开，无自动恢复。
+- 验证：handle/resources共13项及typecheck通过；本轮末尾补跑一次全量，结果待更新。
