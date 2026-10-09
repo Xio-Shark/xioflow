@@ -102,11 +102,41 @@ it.each(['unknown', 'output', 'accept', 'tool', 'accept-mutation'] as const)('bl
   await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
-it('serializes competing candidates so only one publishes', async () => {
-  const a = await prepare();
-  const b = await prepare();
-  const results = await Promise.all([commitWorldCandidate(world, a, adapter), commitWorldCandidate(world, b, adapter)]);
+it('serializes same-baseline candidates with different output so only one publishes', async () => {
+  const competingAdapter = { ...adapter,
+    replay: async (entry: { kind: string; call: { args: Record<string, unknown> } }, root: string) => {
+      if (entry.kind === 'observe') return fs.readFile(path.join(root, 'input'), 'utf8');
+      const body = entry.call.args.body as string;
+      await fs.writeFile(path.join(root, 'output'), body);
+      return body;
+    },
+    accept: async (root: string) => ['first', 'second'].includes(
+      await fs.readFile(path.join(root, 'output'), 'utf8')),
+  };
+  const candidates = [];
+  for (const body of ['first', 'second']) {
+    const result = await prepareWorldStep(world, { execute: async ({ record, forkRoot, version }) => {
+      const value = await fs.readFile(path.join(forkRoot, 'input'), 'utf8');
+      const read = await record({ kind: 'observe', call: { tool: 'read', args: {} }, resultHash: value }, []);
+      await fs.writeFile(path.join(forkRoot, 'output'), body);
+      const write = await record({ kind: 'mutate', call: { tool: 'write', args: { body } }, resultHash: body }, [read]);
+      return { coverage: { status: 'complete', manifestHash: version.manifestHash }, heads: [write], artifacts: [] };
+    } }, { task: 'competing writes' });
+    if (result.status !== 'prepared') throw new Error(result.status);
+    candidates.push(result.candidate);
+  }
+  expect(candidates[0].version).toEqual(candidates[1].version);
+  await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
+  const results = await Promise.all(candidates.map(candidate => commitWorldCandidate(world, candidate, competingAdapter)));
   expect(results.map(r => r.status).sort()).toEqual(['committed', 'conflict']);
+  const winner = results.findIndex(result => result.status === 'committed');
+  expect(await fs.readFile(path.join(world.state.root, 'output'), 'utf8')).toBe(['first', 'second'][winner]);
+  const events = world.domain.getStore().getJournalEvents('world');
+  for (const [i, candidate] of candidates.entries()) {
+    expect(await commitWorldCandidate(world, candidate, competingAdapter)).toEqual(results[i]);
+  }
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+  expect(await fs.readFile(path.join(world.state.root, 'output'), 'utf8')).toBe(['first', 'second'][winner]);
 });
 
 it('binds independent keys once under concurrent requests and preserves historical queries', async () => {

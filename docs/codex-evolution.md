@@ -813,3 +813,9 @@
 - 补充同一unknown候选多次拒绝刷新引用独立、旧解释不变的句柄回归；同步类型示例和契约文档。
 - 验证：handle/acceptance最终68/68通过（56.57s），refresh专项20/20通过，typecheck及diff --check通过。
 - M2仍缺不变式统一证据索引；本轮剩余不足5分钟未跑全量，下一轮优先安排补跑。
+
+### 2026-10-09 — M2 invariant evidence audit
+- 汇总北极星第3节不变式到 world-acceptance.md，以测试名定位现有证据，不新增入口或删除旧样本。
+- 补强同基线 OCC 竞争：不同正文、仅胜者发布、双方终态重试不增加 journal。
+- 找到剩余验收缺口：world explain 检查 Run 元数据但未直接比较累计预算，M2继续保持未完成。
+- 验证：commit专项22项、pnpm typecheck、git diff --check通过；不足5分钟未跑全量，下一轮优先安排。
