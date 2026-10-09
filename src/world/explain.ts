@@ -43,14 +43,22 @@ export function explainWorldPublication(world: WorldState,
       && (e.payload.result as { candidate?: WorldRef } | undefined)?.candidate?.id === identity.candidateId);
     if (refresh) preparationRef = { worldId: identity.worldId, id: refresh.payload.id as string, atSeq: refresh.seq };
   } else {
-    preparationRef = target;
+    // The query cutoff need not be the event that created its target. Resolve
+    // that event within the frozen prefix so returned refs can be queried again.
+    const event = history.find(e => e.payload.worldId === target.worldId
+      && e.payload.id === target.id && ['WORLD_STEP_PREPARED', 'WORLD_STEP_UNKNOWN',
+        'WORLD_VALIDATION_COMPLETED', 'WORLD_REFRESH_COMPLETED'].includes(e.type));
+    if (target.worldId !== world.state.worldId || !event) {
+      throw new Error('Explanation history reference mismatch');
+    }
+    preparationRef = { worldId: target.worldId, id: target.id, atSeq: event.seq };
     const candidate = explainWorldPreparation(world, preparationRef).candidate;
     const binding = history.find(e => e.type === 'WORLD_PUBLICATION_KEY_BOUND'
       && e.payload.worldId === candidate.worldId && e.payload.candidateId === candidate.id);
     publication = binding ? readWorldPublication(world, binding.payload.key as string, cutoff).result : null;
   }
   const preparation = explainWorldPreparation(world, preparationRef);
-  return structuredClone({ ref: { worldId: world.state.worldId, id: preparation.candidate.id, atSeq: cutoff },
+  return structuredClone({ ref: { worldId: world.state.worldId, id: preparationRef.id, atSeq: cutoff },
     preparation, publication, bindings: publication?.status === 'committed'
       ? [readWorldCheckpointBinding(world, publication.identity, publication.receipt.commitSeq, cutoff)] : [] });
 }

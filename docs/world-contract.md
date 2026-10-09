@@ -275,8 +275,9 @@ strict publication 的工具异常保存 TX_REPLAY_FAILED（失败索引、已�
 
 ### 内部 publication explanation（M2 部分实现）
 `explainWorldPublication` 组合现有 preparation 和 publication 只读查询，返回固定截止点、
-准备证据及发布事实。候选/验证/refresh 引用沿用其精确截止点；提交身份查询省略 atSeq
-时只捕获一次当前 journal head。身份的 worldId/candidateId/txId/key 必须全部匹配
+准备证据及发布事实。引用的 id 保留候选/验证/refresh 查询目标，atSeq 独立冻结查询截止点；
+目标事件必须存在于该前缀内，返回的 ref 可直接再次查询，不能以候选 id 替换刷新或验证目标。
+提交身份查询省略 atSeq 时只捕获一次当前 journal head。身份的 worldId/candidateId/txId/key 必须全部匹配
 该截止点内的持久 key 绑定；绑定尚未发生的身份查询拒绝，准备引用仍可查询 publication=null。
 绑定后缺结果为 undetermined；TX_COMMITTED 截止点即可报告发布，不依赖后续 world 结果事件。
 刷新候选的提交解释关联其 WORLD_REFRESH_COMPLETED，保留变化路径、实际复用映射和验证基线。

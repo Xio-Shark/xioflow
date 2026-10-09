@@ -47,14 +47,14 @@
 - 本轮M2：commitWorldCandidate读取持久候选，复用共享supervisor发布队列/完整重放/OCC/只读业务验收；版本/正文/输出/覆盖检查。
 - WORLD_PUBLICATION_RESULT保存结果；txId成功重试/重开返回原回执，清理失败以持久回执为准；未决保留证据，无自动恢复。
 - strict commit工具异常为validation_failed，底层保持open，原候选原key可重试；unknown不发布；绑定/close仍缺，入口非公开。
-- 验证：新增commit测试9项（含刷新后再次改价10次全部冲突）及pnpm typecheck通过；本轮全量已补跑通过。M2未完成。
 - 本轮M2：独立key持久绑定/结果，串行并发重试，冲突返回原身份，终态不重验；新key不能绕过原终态/未决。
 - readWorldPublication固定截止点只读查询，绑定前null、缺结果undetermined，TX_COMMITTED优先；重开身份不变。
 - 本轮M2：strict publication记录TX_REPLAY_FAILED及步骤/错误，清理临时重放资源；异常不再终止为conflicted，重开后原身份重试全部门禁。
-- 验证：观测/部分写入异常各10次跨重开重试、异常后改文件冲突；相关43项及typecheck通过。全量已于本轮补跑通过。
 - 本轮M2：explainWorldPublication组合准备/刷新与发布事实，身份四字段核验，固定截止点保留变化路径、复用映射和原回执。
 - 绑定前身份查询拒绝；准备引用可查null，绑定后无结果undetermined，TX_COMMITTED立即可查；不读当前文件、不改变journal/预算。
 - 本轮M2：文件发布后持久关联候选完成checkpoint与commitSeq，核对归属/响应/heads及当前checkpoint；失败独立记录，不改原回执。
 - explain.bindings在固定截止点报告pending/bound/failed；重开原key补齐缺失记录，不重放/重复发布或回退预算；已记录结果幂等。
 - 绑定仅关联内核候选checkpoint，未接外部宿主存储；落盘异常可查原发布身份后重试，失败绑定暂无重规划。
-- 本轮验证：commit相关20项及typecheck通过；未跑全量，下一轮第一件事补跑。
+- 本轮M2：解释引用分离查询目标id与历史截止点，返回ref可直接复查；保留refresh/validation证据，不以候选id替代。
+- 新增/扩展普通候选、未发布、未决、已提交的引用复查及重开一致性；拒绝伪造目标与准备前截止点。
+- 验证：修改前补跑全量955通过、7跳过；本轮相关41项及typecheck通过，修改后未重复全量，下一轮先补跑。

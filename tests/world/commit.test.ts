@@ -231,6 +231,9 @@ it.each([false, true])('explains publication and refresh evidence read-only acro
   const candidate = refresh.result.candidate;
   const before = explainWorldPublication(world, refresh.ref);
   expect(before.publication).toBeNull();
+  expect(explainWorldPublication(world, before.ref)).toEqual(before);
+  const validation = explainWorldPublication(world, refresh.validation!);
+  expect(explainWorldPublication(world, validation.ref)).toEqual(validation);
   const result = await commitWorldCandidate(world, candidate, adapter, { key: 'explain' });
   if (result.status !== 'committed') throw new Error(result.status);
   const store = world.domain.getStore();
@@ -244,6 +247,8 @@ it.each([false, true])('explains publication and refresh evidence read-only acro
   expect(saved.preparation.refresh).toEqual(refresh);
   expect(saved.preparation.reuse?.mode).toBe(changed ? 'incremental' : 'matched');
   expect(saved.preparation.plan).toEqual(before.preparation.plan);
+  expect(explainWorldPublication(world, pending.ref)).toEqual(pending);
+  expect(explainWorldPublication(world, saved.ref)).toEqual(saved);
   const run = store.getRun(candidate.id);
   const root = world.state.root;
   await fs.writeFile(path.join(root, 'input'), 'later');
@@ -263,10 +268,32 @@ it.each([false, true])('explains publication and refresh evidence read-only acro
   world.close();
   world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
   expect(explainWorldPublication(world, refresh.ref)).toEqual(before);
+  for (const explanation of [before, validation, pending, saved, latest]) {
+    expect(explainWorldPublication(world, explanation.ref)).toEqual(explanation);
+  }
   expect(explainWorldPublication(world, { identity: result.identity, atSeq: pending.ref.atSeq })).toEqual(pending);
   expect(explainWorldPublication(world, { identity: result.identity, atSeq: saved.ref.atSeq })).toEqual(saved);
   expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
   expect(world.domain.getStore().getRun(candidate.id)).toEqual(run);
+});
+
+
+it('resolves candidate identity independently of cutoff without admitting future or forged targets', async () => {
+  const candidate = await prepare();
+  const original = explainWorldPublication(world, candidate);
+  const store = world.domain.getStore();
+  const atSeq = store.recordJournalEvent({ domainId: 'world', type: 'UNRELATED',
+    timestamp: new Date().toISOString(), payload: { worldId: candidate.worldId, id: candidate.id } });
+  const events = store.getJournalEvents('world');
+  const later = explainWorldPublication(world, { ...candidate, atSeq });
+  expect(later).toEqual({ ...original, ref: { ...original.ref, atSeq } });
+  expect(explainWorldPublication(world, later.ref)).toEqual(later);
+  expect(explainWorldPublication(world, original.ref)).toEqual(original);
+  for (const ref of [{ ...candidate, atSeq: 0 }, { ...candidate, id: 'invented' },
+    { ...candidate, worldId: 'another-world' }]) {
+    expect(() => explainWorldPublication(world, ref)).toThrow('reference mismatch');
+  }
+  expect(store.getJournalEvents('world')).toEqual(events);
 });
 
 
