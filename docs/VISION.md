@@ -6,6 +6,8 @@ xioflow 的目标是让多个 agent 在同一个不断变化的世界中投机�
 
 历史恢复计划可通过 `listAgentCausalRefreshPlans` 从 journal 独立重建冻结的 checkpoint 与失效路径；不启动调度器，支持 Run / 时间切片查询，计划不代表实际发布。`listAgentCausalRefreshExecutions` 进一步关联共享修复事务与原子 checkpoint 发布，按时间切片区分 repaired / failed / skipped / pending，支持部分完成后的审计。`resumeAgentSharedCausalRefresh` 可从持久共享修复续跑未发布绑定，检查 checkpoint 版本与事务状态，复用已完成计算；宿主负责核对中断副作用，文件发布仍需 OCC。
 
+`resumeAgentSharedCausalRefreshWithValidation` 将恢复前观测有效性接入持久续跑：以当前基线重放 pending 分支的修复后 heads，变化或失败保留 pending，有效才分发共享结果；验证证据关联原计划与准备记录，文件发布仍需 OCC。
+
 共享刷新绑定现有持久尝试身份与分配前事务登记；`listAgentCausalBindingAttempts` 可跨重开核对各次尝试的事务状态和当前 checkpoint 引用，为中断后资源处理提供证据。登记不是文件分配完成或可删除的证明，见[资源核对](causal-recovery-batches.md#绑定尝试与中断资源核对)。
 
 `retryAgentSharedCausalRefresh` 支持按最新失败序号显式重试单个绑定，复用共享因果计算；重试意图、原失败与新发布按时间切片可查，中断后沿用 resume。其他 agent 保持原结果，资源副作用仍由宿主核对，见[重试示例](causal-recovery-batches.md#显式重试失败绑定)。

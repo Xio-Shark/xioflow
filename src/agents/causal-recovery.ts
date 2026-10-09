@@ -132,6 +132,7 @@ async function bindSharedRepair(
   agents: AgentRuntime, plan: AgentCausalRecoveryPlan,
   bind: AgentSharedCausalRecoveryOptions['bind'], repair: WorkspaceBranchRepairResult,
   preparationSeq?: number, runId?: string,
+  beforeBind?: () => Promise<boolean>,
 ): Promise<AgentSharedCausalRecoveryBatch> {
   const domain = agents.getDomain();
   const active = activePreparations.get(domain) ?? new Set<number>();
@@ -139,6 +140,7 @@ async function bindSharedRepair(
   if (preparationSeq !== undefined && active.has(preparationSeq)) throw new Error('Causal refresh binding already active');
   if (preparationSeq !== undefined) active.add(preparationSeq);
   try {
+    if (beforeBind && !await beforeBind()) return { plan, outcomes: [], repair };
     const batch = await recoverPlan(agents, plan, async (impact) => {
       const branches = repair.branches.filter(({ id }) => id === impact.agentId);
       const heads = [...new Set(impact.checkpoint.causalHeads!)].sort((a, b) => a - b);
@@ -208,6 +210,57 @@ export async function resumeAgentSharedCausalRefresh(
   if (!pending.size) return { plan, outcomes: [] };
   const repair = readOpenSharedRepair(agents, execution);
   return bindSharedRepair(agents, plan, bind, repair, execution.repair!.seq, execution.runId);
+}
+
+export type AgentValidatedCausalResumeResult =
+  | { status: 'completed'; batch: AgentSharedCausalRecoveryBatch }
+  | { status: 'validation_failed' | 'stale'; validation: CausalValidationResult; validationSeq: number }
+  | { status: 'resumed'; validation: CausalValidationResult; validationSeq: number;
+      batch: AgentSharedCausalRecoveryBatch };
+
+/** Revalidate durable repaired heads against one current-world baseline before
+ * resuming pending bindings. Divergence/errors leave publications pending; the
+ * host can refresh affected agents again. This probe is not an OCC certificate.
+ */
+export async function resumeAgentSharedCausalRefreshWithValidation(
+  agents: AgentRuntime, supervisor: ProcessSupervisor, planSeq: number,
+  options: { validation: Omit<CausalValidationOptions, 'branches' | 'atSeq'>;
+    bind: AgentSharedCausalRecoveryOptions['bind'] },
+): Promise<AgentValidatedCausalResumeResult> {
+  const domain = agents.getDomain();
+  if (domain !== supervisor.getDomain()) throw new Error('Agent and workspace supervisor must share a domain');
+  const execution = listAgentCausalRefreshExecutions(domain).find(entry => entry.seq === planSeq);
+  if (!execution) throw new Error('Unknown causal refresh plan');
+  const pending = new Set(execution.publications.filter(entry => entry.status === 'pending').map(entry => entry.agentId));
+  const plan = { ...execution.preview, affected: execution.preview.affected.filter(entry => pending.has(entry.agentId)) };
+  if (!pending.size) return { status: 'completed', batch: { plan, outcomes: [] } };
+  const repair = readOpenSharedRepair(agents, execution);
+  const validationOptions = { ...options.validation };
+  let validation: CausalValidationResult | undefined;
+  let validationSeq = 0;
+  let status: 'resumed' | 'stale' | 'validation_failed' = 'resumed';
+  const batch = await bindSharedRepair(agents, plan, options.bind, repair, execution.repair!.seq, execution.runId, async () => {
+    const branches = plan.affected.map(impact => {
+      const matches = repair.branches.filter(branch => branch.id === impact.agentId);
+      if (matches.length !== 1) throw new Error(`Missing unique shared repair branch for "${impact.agentId}"`);
+      return { id: impact.agentId, heads: matches[0].heads };
+    });
+    validation = await validateWorkspaceCausalBranches(supervisor, {
+      ...validationOptions, branches, atSeq: execution.repair!.seq,
+    });
+    status = validation.branches.some(branch => branch.status === 'failed') ? 'validation_failed'
+      : validation.changed.length ? 'stale' : 'resumed';
+    validationSeq = domain.getStore().recordJournalEvent({ domainId: domain.domainId, runId: execution.runId,
+      type: 'AGENT_CAUSAL_RESUME_VALIDATED', timestamp: new Date().toISOString(),
+      payload: { version: 1, planSeq, preparationSeq: execution.repair!.seq,
+        validationSeq: validation.seq, status, agentIds: [...pending] },
+    });
+    // File operations yielded: the shared transaction may have been closed meanwhile.
+    readOpenSharedRepair(agents, execution);
+    return status === 'resumed';
+  });
+  if (status !== 'resumed') return { status, validation: validation!, validationSeq };
+  return { status, validation: validation!, validationSeq, batch };
 }
 
 /** Explicitly retry one durable failure. The expected failure sequence prevents

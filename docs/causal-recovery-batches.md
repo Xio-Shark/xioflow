@@ -395,3 +395,33 @@ if (failed?.status === 'failed') {
 中断时，使用已有 resume 续跑 pending。再次失败必须使用新的失败序号显式重试。
 同一准备记录的重叠调用仍拒绝，不重算共享节点、不改变其他项，也不消耗 agent step 预算。
 宿主仍负责核对和回收独立资源、校验保留输出，文件发布继续经过 OCC。
+
+### 续跑前验证共享结果
+
+`resumeAgentSharedCausalRefreshWithValidation` 在当前工作区的同一基线上，隔离重放
+pending agent 的**修复后 heads**（包括复用祖先），全部匹配才继续绑定。它复用
+持久 repair，不重新执行修复回调；原来的 resume 入口仍可用于宿主已自行验证的场景。
+
+```ts
+import { resumeAgentSharedCausalRefreshWithValidation } from '@xioflow/kernel';
+
+const result = await resumeAgentSharedCausalRefreshWithValidation(runtime, supervisor, planSeq, {
+  validation: {
+    txId: 'resume-probe-1', runId, root, forkPath: '/tmp/resume-probe-1',
+    closedWorld: true, replayPolicy: 'deterministic', replay,
+  },
+  bind, // 核对中断副作用，分发独立工作区并重建上下文
+});
+if (result.status === 'stale') {
+  // validation.changed 是修复后图中的失效种子；用当前 checkpoint 重新刷新相关 agent。
+  console.log(result.validation.changed);
+}
+```
+
+`stale` 或 `validation_failed` 不调用 bind，也不改变 pending；失败不当作观测变化。
+`completed` 表示没有 pending，未探测；`resumed` 须继续检查 batch.outcomes。
+`AGENT_CAUSAL_RESUME_VALIDATED` 关联 planSeq、preparationSeq 和验证报告，返回的
+validationSeq 是该关联事件序号，validation.seq 是原始报告序号；重开后可查 journal。
+验证与绑定共用同一 preparation 的重叠调用保护，绑定前再次核对共享事务仍开放；
+checkpoint 变化沿用逐项 skipped。探测只验证当时基线上的声明行为，不验证共享 fork
+磁盘内容或宿主上下文；bind 仍负责输出一致性，最终文件提交仍需强制观测重放 OCC。

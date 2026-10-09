@@ -490,3 +490,11 @@
 - 两类故障×两种策略×稳定/再变化集成测试通过；3次重复/4 agent/1000轮哈希的12个变化样本正确，全程工具8→4。
 - 更新协议、VISION、原始报告与60行交接；下一步覆盖恢复期间输入变化与持久共享输出失效。
 - 验证：基线751通过/7跳过；pnpm typecheck、pnpm build、pnpm test通过（753通过/7跳过，53套件通过）；12个SIGKILL样本正确，git diff --check通过。
+
+## 2026-10-09 — 共享因果恢复前的观测有效性验证
+- 新增 resumeAgentSharedCausalRefreshWithValidation：当前同基线重放 pending 的修复后因果分支，有效才复用持久 repair 续跑绑定。
+- stale/validation_failed 保留 pending；错误不是变化证据，无 pending 幂等返回；验证与绑定共用重叠保护，探测后复查共享事务。
+- AGENT_CAUSAL_RESUME_VALIDATED 关联原计划、准备与验证报告；不把探测匹配视为文件发布证明，仍需宿主输出核对和强制 OCC。
+- 增加重开后匹配/输入再变化/工具异常/探测期间checkpoint推进与事务关闭覆盖，更新示例、VISION及60行交接。
+- 下一步将验证入口接入真实进程恢复基准，并补共享输出完整性证据。
+- 验证：首轮753通过/7跳过；pnpm typecheck、pnpm test通过（758通过/7跳过，53套件通过），git diff --check通过。

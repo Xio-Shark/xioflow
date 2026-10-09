@@ -10,8 +10,7 @@
 - 共享重建 src/agents/checkpoint-workspace.ts；不创建 agent / 消耗 agent step 预算。
 - 宿主保证依赖完整、确定性和文件效果；时间旅行仅 checkpoint 粒度，不重放模型/外部系统。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。环境需gcc/libc6-dev（缺cc时原生故障套件无法加载）。
-- validateWorkspaceCausalBranches：同一当前基线，逐分支独立 fork 重放，自动发现因果修复种子。
-- 工具异常不进入 changed；每分支首差即停；验证 fork / 基线回收，不改 checkpoint / 不提交。 CAUSAL_VALIDATION_COMPLETED 持久化报告、源分支 heads、基线 SnapshotRef 元数据。
+- validateWorkspaceCausalBranches：同一当前基线，逐分支独立 fork 重放，自动发现因果修复种子。 工具异常不进入 changed；每分支首差即停；验证 fork / 基线回收，不改 checkpoint / 不提交。 CAUSAL_VALIDATION_COMPLETED 持久化报告、源分支 heads、基线 SnapshotRef 元数据。
 - listWorkspaceCausalValidations(domain, { runId?, atSeq? }) 支持重开与报告历史切片。
 - prepareWorkspaceCausalRefresh：自动探测→共享修复准备；failed / unchanged 不分配修复。
 - 任一探测失败阻断整批修复；prepared 返回开放事务，由宿主 OCC / 绑定 / 回收。
@@ -19,8 +18,7 @@
 - commitWorkspaceTransaction 支持 observationPolicy: 'always'，无文件冲突也重放。
 - refreshWorkspaceCausalBranches：探测→共享修复→联合 heads 完整日志→强制重放提交。
 - 包含复用祖先；成功回收基线，冲突中止回收；提交抛错保留恢复资源并报告 txId。 依已有 validationSeq→txId→TX_COMMITTED 追溯；不分发独立事务、不绑定 checkpoint。
-- validate / prepare refresh / refresh 支持 replayReuse: baseline_observations（默认 none）。
-- 单次基线按 seq 复用 mutation 前纯观测；错误不缓存、不同节点不合并；提交完整重放。
+- validate / prepare refresh / refresh 支持 replayReuse: baseline_observations（默认 none）。 单次基线按 seq 复用 mutation 前纯观测；错误不缓存、不同节点不合并；提交完整重放。
 - 适配器须纯文件观测、与 fork 路径 / 内存副作用无关；缓存不跨调用或修复。
 - refresh / prepare refresh 可选 costModel；planWorkspaceCausalRefresh 可纯查询比较成本。
 - 每节点 execute / reuse / replay 同单位有限非负估算；溢出或异常在修复事务前拒绝。
@@ -32,8 +30,7 @@
 - planWorkspaceCausalRefreshPolicy 纯查询；联合节点去重、持平探测、拒绝非法估算与溢出。 CAUSAL_REFRESH_POLICY_SELECTED 先记意图，关联源 branches / atSeq / probeTxPrefix / repairTxId。
 - 预测不授权复用；直接重算沿用 repair 身份、无 validateReuse；两条发布路径均强制 OCC。
 - 策略入口 CAUSAL_REFRESH_MEASURED 返回 telemetrySeq，关联 decisionSeq / validationSeq。 listWorkspaceCausalRefreshTelemetry 跨Run/atSeq/重开；计回调次数/异常/耗时；落盘失败不撤销提交。
-- 策略 taskKey 分类；estimateWorkspaceCausalRefreshHistory 跨Run按类别估计回调毫秒成本。
-- 固定 trainingAtSeq；决策和遥测均完成才入训练，迟到只计缺失；须同时有 changed/unchanged。 后续独立探测计算成本MAE；failed/missing/recompute分开统计，宿主显式采用同单位预测。
+- 策略 taskKey 分类；estimateWorkspaceCausalRefreshHistory 跨Run按类别估计回调毫秒成本。 固定 trainingAtSeq；决策和遥测均完成才入训练，迟到只计缺失；须同时有 changed/unchanged。 后续独立探测计算成本MAE；failed/missing/recompute分开统计，宿主显式采用同单位预测。
 - benchmark:refresh-history：真实journal训练→冻结窗口→独立探测验证→历史/静态策略同扰动对照。
 - 新鲜文件夹具，策略交替顺序；每节点成本仅训练校准；单列训练开销、回调/总耗时与正确性。 强制probe的零预测是控制哨兵；MAE读estimate.evaluation；临时journal序号只在单次报告有效。
 - 历史预测 trainingAfterSeq：按决策序号冻结滑动训练窗口；excludedDecisions 计过时任务。 drift：独立验证变化率差值、Brier分数与样本量；单类别仍可统计，不自动改变策略。
@@ -57,4 +54,7 @@
 - cleanupAgentCausalFork：整个 domain 最新截止点核对→持久请求→既有 abort；只处理已登记 open/conflicted，保留所有基线。共享/pending/当前/committing拒绝，关闭事务不重复回收。
 - 截止点是前置核对，不锁异步文件操作；宿主须停止相关写入/发布并核对外部使用。请求不代表成功，TX_ABORTED reason关联requestSeq；中断需核对磁盘后重新规划。
 - listAgentCausalForkCleanups：runId/txId/atSeq/重开查询pending/aborted/failed；精确关联TX_ABORTED reason，失败持久记录；双重故障抛AggregateError，未决不推断磁盘。
-- benchmark:recovery schemaVersion=3：第四参数stable/input-changed接恢复→强制OCC→变化拒绝→全批刷新→代表输出提交；第五参数close/sigkill新增真实worker终止，failed/pending边界保持domain打开，核对SIGKILL后接管遗留锁并从journal恢复。12变化样本正确，执行8→4；crash.sample记录进程开销，非多事务原子提交/断电/模型测试。下一步：恢复过程输入变化及共享输出失效策略。
+- benchmark:recovery schemaVersion=3：第四参数stable/input-changed接恢复→强制OCC→变化拒绝→全批刷新→代表输出提交；第五参数close/sigkill新增真实worker终止，failed/pending边界保持domain打开，核对SIGKILL后接管遗留锁并从journal恢复。12变化样本正确，执行8→4；crash.sample记录进程开销，非多事务原子提交/断电/模型测试。真实进程基准保留，用于后续恢复验证成本对比。
+- resumeAgentSharedCausalRefreshWithValidation：当前同基线重放pending的修复后heads（含复用祖先），matched才续跑；stale/validation_failed保留pending，无bind/重算。completed无pending不探测，resumed仍需检查batch.outcomes。
+- 验证与绑定共用preparation重叠保护；探测后重查共享事务开放，checkpoint推进逐项skipped。AGENT_CAUSAL_RESUME_VALIDATED关联plan/preparation/validation；返回validationSeq为关联事件，validation.seq为报告。
+- 限制：只验证声明行为，不能证明共享fork磁盘/上下文未变；宿主仍负责输出一致性和强制OCC。下一步：将验证续跑接入真实进程恢复基准，对比过时绑定分发成本，并处理共享输出完整性。

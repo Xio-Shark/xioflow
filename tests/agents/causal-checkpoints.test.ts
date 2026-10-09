@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCheckpointWorkspaceReferences, planAgentCausalResourceCleanup, cleanupAgentCausalFork, listAgentCausalForkCleanups, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, retryAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCheckpointWorkspaceReferences, planAgentCausalResourceCleanup, cleanupAgentCausalFork, listAgentCausalForkCleanups, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, resumeAgentSharedCausalRefreshWithValidation, retryAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace, AgentSharedCausalRecoveryOptions } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -214,7 +214,7 @@ describe('agent checkpoint causal branches', () => {
     }
   });
 
-  it.each(['resume', 'advanced', 'closed', 'legacy', 'allocated', 'reservation_failed'] as const)('resumes pending publication after reopen: %s', async (mode) => {
+  it.each(['resume', 'advanced', 'closed', 'legacy', 'allocated', 'reservation_failed', 'validated', 'stale', 'probe_failed', 'probe_advanced', 'probe_closed'] as const)('resumes pending publication after reopen: %s', async (mode) => {
     const source = node();
     open();
     for (const id of ['first', 'second']) {
@@ -317,6 +317,61 @@ describe('agent checkpoint causal branches', () => {
       await expect(resumeAgentSharedCausalRefresh(runtime, execution.seq, bind))
         .rejects.toThrow(mode === 'closed' ? 'open transaction' : 'no durable repair');
       expect(bind).not.toHaveBeenCalled();
+      return;
+    }
+    if (['validated', 'stale', 'probe_failed', 'probe_advanced', 'probe_closed'].includes(mode)) {
+      const supervisor = new ProcessSupervisor(domain);
+      fs.writeFileSync(path.join(temp, 'repo', 'input'), mode === 'stale' ? 'changed-again' : 'new');
+      const replay = vi.fn(async (_entry: unknown, root: string) => {
+        await expect(resumeAgentSharedCausalRefresh(runtime, execution.seq, bind)).rejects.toThrow('already active');
+        if (mode === 'probe_failed') throw new Error('read unavailable');
+        if (mode === 'probe_advanced') runtime.restoreCheckpoint('second', runtime.checkpoints('second').at(-1)!.seq);
+        if (mode === 'probe_closed') await supervisor.abortWorkspaceTransaction('shared', 'closed during probe');
+        return fs.readFileSync(path.join(root, 'input'), 'utf8');
+      });
+      const options = { validation: { txId: 'resume-check', runId: 'run', root: path.join(temp, 'repo'),
+        forkPath: path.join(temp, 'resume-check'), closedWorld: true as const,
+        replayPolicy: 'deterministic' as const, replay }, bind };
+      if (mode === 'probe_closed') {
+        await expect(resumeAgentSharedCausalRefreshWithValidation(runtime, supervisor, execution.seq, options))
+          .rejects.toThrow('open transaction');
+        expect(bind).not.toHaveBeenCalled();
+        return;
+      }
+      const checked = await resumeAgentSharedCausalRefreshWithValidation(runtime, supervisor, execution.seq, options);
+      expect(checked.status).toBe(mode === 'stale' ? 'stale' : mode === 'probe_failed' ? 'validation_failed' : 'resumed');
+      expect(replay).toHaveBeenCalledTimes(1);
+      expect(runtime.checkpoints('first').at(-1)).toEqual(first);
+      if (checked.status === 'completed') throw new Error('expected validation');
+      expect(checked.validation.sourceBranches).toEqual([
+        { id: 'second', heads: (domain.getStore().getJournalEvent(domain.domainId, execution.repair!.seq)!.payload.repair as import('../../src/index.js').WorkspaceBranchRepairResult).branches.find(branch => branch.id === 'second')!.heads },
+      ]);
+      const linked = domain.getStore().getJournalEvent(domain.domainId, checked.validationSeq);
+      expect(linked?.payload).toMatchObject({ planSeq: execution.seq, preparationSeq: execution.repair!.seq,
+        validationSeq: checked.validation.seq, status: checked.status });
+      if (checked.status === 'resumed') {
+        expect(checked.batch.outcomes[0]).toMatchObject(mode === 'probe_advanced'
+          ? { status: 'skipped', reason: 'checkpoint_changed' } : { status: 'repaired' });
+        const completed = await resumeAgentSharedCausalRefreshWithValidation(runtime, supervisor, execution.seq, options);
+        expect(completed.status).toBe('completed');
+        expect(replay).toHaveBeenCalledTimes(1);
+      } else {
+        expect(bind).not.toHaveBeenCalled();
+        expect(checked.validation.changed).toHaveLength(mode === 'stale' ? 1 : 0);
+        expect(listAgentCausalRefreshExecutions(domain)[0].publications[1].status).toBe('pending');
+        runtime.close(); domain.close();
+        domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+        open();
+        expect(domain.getStore().getJournalEvent(domain.domainId, checked.validationSeq)).toEqual(linked);
+        fs.writeFileSync(path.join(temp, 'repo', 'input'), 'new');
+        const recovered = await resumeAgentSharedCausalRefreshWithValidation(runtime, new ProcessSupervisor(domain), execution.seq, {
+          ...options, validation: { ...options.validation, txId: 'recheck', forkPath: path.join(temp, 'recheck'),
+            replay: async (_entry, root) => fs.readFileSync(path.join(root, 'input'), 'utf8') },
+        });
+        expect(recovered.status).toBe('resumed');
+        expect(bind).toHaveBeenCalledTimes(1);
+      }
+      expect(runtime.getRunUsage('run')).toEqual(usage);
       return;
     }
     const result = await resumeAgentSharedCausalRefresh(runtime, execution.seq, bind);
