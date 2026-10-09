@@ -114,6 +114,25 @@ export function planAgentCausalResourceCleanup(
       resource.reasons.push('pending_publication');
     }
   }
+  // World preparation uses the same transactions but has no batch reservation.
+  // Include its durable allocation intents, even if the process died before
+  // TX_BEGUN. A batch-scoped query must not acquire unrelated world resources.
+  if (options.planSeq === undefined) for (const event of events) {
+    if (!['WORLD_STEP_STARTED', 'WORLD_REPAIR_STARTED'].includes(event.type)
+        || (options.runId !== undefined && event.runId !== options.runId)) continue;
+    const txId = event.payload.id;
+    if (typeof txId !== 'string' || typeof event.payload.worldId !== 'string') continue;
+    const resource = add(txId);
+    resource.preparationSeqs.push(event.seq);
+    const failed = events.some(e => e.seq > event.seq
+      && e.payload.worldId === event.payload.worldId && e.payload.id === txId
+      && e.type === (event.type === 'WORLD_STEP_STARTED' ? 'WORLD_STEP_FAILED' : 'WORLD_REPAIR_FAILED'));
+    // Completed preparation is still a live publication source. Closing the
+    // handle must explicitly terminate it before fork reclamation is possible.
+    if (!failed && ['reserved', 'open', 'committing'].includes(resource.state)) {
+      resource.reasons.push('pending_publication');
+    }
+  }
   return { atSeq, resources: [...resources.values()].map(resource => {
     const reasons = [...new Set(resource.reasons)];
     const forkReasons = reasons.filter(reason => reason !== 'historical_checkpoint' && reason !== 'referenced_baseline');

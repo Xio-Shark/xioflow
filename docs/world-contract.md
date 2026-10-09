@@ -294,3 +294,15 @@ explainWorldPublication.bindings 独立报告 pending/bound/failed；TX_COMMITTE
 同 key 重试或关闭重开后重试补齐关联，不重放工具、不重新发布；已有 bound/failed 记录保持不变。
 绑定记录落盘抛错会让调用抛错，但 readWorldPublication 仍返回原 committed 身份；宿主可据此重试。
 固定截止点查询不混入后续关联。尚无跨进程故障验收、外部宿主绑定或失败绑定重规划，M2/M4 未完成。
+
+### World事务接入共享资源规划
+
+`planAgentCausalResourceCleanup` 已同时识别world步骤与修复的持久分配意图，
+包括尚无 `TX_BEGUN` 的中断分配；按run筛选资源时，引用检查仍覆盖整个domain。
+指定旧批量入口的 `planSeq` 时不混入world资源。准备成功或尚未完成的候选保持
+`pending_publication`；失败后仍核验checkpoint和committing引用。无引用且已登记的
+失败fork可通过现有 `cleanupAgentCausalFork` 回收，失败与重试沿用原持久记录；
+历史基线不删除，固定截止点的规划可在重开后复查。
+
+这只是统一close的资源发现基础，尚未提供关闭调度、WorldCloseResult或
+explain.resources；规划截止点不是文件锁，未登记物理分配仍需恢复核对。

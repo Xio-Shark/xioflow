@@ -1,7 +1,7 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
-- 当前里程碑：M2（单世界正确性闭环）未完成；M1契约已冻结，统一公开入口待M2实现；M3/M4未完成。
-- 下一步最小切片：统一句柄/close资源记录，接通现有准备、刷新、提交和解释；随后补齐M2场景验收。
+- 下一步最小切片：统一句柄/close生命周期，消费已纳入world事务的共享资源规划器；接通准备、刷新、提交与解释。
+- 当前里程碑：M2（单世界正确性闭环）未完成；M1契约冻结，M3/M4待推进。
 - M2完成标准仍缺：统一句柄、close资源事实；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md冻结六入口状态表、覆盖和六类失败/重试/资源归属；src/world/contract.ts共享非公开契约，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
@@ -33,7 +33,7 @@
 - 内部入口均未公开；无重算幂等、中断自动续跑或统一资源清理；explain仍缺发布/绑定/资源事实。
 - 候选产物覆盖检查：执行完成及验证前后复用精确路径/Git树核验，拒绝symlink、目录和指纹漏收的忽略文件，failed并保留证据，不发布。
 - 该检查不推断隐性读取或未声明写入，也不是文件系统锁；最终由内部strict commit重验。合法写入/删除、声明不存在路径保持可用。
-- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，每轮先确认cc，当前容器已重新安装gcc/libc6-dev。
+- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，每轮先确认cc；当前容器command -v cc无结果，须先补工具链。
 - 内部prepareWorldRepair消费changed/selected_nodes持久报告，接既有prepareWorkspaceRepair；固定基线拓扑重放复用节点并验全部hash，物化复用写入后才重算闭包。
 - 修复前/复用后/完成后重验原产物及版本，最终覆盖/指纹检查；失败abort并留WORLD_REPAIR_FAILED与验证基线；成功记录事务、复用/替换及指纹。
 - 该基础层返回open事务及筛选后的refresh上下文，未产生WorldCandidate/执行模型或绑定checkpoint；不替代OCC或业务验收；已有5项回归覆盖修复准备边界。
@@ -51,10 +51,10 @@
 - readWorldPublication固定截止点只读查询，绑定前null、缺结果undetermined，TX_COMMITTED优先；重开身份不变。
 - 本轮M2：strict publication记录TX_REPLAY_FAILED及步骤/错误，清理临时重放资源；异常不再终止为conflicted，重开后原身份重试全部门禁。
 - 本轮M2：explainWorldPublication组合准备/刷新与发布事实，身份四字段核验，固定截止点保留变化路径、复用映射和原回执。
-- 绑定前身份查询拒绝；准备引用可查null，绑定后无结果undetermined，TX_COMMITTED立即可查；不读当前文件、不改变journal/预算。
 - 本轮M2：文件发布后持久关联候选完成checkpoint与commitSeq，核对归属/响应/heads及当前checkpoint；失败独立记录，不改原回执。
 - explain.bindings在固定截止点报告pending/bound/failed；重开原key补齐缺失记录，不重放/重复发布或回退预算；已记录结果幂等。
 - 绑定仅关联内核候选checkpoint，未接外部宿主存储；落盘异常可查原发布身份后重试，失败绑定暂无重规划。
-- 本轮M2：解释引用分离查询目标id与历史截止点，返回ref可直接复查；保留refresh/validation证据，不以候选id替代。
-- 新增/扩展普通候选、未发布、未决、已提交的引用复查及重开一致性；拒绝伪造目标与准备前截止点。
-- 验证：修改前补跑全量955通过、7跳过；本轮相关41项及typecheck通过，修改后未重复全量，下一轮先补跑。
+- 本轮M2：共享资源规划器纳入WORLD_STEP_STARTED/WORLD_REPAIR_STARTED，含中断的reserved分配；run/plan过滤保持边界。
+- 待发布及current checkpoint/committing保留；无引用失败fork复用原清理、失败记录和重试，保留baseline；固定截止点重开一致。
+- 尚无统一close调度、逐资源WorldCloseResult或explain.resources；规划不是锁，也不回收未登记的物理分配。
+- 验证：resources与causal-checkpoints共89项及typecheck通过；本轮未跑全量（留到末尾时不足5分钟），下一轮最后留足时间补跑。
