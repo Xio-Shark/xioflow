@@ -231,3 +231,28 @@ for (const execution of listAgentCausalRefreshExecutions(domain, { runId })) {
 记录准备关联或失败结果抛错时，入口向调用方抛错，不继续后续绑定；已发布的
 checkpoint 不回滚。共享事务始终由宿主持有，包括关联写入失败的情况，宿主应在
 `prepare` 内保留事务身份以便回收。绑定 checkpoint 仍不代表文件已通过 OCC 提交。
+
+### 续跑中断批次的未发布绑定
+
+`resumeAgentSharedCausalRefresh(runtime, planSeq, bind)` 从 journal 读取已保存的共享
+修复结果，只处理 `pending` 项，不重新探测或重算，也不重试已有 failed / skipped。
+新产生的准备记录保存完整 repair；缺少该数据的旧记录或 prepare 失败的计划明确拒绝续跑。
+共享事务必须仍开放；每项沿用冻结 checkpoint 的版本检查、停止状态检查，以及独立事务的
+Run、开放状态和独占归属检查。版本改变记为 skipped；重复调用已完成批次返回空 outcomes。
+同一 domain 内重叠调用同一准备记录会被拒绝，成功发布仍与 checkpoint 原子落盘。
+
+```ts
+import { resumeAgentSharedCausalRefresh } from '@xioflow/kernel';
+
+const continued = await resumeAgentSharedCausalRefresh(runtime, planSeq, async (impact, repair) => {
+  // 宿主按 planSeq + agentId 核对上次尝试的独立事务，回收或复用未绑定资源，
+  // 校验共享输出并重建上下文；必须返回开放的独立事务，可提供 discard。
+  return reconcileAndBind({ planSeq, impact, repair });
+});
+console.log(continued.outcomes);
+```
+
+调用方显式提供的 `bind` 承担中断后的副作用核对：pending 不证明此前没有分配文件或
+调用外部系统，内核不会自动回滚这些效果。共享工作区及其输出必须由宿主保留、校验；
+续跑不会把旧观测视为当前世界仍然有效的证据。后续文件发布继续经过 OCC。
+返回 plan 的 affected 仅包含本次未发布项；完整冻结计划与历次发布仍可通过历史 API 查询。

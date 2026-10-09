@@ -28,7 +28,6 @@
 - commitWorkspaceTransaction 支持 observationPolicy: 'always'，无文件冲突也重放。
 - refreshWorkspaceCausalBranches：探测→共享修复→联合 heads 完整日志→强制重放提交。
 - 包含复用祖先；成功回收基线，冲突中止回收；提交抛错保留恢复资源并报告 txId。 依已有 validationSeq→txId→TX_COMMITTED 追溯；不分发独立事务、不绑定 checkpoint。
-- 环境需 C 编译器（cc）与 libc 开发包；原生 reaper 测试必须实际构建。
 - validate / prepare refresh / refresh 支持 replayReuse: baseline_observations（默认 none）。
 - 单次基线按 seq 复用 mutation 前纯观测；错误不缓存、不同节点不合并；提交完整重放。
 - 适配器须纯文件观测、与 fork 路径 / 内存副作用无关；缓存不跨调用或修复。
@@ -47,14 +46,15 @@
 - benchmark:refresh-history：真实journal训练→冻结窗口→独立探测验证→历史/静态策略同扰动对照。
 - 新鲜文件夹具，策略交替顺序；每节点成本仅训练校准；单列训练开销、回调/总耗时与正确性。 强制probe的零预测是控制哨兵；MAE读estimate.evaluation；临时journal序号只在单次报告有效。
 - 历史预测 trainingAfterSeq：按决策序号冻结滑动训练窗口；excludedDecisions 计过时任务。 drift：独立验证变化率差值、Brier分数与样本量；单类别仍可统计，不自动改变策略。
-- 新增 causal-drift 独立基准：冻结旧/近期窗口，多重复成对对照、Brier/MAE与实测成本；见 docs/causal-drift-benchmark.md。下一步：异质工具成本与双向漂移。
+- 新增 causal-drift 独立基准：冻结旧/近期窗口，多重复成对对照、Brier/MAE与实测成本；见 docs/causal-drift-benchmark.md。异质工具成本与双向漂移待扩展。
 - explainRecomputation(changed, atSeq?, heads?)：逐失效节点列出所有变化源及各自最短依赖路径。
 - explainCausalRecovery：跨agent恢复预览附每个checkpoint的recomputation解释与工具/actor元数据；按checkpoint历史切片筛选变化源，未知全局种子报错；只读且重开可复现。
 - refreshAgentSharedCausalBatch：显式agentIds→冻结checkpoint→当前基线探测→失效路径preview→一次共享prepare与独立bind。
 - 任一probe失败阻断修复；探测期间任一选中checkpoint推进返回checkpoint_changed；未跟踪单列，未选中不恢复。
 - AGENT_CAUSAL_REFRESH_PLANNED关联validationSeq和checkpoint序号；意图不等于发布，recovered须检查逐项outcomes。
 - 共享恢复复用冻结计划绑定循环；不自动停止/resume/OCC提交，宿主仍负责复用验证、上下文/文件分发与资源回收。
-- listAgentCausalRefreshPlans：只读Run/atSeq查询冻结checkpoint上下文、失效路径与restartFrom；无需runtime，后续发布不改旧preview。
-- listAgentCausalRefreshExecutions：planSeq→AGENT_CAUSAL_REFRESH_PREPARED共享txId→逐项发布；refreshPreparationSeq随causal_repaired原子落盘。
-- failed/skipped单独持久化；pending表示截止点无持久结果（含旧计划、prepare失败/中断），不授权重试；关联写入失败抛错，共享资源仍归宿主。
-- 验证：typecheck通过、全量732通过/7跳过、定向53通过。下一步：基于明确发布归属制定部分恢复批次的续跑协议，核对checkpoint版本与独立事务状态，再重做未完成绑定；文件提交仍需OCC。
+- listAgentCausalRefreshPlans / Executions：历史冻结preview、planSeq→prepared→逐项原子发布；Run/atSeq/重开可查。
+- resumeAgentSharedCausalRefresh：新prepared持久完整repair，只续跑pending；开放共享事务+冻结checkpoint核对，复用共享计算、独立bind。
+- repaired/failed/skipped不重试，完成批次幂等返回；同domain同准备重叠拒绝。旧记录缺repair拒绝，宿主须核对中断副作用与保留/校验输出；文件仍需OCC。
+- 验证：pnpm typecheck通过；全量737通过/7跳过；原版本定向53通过。原生reaper需gcc/libc开发包；pnpm首次自动引导可能较慢。
+- 下一步：持久绑定尝试身份和独立事务分配归属，提供中断后孤立资源核对/回收协议，再扩展failed的显式重试。

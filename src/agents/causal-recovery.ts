@@ -1,3 +1,4 @@
+import { listAgentCausalRefreshExecutions } from './causal-recovery-history.js';
 import type { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { validateWorkspaceCausalBranches, type CausalValidationOptions, type CausalValidationResult } from '../workspace/causal-validation.js';
 import type { WorkspaceBranchRepairResult } from '../workspace/causal-repair.js';
@@ -109,31 +110,83 @@ async function recoverAgentSharedCausalPlan(
   });
   // Record before invoking any binding; a crash leaves explicit pending entries.
   const preparationSeq = refresh ? record('AGENT_CAUSAL_REFRESH_PREPARED', {
-    planSeq: refresh.planSeq, txId: repair.transaction.txId,
+    planSeq: refresh.planSeq, txId: repair.transaction.txId, repair,
   }) : undefined;
-  const batch = await recoverPlan(agents, plan, async (impact) => {
-    const branches = repair.branches.filter(({ id }) => id === impact.agentId);
-    const heads = [...new Set(impact.checkpoint.causalHeads!)].sort((a, b) => a - b);
-    const sourceHeads = [...new Set(branches[0]?.sourceHeads ?? [])].sort((a, b) => a - b);
-    if (branches.length !== 1 || JSON.stringify(heads) !== JSON.stringify(sourceHeads)) {
-      throw new Error(`Shared repair branch does not match checkpoint for "${impact.agentId}"`);
-    }
-    const prepared = await options.bind(impact, structuredClone(repair));
-    if (!prepared) return undefined;
-    if (prepared.workspace.txId === repair.transaction.txId) {
-      // Never invoke a callback that might dispose the shared workspace.
-      throw new Error('Shared repair transaction must remain host-owned; bind an independent workspace');
-    }
-    return { ...prepared, causalHeads: [...branches[0].heads] };
-  }, preparationSeq, refresh ? (outcome) => {
-    // Successful publication carries this reference in the same AGENT_STATE write.
-    if (outcome.status === 'repaired') return;
-    record('AGENT_CAUSAL_REFRESH_OUTCOME', { preparationSeq, agentId: outcome.agentId,
-      checkpointSeq: outcome.checkpointSeq, status: outcome.status,
-      ...(outcome.status === 'failed' ? { error: String(outcome.error) } : { reason: outcome.reason }),
-    });
-  } : undefined);
-  return { ...batch, repair };
+  return bindSharedRepair(agents, plan, options.bind, repair, preparationSeq, refresh?.runId);
+}
+
+// Domain ownership already excludes another process; this guards overlapping calls.
+const activePreparations = new WeakMap<object, Set<number>>();
+
+async function bindSharedRepair(
+  agents: AgentRuntime, plan: AgentCausalRecoveryPlan,
+  bind: AgentSharedCausalRecoveryOptions['bind'], repair: WorkspaceBranchRepairResult,
+  preparationSeq?: number, runId?: string,
+): Promise<AgentSharedCausalRecoveryBatch> {
+  const domain = agents.getDomain();
+  const active = activePreparations.get(domain) ?? new Set<number>();
+  activePreparations.set(domain, active);
+  if (preparationSeq !== undefined && active.has(preparationSeq)) throw new Error('Causal refresh binding already active');
+  if (preparationSeq !== undefined) active.add(preparationSeq);
+  try {
+    const batch = await recoverPlan(agents, plan, async (impact) => {
+      const branches = repair.branches.filter(({ id }) => id === impact.agentId);
+      const heads = [...new Set(impact.checkpoint.causalHeads!)].sort((a, b) => a - b);
+      const sourceHeads = [...new Set(branches[0]?.sourceHeads ?? [])].sort((a, b) => a - b);
+      if (branches.length !== 1 || JSON.stringify(heads) !== JSON.stringify(sourceHeads)) {
+        throw new Error(`Shared repair branch does not match checkpoint for "${impact.agentId}"`);
+      }
+      const prepared = await bind(impact, structuredClone(repair));
+      if (!prepared) return undefined;
+      if (prepared.workspace.txId === repair.transaction.txId) {
+        // Never invoke a callback that might dispose the shared workspace.
+        throw new Error('Shared repair transaction must remain host-owned; bind an independent workspace');
+      }
+      return { ...prepared, causalHeads: [...branches[0].heads] };
+    }, preparationSeq, preparationSeq !== undefined ? (outcome) => {
+      // Successful publication carries this reference in the same AGENT_STATE write.
+      if (outcome.status === 'repaired') return;
+      domain.getStore().recordJournalEvent({ domainId: domain.domainId, runId,
+        type: 'AGENT_CAUSAL_REFRESH_OUTCOME', timestamp: new Date().toISOString(),
+        payload: { version: 1, preparationSeq, agentId: outcome.agentId,
+          checkpointSeq: outcome.checkpointSeq, status: outcome.status,
+          ...(outcome.status === 'failed' ? { error: String(outcome.error) } : { reason: outcome.reason }),
+        } });
+    } : undefined);
+    return { ...batch, repair };
+  } finally {
+    if (preparationSeq !== undefined) active.delete(preparationSeq);
+  }
+}
+
+/** Continue only unpublished bindings from durable repair data, without probing or
+ * recomputing. bind must reconcile any earlier side effects/orphan transactions
+ * before returning an independently owned open workspace. Terminal outcomes are
+ * never retried; changed checkpoints are skipped. This does not commit files.
+ */
+export async function resumeAgentSharedCausalRefresh(
+  agents: AgentRuntime, planSeq: number, bind: AgentSharedCausalRecoveryOptions['bind'],
+): Promise<AgentSharedCausalRecoveryBatch> {
+  const domain = agents.getDomain();
+  const execution = listAgentCausalRefreshExecutions(domain).find(entry => entry.seq === planSeq);
+  if (!execution) throw new Error('Unknown causal refresh plan');
+  const pending = new Set(execution.publications.filter(entry => entry.status === 'pending').map(entry => entry.agentId));
+  const plan = { ...execution.preview, affected: execution.preview.affected.filter(entry => pending.has(entry.agentId)) };
+  if (!pending.size) return { plan, outcomes: [] };
+  const prepared = execution.repair && domain.getStore().getJournalEvent(domain.domainId, execution.repair.seq);
+  const repair = prepared?.payload.repair as WorkspaceBranchRepairResult | undefined;
+  if (!repair || repair.transaction.txId !== execution.repair?.txId) {
+    throw new Error('Causal refresh has no durable repair; cannot resume');
+  }
+  const events = domain.getStore().getJournalEvents(domain.domainId)
+    .filter(event => event.payload.txId === repair.transaction.txId && event.type.startsWith('TX_'));
+  const begun = events.find(event => event.type === 'TX_BEGUN');
+  if (!begun || begun.seq >= prepared!.seq || begun.runId !== repair.transaction.runId
+    || begun.payload.forkRoot !== repair.transaction.forkRoot
+    || events.some(event => ['TX_COMMITTING', 'TX_COMMITTED', 'TX_ABORTED', 'TX_CONFLICTED'].includes(event.type))) {
+    throw new Error('Shared repair must remain an open transaction');
+  }
+  return bindSharedRepair(agents, plan, bind, structuredClone(repair), execution.repair!.seq, execution.runId);
 }
 
 export interface AgentSharedCausalRefreshOptions extends AgentSharedCausalRecoveryOptions {
