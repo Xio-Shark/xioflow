@@ -4,7 +4,7 @@ xioflow 的目标是让多个 agent 在同一个不断变化的世界中投机�
 
 最新纵向入口 `refreshAgentSharedCausalBatch` 已接通选中 agent 的当前观测探测、失效证据路径与共享重算后的独立 checkpoint 绑定；探测期间版本改变要求重新规划，文件发布仍需 OCC。见[自动恢复示例](causal-recovery-batches.md#从观测变化自动恢复选中的-agent)。
 
-历史恢复计划可通过 `listAgentCausalRefreshPlans` 从 journal 独立重建冻结的 checkpoint 与失效路径；不启动调度器，支持 Run / 时间切片查询，计划不代表实际发布。
+历史恢复计划可通过 `listAgentCausalRefreshPlans` 从 journal 独立重建冻结的 checkpoint 与失效路径；不启动调度器，支持 Run / 时间切片查询，计划不代表实际发布。`listAgentCausalRefreshExecutions` 进一步关联共享修复事务与原子 checkpoint 发布，按时间切片区分 repaired / failed / skipped / pending，支持部分完成后的审计。
 
 ## 核心抽象
 

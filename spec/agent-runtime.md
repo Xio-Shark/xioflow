@@ -23,6 +23,9 @@ new checkpoint; control-only transitions carry neither data body. Restoration
 stores a backward `checkpointRef` to a checkpoint event for the same agent.
 A `causal_repaired` event stores the rebuilt checkpoint plus `checkpointRef`
 identifying the source context, with its new workspace and heads in metadata.
+Shared causal refresh publication also stores `refreshPreparationSeq` in this
+same event, referencing `AGENT_CAUSAL_REFRESH_PREPARED` and its plan/transaction.
+This optional field is backward compatible with existing version 2 journals.
 The runtime reconstructs complete public `AgentState`/`AgentCheckpoint` values;
 callers of those APIs do not need to understand the encoding. Raw journal readers
 must check the version. Missing, forward or cross-agent references fail visibly,
@@ -219,6 +222,13 @@ and leaves the agent paused. Agent and Run budgets are never rewound or charged
 by the binding operation; host repair work is accounted for by its own adapters.
 The new checkpoint participates in history, causal queries and later restoration,
 including after domain reopen.
+
+The optional fourth argument `refreshPreparationSeq` links publication to a
+persisted shared refresh preparation. Before host work, the runtime checks the
+preparation and plan versions, ordering, and selected agent/checkpoint identity.
+`refreshAgentSharedCausalBatch` supplies this reference automatically. Historical
+publication queries use this explicit link, never source checkpoint coincidence;
+see [shared recovery history](../docs/causal-recovery-batches.md#查询实际发布与部分完成).
 
 ```ts
 const impact = agents.planCausalRecovery([changedNodeSeq]).affected[0];

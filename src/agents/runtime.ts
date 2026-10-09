@@ -371,11 +371,24 @@ export class AgentRuntime {
     id: string,
     expectedCheckpointSeq: number,
     prepare: (checkpoint: AgentCheckpoint) => Promise<AgentCausalCheckpointPreparation | undefined>,
+    /** Durable shared refresh preparation; published atomically with this checkpoint. */
+    refreshPreparationSeq?: number,
   ): Promise<AgentState | undefined> {
     this.assertAccepting();
     const saved = this.checkpoints(id).at(-1)!;
     if (saved.seq !== expectedCheckpointSeq) throw new Error('Agent checkpoint changed; replan causal recovery');
     if (saved.causalHeads == null) throw new Error('Causal recovery requires a tracked checkpoint');
+    if (refreshPreparationSeq !== undefined) {
+      const store = this.domain.getStore();
+      const prepared = store.getJournalEvent(this.domain.domainId, refreshPreparationSeq);
+      const plan = prepared && store.getJournalEvent(this.domain.domainId, prepared.payload.planSeq as number);
+      if (prepared?.type !== 'AGENT_CAUSAL_REFRESH_PREPARED' || prepared.payload.version !== 1
+        || plan?.type !== 'AGENT_CAUSAL_REFRESH_PLANNED' || plan.payload.version !== 1
+        || plan.seq >= prepared.seq || !(plan.payload.checkpoints as { agentId: string; checkpointSeq: number }[])
+          .some(entry => entry.agentId === id && entry.checkpointSeq === expectedCheckpointSeq)) {
+        throw new Error('Invalid causal refresh preparation reference');
+      }
+    }
     return this.recoverPrepared(id, () => prepare(saved), (state, prepared) => {
       this.assertRun(state.runId);
       if (!prepared.workspace) throw new Error('Causal recovery requires a prepared workspace');
@@ -386,7 +399,7 @@ export class AgentRuntime {
         workspace: { txId: prepared.workspace.txId, forkRoot: prepared.workspace.forkRoot },
         status: 'paused', pauseRequested: false, reason: 'causal_repaired', error: null,
         validatedWorkspaceVersion: null,
-      }, 'causal_repaired', expectedCheckpointSeq);
+      }, 'causal_repaired', expectedCheckpointSeq, refreshPreparationSeq);
     });
   }
 
@@ -742,18 +755,18 @@ export class AgentRuntime {
     return () => { usage.pendingCommands--; };
   }
 
-  private record(state: AgentState, transition: string, checkpointRef?: number): AgentState {
+  private record(state: AgentState, transition: string, checkpointRef?: number, refreshPreparationSeq?: number): AgentState {
     this.assertOpen();
-    this.domain.getStore().transaction(() => this.append(state, transition, checkpointRef));
+    this.domain.getStore().transaction(() => this.append(state, transition, checkpointRef, refreshPreparationSeq));
     this.sync();
     return structuredClone(state);
   }
 
-  private append(state: AgentState, transition: string, checkpointRef?: number): void {
+  private append(state: AgentState, transition: string, checkpointRef?: number, refreshPreparationSeq?: number): void {
     const { input, checkpoint, ...metadata } = state;
     const contents = transition === 'created' ? { input, checkpoint }
       : transition === 'step_completed' ? { checkpoint }
-      : transition === 'causal_repaired' ? { checkpoint, checkpointRef }
+      : transition === 'causal_repaired' ? { checkpoint, checkpointRef, ...(refreshPreparationSeq === undefined ? {} : { refreshPreparationSeq }) }
       : transition === 'restored' ? { checkpointRef }
       : {};
     this.domain.getStore().recordJournalEvent({

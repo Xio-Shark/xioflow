@@ -413,3 +413,11 @@
 - 文档补充查询示例与部分失败语义：计划不代表 checkpoint 发布或 OCC 成功，不猜测共享修复/发布归属。
 - 验证：基线722通过/7跳过；新增7例，定向50通过；pnpm typecheck通过；最终pnpm test为729通过/7跳过；diff检查通过。
 - 下一步：持久关联planSeq、共享修复事务和逐项causal_repaired，覆盖部分绑定失败与崩溃窗口。
+
+## 2026-10-09 — 共享恢复的持久发布归属
+- 新增 listAgentCausalRefreshExecutions：只读关联冻结计划、共享修复事务及逐项 checkpoint 发布，支持 Run / atSeq / 重开。
+- AGENT_CAUSAL_REFRESH_PREPARED 在 bind 前关联 planSeq 与 txId；refreshPreparationSeq 与 causal_repaired checkpoint 同事务落盘。
+- failed / skipped 逐项持久化；pending 表示截止点没有结果，不猜测旧记录归属、不授权自动重试；不宣称 OCC 提交。
+- 关联或结果写入失败向调用方抛错，已发布 checkpoint 不回滚，共享资源仍由宿主管理；补充示例与 runtime 契约。
+- 验证：基线729通过/7跳过；定向53通过，覆盖部分失败/跳过、发布事务注入故障回滚、历史切片及重开；typecheck通过；全量732通过/7跳过；diff检查通过。
+- 下一步：明确部分恢复批次的续跑协议，核对版本和事务状态后重做未完成绑定。

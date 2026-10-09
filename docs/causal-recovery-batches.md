@@ -198,5 +198,36 @@ for (const plan of history) {
 
 这些记录表示**恢复意图**：即使 `prepare` 抛错，已经落盘的计划仍可查询。
 例如两个 agent 中一个绑定成功、另一个绑定失败，二者仍在原计划的 `affected` 内；
-查询不会把后者变成成功，也不推断事务已经 OCC 提交。逐项发布仍需核对
-`AGENT_STATE / causal_repaired` 及其 `checkpointRef`，当前接口不自动关联发布结果。
+查询不会把后者变成成功，也不推断事务已经 OCC 提交。
+
+### 查询实际发布与部分完成
+
+`listAgentCausalRefreshExecutions(domain, { runId?, atSeq? })` 保留上述冻结计划，
+另附 `repair: { seq, txId }` 和逐项 `publications`：
+
+```ts
+import { listAgentCausalRefreshExecutions } from '@xioflow/kernel';
+
+for (const execution of listAgentCausalRefreshExecutions(domain, { runId })) {
+  console.log(execution.seq, execution.repair?.txId);
+  for (const item of execution.publications) {
+    console.log(item.agentId, item.checkpointSeq, item.status);
+    if (item.status === 'repaired') console.log(item.seq, item.workspace);
+  }
+}
+```
+
+共享 `prepare` 返回后，入口先记录 `AGENT_CAUSAL_REFRESH_PREPARED`，明确关联
+`planSeq` 和共享事务，再开始逐项绑定。成功的 `AGENT_STATE / causal_repaired`
+将 `refreshPreparationSeq` 与新 checkpoint、原 `checkpointRef` 同事务落盘，
+不存在 checkpoint 已持久化、成功关联尚未写入的窗口。失败或跳过单独记录
+`AGENT_CAUSAL_REFRESH_OUTCOME`，含错误字符串或跳过原因。
+
+`pending` 表示截至查询序号没有持久结果：可能尚未执行、准备失败、进程中断，
+或失败结果写入失败；不能据此判定没有副作用或自动重试。旧版本计划也不猜测归属。
+计划刚写入时全部 pending；首个 checkpoint 发布时可查询 repaired / pending 混合结果。
+这些查询无需 runtime，重开可用，不写 journal，也不改变已有计划查询的返回值。
+
+记录准备关联或失败结果抛错时，入口向调用方抛错，不继续后续绑定；已发布的
+checkpoint 不回滚。共享事务始终由宿主持有，包括关联写入失败的情况，宿主应在
+`prepare` 内保留事务身份以便回收。绑定 checkpoint 仍不代表文件已通过 OCC 提交。

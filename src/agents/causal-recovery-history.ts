@@ -76,3 +76,70 @@ export function listAgentCausalRefreshPlans(
     return structuredClone({ seq: event.seq, runId: event.runId!, validationSeq, checkpoints, preview });
   });
 }
+
+export type AgentCausalRefreshPublication = { agentId: string; checkpointSeq: number } & (
+  | { status: 'pending' }
+  | { status: 'repaired'; seq: number; workspace: AgentState['workspace'] }
+  | { status: 'skipped'; seq: number; reason: string }
+  | { status: 'failed'; seq: number; error: string }
+);
+
+export interface AgentCausalRefreshExecutionRecord extends AgentCausalRefreshPlanRecord {
+  repair?: { seq: number; txId: string };
+  /** Pending means no durable outcome at this cutoff, not proof of failure. */
+  publications: AgentCausalRefreshPublication[];
+}
+
+/** Explicit publication lineage, including partial batches. Checkpoint binding is
+ * not an OCC commit. Preparation failures and legacy plans remain pending.
+ */
+export function listAgentCausalRefreshExecutions(
+  domain: ExecutionDomain, options: { runId?: string; atSeq?: number } = {},
+): AgentCausalRefreshExecutionRecord[] {
+  const plans = listAgentCausalRefreshPlans(domain, options);
+  const events = domain.getStore().getJournalEvents(domain.domainId)
+    .filter(event => event.seq <= (options.atSeq ?? Number.MAX_SAFE_INTEGER));
+  return plans.map(plan => {
+    const preparations = events.filter(event => event.type === 'AGENT_CAUSAL_REFRESH_PREPARED'
+      && event.payload.planSeq === plan.seq);
+    if (preparations.length > 1) throw new Error('Duplicate causal refresh preparation');
+    const prepared = preparations[0];
+    if (prepared && (prepared.payload.version !== 1 || prepared.seq <= plan.seq
+      || typeof prepared.payload.txId !== 'string')) throw new Error('Invalid causal refresh preparation');
+    const publications = plan.preview.affected.map(({ agentId, checkpoint }): AgentCausalRefreshPublication => {
+      const identity = { agentId, checkpointSeq: checkpoint.seq };
+      if (!prepared) return { ...identity, status: 'pending' };
+      const outcomes = events.filter(event =>
+        (event.type === 'AGENT_STATE' && event.payload.transition === 'causal_repaired'
+          && event.payload.refreshPreparationSeq === prepared.seq
+          && (event.payload.state as AgentState).id === agentId)
+        || (event.type === 'AGENT_CAUSAL_REFRESH_OUTCOME' && event.payload.preparationSeq === prepared.seq
+          && event.payload.agentId === agentId));
+      if (outcomes.length > 1) throw new Error('Duplicate causal refresh publication');
+      const outcome = outcomes[0];
+      if (!outcome) return { ...identity, status: 'pending' };
+      if (outcome.seq <= prepared.seq) throw new Error('Invalid causal refresh publication order');
+      if (outcome.type === 'AGENT_STATE') {
+        if (outcome.payload.version !== 2 || outcome.payload.checkpointRef !== checkpoint.seq) {
+          throw new Error('Invalid causal refresh publication reference');
+        }
+        // Validate that the published checkpoint data remains resolvable.
+        readAgentCheckpoint(outcome.seq, agentId, seq => domain.getStore().getJournalEvent(domain.domainId, seq));
+        return { ...identity, status: 'repaired', seq: outcome.seq,
+          workspace: structuredClone((outcome.payload.state as AgentState).workspace) };
+      }
+      if (outcome.payload.version !== 1 || outcome.payload.checkpointSeq !== checkpoint.seq) {
+        throw new Error('Invalid causal refresh outcome reference');
+      }
+      if (outcome.payload.status === 'failed' && typeof outcome.payload.error === 'string') {
+        return { ...identity, status: 'failed', seq: outcome.seq, error: outcome.payload.error };
+      }
+      if (outcome.payload.status === 'skipped' && typeof outcome.payload.reason === 'string') {
+        return { ...identity, status: 'skipped', seq: outcome.seq, reason: outcome.payload.reason };
+      }
+      throw new Error('Invalid causal refresh outcome');
+    });
+    return { ...plan, ...(prepared ? { repair: { seq: prepared.seq, txId: prepared.payload.txId as string } } : {}),
+      publications };
+  });
+}

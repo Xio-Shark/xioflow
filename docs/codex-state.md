@@ -54,7 +54,7 @@
 - 任一probe失败阻断修复；探测期间任一选中checkpoint推进返回checkpoint_changed；未跟踪单列，未选中不恢复。
 - AGENT_CAUSAL_REFRESH_PLANNED关联validationSeq和checkpoint序号；意图不等于发布，recovered须检查逐项outcomes。
 - 共享恢复复用冻结计划绑定循环；不自动停止/resume/OCC提交，宿主仍负责复用验证、上下文/文件分发与资源回收。
-- listAgentCausalRefreshPlans(domain, {runId?, atSeq?})：纯journal查询冻结计划，重建原checkpoint上下文/失效最短路径/restartFrom；无需AgentRuntime。
-- 查询按原checkpoint引用与计划时序切片；后续发布不改旧preview；恢复引用可解析；缺失引用/未知版本报错，返回深拷贝。runId是发起探测的Run。
-- 查询只表示意图，即使prepare失败也可查询；未自动关联共享修复及逐项发布，不证明OCC成功。本轮typecheck通过、全量729通过/7跳过，定向50通过；无新依赖。
-- 下一步：持久关联planSeq→共享修复事务→逐项causal_repaired；覆盖部分绑定失败和崩溃窗口，避免凭checkpointRef猜测发布归属。
+- listAgentCausalRefreshPlans：只读Run/atSeq查询冻结checkpoint上下文、失效路径与restartFrom；无需runtime，后续发布不改旧preview。
+- listAgentCausalRefreshExecutions：planSeq→AGENT_CAUSAL_REFRESH_PREPARED共享txId→逐项发布；refreshPreparationSeq随causal_repaired原子落盘。
+- failed/skipped单独持久化；pending表示截止点无持久结果（含旧计划、prepare失败/中断），不授权重试；关联写入失败抛错，共享资源仍归宿主。
+- 验证：typecheck通过、全量732通过/7跳过、定向53通过。下一步：基于明确发布归属制定部分恢复批次的续跑协议，核对checkpoint版本与独立事务状态，再重做未完成绑定；文件提交仍需OCC。

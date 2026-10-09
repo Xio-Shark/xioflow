@@ -36,6 +36,8 @@ async function recoverPlan(
   agents: AgentRuntime,
   plan: AgentCausalRecoveryPlan,
   prepare: (impact: AgentCausalRecoveryImpact) => Promise<AgentCausalCheckpointPreparation | undefined>,
+  refreshPreparationSeq?: number,
+  settled?: (outcome: AgentCausalRecoveryOutcome) => void,
 ): Promise<AgentCausalRecoveryBatch> {
   const outcomes: AgentCausalRecoveryOutcome[] = [];
   for (const impact of plan.affected) {
@@ -52,11 +54,13 @@ async function recoverPlan(
         continue;
       }
       const agent = await agents.recoverCausalCheckpoint(impact.agentId, impact.checkpoint.seq,
-        () => prepare(structuredClone(impact)));
+        () => prepare(structuredClone(impact)), refreshPreparationSeq);
       outcomes.push(agent ? { ...identity, status: 'repaired', agent }
         : { ...identity, status: 'skipped', reason: 'not_repaired' });
     } catch (error) {
       outcomes.push({ ...identity, status: 'failed', error });
+    } finally {
+      settled?.(outcomes.at(-1)!);
     }
   }
   return { plan, outcomes };
@@ -94,9 +98,19 @@ async function recoverAgentSharedCausalPlan(
   agents: AgentRuntime,
   plan: AgentCausalRecoveryPlan,
   options: AgentSharedCausalRecoveryOptions,
+  refresh?: { planSeq: number; runId: string },
 ): Promise<AgentSharedCausalRecoveryBatch> {
   if (!plan.affected.length) return { plan, outcomes: [] };
   const repair = structuredClone(await options.prepare(structuredClone(plan)));
+  const domain = agents.getDomain();
+  const record = (type: string, payload: Record<string, unknown>) => domain.getStore().recordJournalEvent({
+    domainId: domain.domainId, runId: refresh!.runId, type, timestamp: new Date().toISOString(),
+    payload: { version: 1, ...payload },
+  });
+  // Record before invoking any binding; a crash leaves explicit pending entries.
+  const preparationSeq = refresh ? record('AGENT_CAUSAL_REFRESH_PREPARED', {
+    planSeq: refresh.planSeq, txId: repair.transaction.txId,
+  }) : undefined;
   const batch = await recoverPlan(agents, plan, async (impact) => {
     const branches = repair.branches.filter(({ id }) => id === impact.agentId);
     const heads = [...new Set(impact.checkpoint.causalHeads!)].sort((a, b) => a - b);
@@ -111,7 +125,14 @@ async function recoverAgentSharedCausalPlan(
       throw new Error('Shared repair transaction must remain host-owned; bind an independent workspace');
     }
     return { ...prepared, causalHeads: [...branches[0].heads] };
-  });
+  }, preparationSeq, refresh ? (outcome) => {
+    // Successful publication carries this reference in the same AGENT_STATE write.
+    if (outcome.status === 'repaired') return;
+    record('AGENT_CAUSAL_REFRESH_OUTCOME', { preparationSeq, agentId: outcome.agentId,
+      checkpointSeq: outcome.checkpointSeq, status: outcome.status,
+      ...(outcome.status === 'failed' ? { error: String(outcome.error) } : { reason: outcome.reason }),
+    });
+  } : undefined);
   return { ...batch, repair };
 }
 
@@ -167,6 +188,6 @@ export async function refreshAgentSharedCausalBatch(
       checkpoints: checkpoints.map(({ id, checkpoint }) => ({ agentId: id, checkpointSeq: checkpoint.seq })) },
   });
   if (!preview.affected.length) return { status: 'unchanged', validation, planSeq, preview };
-  const batch = await recoverAgentSharedCausalPlan(agents, structuredClone(preview), recovery);
+  const batch = await recoverAgentSharedCausalPlan(agents, structuredClone(preview), recovery, { planSeq, runId: validationOptions.runId });
   return { status: 'recovered', validation, planSeq, preview, batch };
 }
