@@ -444,3 +444,36 @@ expected / actual 指纹或错误，`outputSeq` 指向拒绝证据；成功核�
 宿主须在准备及验证到分发期间保持共享 fork 不变；核对不持有文件系统锁，也不校验
 bind 生成的独立工作区或上下文。最终文件提交仍需强制观测重放 OCC。旧无指纹记录
 可重新刷新；宿主自行核验后也可使用原始 resume 入口，不能把它当成已通过输出验证。
+
+## 按总成本选择持久恢复路径
+
+`planAgentCausalResumePolicy(forecast)` 是纯查询，比较验证后续跑与直接重算整个 pending 批次。
+所有成本须使用相同单位，包含输出指纹、观测探测、上下文重建和独立输出分发等实际开销。
+`rejectionProbability` 表示验证被正常拒绝的概率（输出无效、观测变化或报告的探测失败），
+期望成本为 `(1-p)*(validationAccepted+resume) + p*(validationRejected+recompute)`；持平保留验证。
+估计值必须有限且非负，概率在 `[0,1]`，求和溢出拒绝。
+
+```ts
+const result = await resumeAgentSharedCausalRefreshWithPolicy(runtime, supervisor, planSeq, {
+  forecast: { rejectionProbability: 0.2, validationAccepted: 12,
+    validationRejected: 8, resume: 30, recompute: 200 }, // 宿主测量校准，同单位
+  validation, // 与 resumeAgentSharedCausalRefreshWithValidation 相同
+  bind,       // 已验证的共享结果分发
+  recompute: async impact => rebuildCheckpointAndWorkspace(impact),
+});
+for (const outcome of result.batch.outcomes) {
+  // 分别检查 repaired / skipped / failed；批次完成不表示所有 agent 成功。
+}
+```
+
+`recompute` 必须从当前世界完整重建该 checkpoint 的依赖、上下文、causalHeads 和独立开放事务，
+返回 `AgentCausalCheckpointPreparation`；资源副作用由宿主核对和回收。这里只调用被冻结的 pending 项，
+沿用 checkpoint 版本核对、agent 停止状态要求和逐项原子发布；已发布项不会重算。
+验证分支复用原有输出双重指纹与观测重放；正常拒绝后自动重算，异常抛出，不假装恢复成功。
+直接重算无需读取可能已经损坏的旧共享输出，但不会释放它。
+
+`AGENT_CAUSAL_RESUME_POLICY_SELECTED` 在工作前持久保存成本、选择、原计划/准备身份及 checkpoint 序号；
+`AGENT_CAUSAL_RESUME_POLICY_COMPLETED` 关联决策、实际路径耗时及拒绝证据，异常记为 `..._FAILED`。
+结果附 `decisionSeq` / `outcomeSeq`，可从 journal 跨重开核对；缺少结果事件只表示未决。
+checkpoint 发布继续归入原准备记录，`listAgentCausalRefreshExecutions` 可查询逐项结果，中断仍用既有 resume。
+预测不授权复用；文件发布仍需 OCC，API 不提供整批原子提交，也不自动学习成本。

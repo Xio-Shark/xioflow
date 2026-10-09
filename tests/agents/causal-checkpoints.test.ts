@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCheckpointWorkspaceReferences, planAgentCausalResourceCleanup, cleanupAgentCausalFork, listAgentCausalForkCleanups, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, resumeAgentSharedCausalRefreshWithValidation, retryAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCheckpointWorkspaceReferences, planAgentCausalResourceCleanup, cleanupAgentCausalFork, listAgentCausalForkCleanups, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, resumeAgentSharedCausalRefreshWithValidation, resumeAgentSharedCausalRefreshWithPolicy, retryAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace, AgentSharedCausalRecoveryOptions } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -214,7 +214,7 @@ describe('agent checkpoint causal branches', () => {
     }
   });
 
-  it.each(['resume', 'advanced', 'closed', 'legacy', 'allocated', 'reservation_failed', 'validated', 'stale', 'probe_failed', 'probe_advanced', 'probe_closed', 'output_changed', 'output_deleted', 'output_added', 'output_missing', 'output_unavailable', 'probe_output_changed', 'output_check_closed'] as const)('resumes pending publication after reopen: %s', async (mode) => {
+  it.each(['policy_validate', 'policy_recompute', 'policy_stale', 'policy_failed', 'resume', 'advanced', 'closed', 'legacy', 'allocated', 'reservation_failed', 'validated', 'stale', 'probe_failed', 'probe_advanced', 'probe_closed', 'output_changed', 'output_deleted', 'output_added', 'output_missing', 'output_unavailable', 'probe_output_changed', 'output_check_closed'] as const)('resumes pending publication after reopen: %s', async (mode) => {
     const source = node();
     open();
     for (const id of ['first', 'second']) {
@@ -317,6 +317,45 @@ describe('agent checkpoint causal branches', () => {
         txId: 'second-resumed', runId: 'run', root: path.join(temp, 'repo'), forkPath: path.join(temp, 'second-resumed'),
       }) };
     });
+    if (mode.startsWith('policy_')) {
+      fs.writeFileSync(path.join(temp, 'repo', 'input'), mode === 'policy_stale' ? 'latest' : 'new');
+      const replay = vi.fn(async (_entry: unknown, root: string) => fs.readFileSync(path.join(root, 'input'), 'utf8'));
+      const recompute = vi.fn(async () => {
+        await expect(resumeAgentSharedCausalRefresh(runtime, execution.seq, bind)).rejects.toThrow('already active');
+        if (mode === 'policy_failed') throw new Error('reconstruction unavailable');
+        const rebuiltWorkspace = await new ProcessSupervisor(domain).beginWorkspaceTransaction({ txId: 'rebuilt', runId: 'run',
+          root: path.join(temp, 'repo'), forkPath: path.join(temp, 'rebuilt') });
+        const head = new WorkspaceCausalGraph(domain).record({ txId: 'rebuilt', actorId: 'second', dependsOn: [],
+          observation: { kind: 'observe', call: { tool: 'read', args: {} },
+            resultHash: fs.readFileSync(path.join(temp, 'repo', 'input'), 'utf8') } });
+        return { checkpoint: 'rebuilt', causalHeads: [head.seq],
+          workspace: rebuiltWorkspace };
+      });
+      const options = { forecast: { rejectionProbability: 0, validationAccepted: 1,
+        validationRejected: 1, resume: 1, recompute: mode === 'policy_recompute' || mode === 'policy_failed' ? 1 : 10 },
+        validation: { txId: 'policy-check', runId: 'run', root: path.join(temp, 'repo'),
+          forkPath: path.join(temp, 'policy-check'), closedWorld: true as const, replayPolicy: 'deterministic' as const, replay },
+        bind, recompute };
+      const result = await resumeAgentSharedCausalRefreshWithPolicy(runtime, new ProcessSupervisor(domain), execution.seq, options);
+      expect(result.status).toBe(mode === 'policy_validate' ? 'validated' : 'recomputed');
+      expect(replay).toHaveBeenCalledTimes(mode === 'policy_recompute' || mode === 'policy_failed' ? 0 : 1);
+      expect(recompute).toHaveBeenCalledTimes(mode === 'policy_validate' ? 0 : 1);
+      expect(bind).toHaveBeenCalledTimes(mode === 'policy_validate' ? 1 : 0);
+      expect(runtime.checkpoints('first').at(-1)).toEqual(first);
+      expect(result.batch.outcomes[0].status).toBe(mode === 'policy_failed' ? 'failed' : 'repaired');
+      const saved = listAgentCausalRefreshExecutions(domain);
+      expect(saved[0].publications.map(entry => entry.status)).toEqual(['repaired', mode === 'policy_failed' ? 'failed' : 'repaired']);
+      expect(await resumeAgentSharedCausalRefreshWithPolicy(runtime, new ProcessSupervisor(domain), execution.seq, options))
+        .toMatchObject({ status: 'completed' });
+      const evidence = domain.getStore().getJournalEvents(domain.domainId).filter(event => event.type.startsWith('AGENT_CAUSAL_RESUME_POLICY_'));
+      expect(evidence.map(event => event.type)).toEqual(['AGENT_CAUSAL_RESUME_POLICY_SELECTED', 'AGENT_CAUSAL_RESUME_POLICY_COMPLETED']);
+      expect(evidence[1].payload.decisionSeq).toBe(evidence[0].seq);
+      runtime.close(); domain.close();
+      domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints'); open();
+      expect(listAgentCausalRefreshExecutions(domain)).toEqual(saved);
+      expect(domain.getStore().getJournalEvent(domain.domainId, evidence[1].seq)).toEqual(evidence[1]);
+      return;
+    }
     if (mode === 'closed' || mode === 'legacy') {
       await expect(resumeAgentSharedCausalRefresh(runtime, execution.seq, bind))
         .rejects.toThrow(mode === 'closed' ? 'open transaction' : 'no durable repair');

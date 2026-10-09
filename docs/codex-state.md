@@ -7,7 +7,6 @@
 - recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。 prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。 recoverAgentSharedCausalBatch：一次共享重算，逐项绑定独立事务与上下文。 单事务单活跃 agent；bind 分发独立输出和重建上下文；拒绝绑定或回收共享事务。
 - forkAgentCheckpoint：历史 TX_BEGUN 基线重放，创建同 Run 新 agent，保留累计预算。
 - 要求 deterministic、完整 closedWorld 前缀及逐步哈希；基线缺失失败。 compareAgentCheckpoints：跨 agent / 事务 / Run 对比上下文 JSON Pointer 与因果分支。 compareAgentCheckpointFiles：重建历史工作区并比较实际文件 A/D/M/T。
-- 共享重建 src/agents/checkpoint-workspace.ts；不创建 agent / 消耗 agent step 预算。
 - 宿主保证依赖完整、确定性和文件效果；时间旅行仅 checkpoint 粒度，不重放模型/外部系统。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。环境需gcc/libc6-dev（缺cc时原生故障套件无法加载）。
 - validateWorkspaceCausalBranches：同一当前基线，逐分支独立 fork 重放，自动发现因果修复种子。 工具异常不进入 changed；每分支首差即停；验证 fork / 基线回收，不改 checkpoint / 不提交。 CAUSAL_VALIDATION_COMPLETED 持久化报告、源分支 heads、基线 SnapshotRef 元数据。
@@ -19,7 +18,6 @@
 - refreshWorkspaceCausalBranches：探测→共享修复→联合 heads 完整日志→强制重放提交。
 - 包含复用祖先；成功回收基线，冲突中止回收；提交抛错保留恢复资源并报告 txId。 依已有 validationSeq→txId→TX_COMMITTED 追溯；不分发独立事务、不绑定 checkpoint。
 - validate / prepare refresh / refresh 支持 replayReuse: baseline_observations（默认 none）。 单次基线按 seq 复用 mutation 前纯观测；错误不缓存、不同节点不合并；提交完整重放。
-- 适配器须纯文件观测、与 fork 路径 / 内存副作用无关；缓存不跨调用或修复。
 - refresh / prepare refresh 可选 costModel；planWorkspaceCausalRefresh 可纯查询比较成本。
 - 每节点 execute / reuse / replay 同单位有限非负估算；溢出或异常在修复事务前拒绝。
 - 比较增量重算+复用验证+完整提交重放与全部重算+完整提交重放；相等保留增量。 full 只重算选中联合祖先，共享节点一次；validateReuse 收到 []，保留强制 OCC。
@@ -28,7 +26,6 @@
 - benchmark:refresh 七模式 schemaVersion=4；先固定forecast再扰动，命中/失准样本见causal-refresh-policy.sample.json。
 - refreshWorkspaceCausalBranchesWithPolicy：探测前按宿主概率和条件成本选择 probe / recompute。
 - planWorkspaceCausalRefreshPolicy 纯查询；联合节点去重、持平探测、拒绝非法估算与溢出。 CAUSAL_REFRESH_POLICY_SELECTED 先记意图，关联源 branches / atSeq / probeTxPrefix / repairTxId。
-- 预测不授权复用；直接重算沿用 repair 身份、无 validateReuse；两条发布路径均强制 OCC。
 - 策略入口 CAUSAL_REFRESH_MEASURED 返回 telemetrySeq，关联 decisionSeq / validationSeq。 listWorkspaceCausalRefreshTelemetry 跨Run/atSeq/重开；计回调次数/异常/耗时；落盘失败不撤销提交。
 - 策略 taskKey 分类；estimateWorkspaceCausalRefreshHistory 跨Run按类别估计回调毫秒成本。 固定 trainingAtSeq；决策和遥测均完成才入训练，迟到只计缺失；须同时有 changed/unchanged。 后续独立探测计算成本MAE；failed/missing/recompute分开统计，宿主显式采用同单位预测。
 - benchmark:refresh-history：真实journal训练→冻结窗口→独立探测验证→历史/静态策略同扰动对照。
@@ -57,4 +54,7 @@
 - resumeAgentSharedCausalRefreshWithValidation：当前基线重放pending修复后heads，matched才续跑；stale/validation_failed保留pending；与bind共用preparation重叠保护，探测后重查事务。AGENT_CAUSAL_RESUME_VALIDATED关联plan/preparation/validation，文件发布仍需OCC。
 - benchmark:recovery schemaVersion=4：第六参数recoveryInput(stable/input-changed)启用pending三策略对照（直接续跑/验证续跑/重跑）；恢复前扰动与第四参数发布前扰动独立。recoveryEvidence计绑定/探测/拒绝/分发校验，验证事件核对；恢复保留已发布历史，发布后核对全批新鲜度。
 - 共享refresh准备记录output（基线/coverage/文件树指纹）；验证resume在probe前后核对，output_invalid区分changed/missing/unavailable并保持pending。AGENT_CAUSAL_SHARED_OUTPUT_VALIDATED持久证据，旧无证据拒绝；宿主保持共享fork静止，范围沿用快照，不证明上下文/分发结果。benchmark:recovery schemaVersion=5第七参数recoveryOutput支持stable/tampered/deleted，独立于两次输入扰动；SIGKILL重开后注入，三策略均宿主分发哈希核对。指纹提前拒绝避免一次绑定/输出读取，均需重算；outputChecks/outputSeq关联证据，prebindValidationMs含查询/指纹/探测/journal，非纯指纹耗时。
-- benchmark:recovery schemaVersion=6：第八参数逗号分隔outputFileBytes，派生payload覆盖生成/重放/分发/最终OCC校验，checkpoint保留摘要；有payload时损坏最后一个文件。恢复分发字节/耗时包含失败尝试，不含fork/内核指纹；summary附验证与分发均值。下一步：多规模多轮独立测量并接入恢复成本策略，避免轻量合成任务外推。
+- benchmark:recovery schemaVersion=6：第八参数逗号分隔outputFileBytes，派生payload覆盖生成/重放/分发/最终OCC校验，checkpoint保留摘要；有payload时损坏最后一个文件。恢复分发字节/耗时包含失败尝试，不含fork/内核指纹；summary附验证与分发均值。
+- resumeAgentSharedCausalRefreshWithPolicy：完整pending批次成本选择validate/recompute；正常验证拒绝自动宿主重建，异常抛出。planAgentCausalResumePolicy纯查询，概率/有限成本/溢出检查，持平验证。
+- recompute逐项返回完整checkpoint/heads/独立workspace，沿用冻结版本核对、原preparation发布和重叠保护；保留已发布项及旧共享资源。SELECTED/COMPLETED/FAILED事件关联决策/拒绝证据/耗时；批次完成须核对outcomes，文件仍需OCC。
+- 下一步：多规模多轮恢复测量校准forecast，对照策略实际成本与失准；当前宿主预测，不宣称生产/token收益。

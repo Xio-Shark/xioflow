@@ -1,4 +1,5 @@
 import { listAgentCausalRefreshExecutions, type AgentCausalRefreshExecutionRecord } from './causal-recovery-history.js';
+import { planAgentCausalResumePolicy, type AgentCausalResumeForecast } from './causal-resume-cost.js';
 import type { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { validateWorkspaceCausalBranches, type CausalValidationOptions, type CausalValidationResult } from '../workspace/causal-validation.js';
 import type { WorkspaceBranchRepairResult } from '../workspace/causal-repair.js';
@@ -301,6 +302,77 @@ export async function resumeAgentSharedCausalRefreshWithValidation(
   if (output && output.status !== 'matched') return { status: 'output_invalid', output, outputSeq };
   if (status !== 'resumed') return { status, validation: validation!, validationSeq };
   return { status, validation: validation!, validationSeq, batch };
+}
+
+/** Choose validated reuse or host reconstruction for only the durable pending batch.
+ * Rejected validation falls back to reconstruction. The host must reconstruct all
+ * dependencies in recompute, reconcile orphan effects and use OCC to publish files.
+ * Per-agent checkpoint publication retains the original preparation identity.
+ */
+export async function resumeAgentSharedCausalRefreshWithPolicy(
+  agents: AgentRuntime, supervisor: ProcessSupervisor, planSeq: number,
+  options: Parameters<typeof resumeAgentSharedCausalRefreshWithValidation>[3] & {
+    forecast: AgentCausalResumeForecast;
+    recompute(impact: AgentCausalRecoveryImpact): Promise<AgentCausalCheckpointPreparation | undefined>;
+  },
+) {
+  const domain = agents.getDomain();
+  if (domain !== supervisor.getDomain()) throw new Error('Agent and workspace supervisor must share a domain');
+  const policy = planAgentCausalResumePolicy(options.forecast);
+  const execution = listAgentCausalRefreshExecutions(domain).find(entry => entry.seq === planSeq);
+  if (!execution) throw new Error('Unknown causal refresh plan');
+  const pending = new Set(execution.publications.filter(entry => entry.status === 'pending').map(entry => entry.agentId));
+  const plan = { ...execution.preview, affected: execution.preview.affected.filter(entry => pending.has(entry.agentId)) };
+  if (!pending.size) return { status: 'completed' as const, batch: { plan, outcomes: [] } };
+  if (!execution.repair) throw new Error('Causal refresh has no durable preparation');
+  const preparationSeq = execution.repair.seq;
+  const active = activePreparations.get(domain) ?? new Set<number>();
+  activePreparations.set(domain, active);
+  if (active.has(preparationSeq)) throw new Error('Causal refresh binding already active');
+  const record = (type: string, payload: Record<string, unknown>) => domain.getStore().recordJournalEvent({
+    domainId: domain.domainId, runId: execution.runId, type, timestamp: new Date().toISOString(),
+    payload: { version: 1, planSeq, preparationSeq, ...payload },
+  });
+  const decisionSeq = record('AGENT_CAUSAL_RESUME_POLICY_SELECTED', {
+    policy, checkpoints: plan.affected.map(entry => ({ agentId: entry.agentId, checkpointSeq: entry.checkpoint.seq })),
+  });
+  const started = performance.now();
+  const recompute = options.recompute;
+  let validation: AgentValidatedCausalResumeResult | undefined;
+  try {
+    if (policy.strategy === 'validate') {
+      validation = await resumeAgentSharedCausalRefreshWithValidation(agents, supervisor, planSeq, options);
+      if (validation.status === 'resumed' || validation.status === 'completed') {
+        const outcomeSeq = record('AGENT_CAUSAL_RESUME_POLICY_COMPLETED', {
+          decisionSeq, status: validation.status, durationMs: performance.now() - started,
+          ...(validation.status === 'resumed' ? { validationSeq: validation.validationSeq } : {}),
+        });
+        return { status: 'validated' as const, policy, decisionSeq, outcomeSeq, validation, batch: validation.batch };
+      }
+    }
+    if (active.has(preparationSeq)) throw new Error('Causal refresh binding already active');
+    active.add(preparationSeq);
+    let batch: AgentCausalRecoveryBatch;
+    try {
+      batch = await recoverPlan(agents, plan, recompute, preparationSeq, outcome => {
+        if (outcome.status !== 'repaired') record('AGENT_CAUSAL_REFRESH_OUTCOME', {
+          agentId: outcome.agentId, checkpointSeq: outcome.checkpointSeq, status: outcome.status,
+          ...(outcome.status === 'failed' ? { error: String(outcome.error) } : { reason: outcome.reason }),
+        });
+      });
+    } finally { active.delete(preparationSeq); }
+    const outcomeSeq = record('AGENT_CAUSAL_RESUME_POLICY_COMPLETED', {
+      decisionSeq, status: 'recomputed', durationMs: performance.now() - started,
+      ...(validation ? { rejection: validation.status,
+        ...('outputSeq' in validation ? { outputSeq: validation.outputSeq } : {}),
+        ...('validationSeq' in validation ? { validationSeq: validation.validationSeq } : {}) } : {}),
+    });
+    return { status: 'recomputed' as const, policy, decisionSeq, outcomeSeq, validation, batch };
+  } catch (error) {
+    try { record('AGENT_CAUSAL_RESUME_POLICY_FAILED', { decisionSeq, error: String(error) }); }
+    catch (journalError) { throw new AggregateError([error, journalError], 'Causal resume policy failed; inspect durable publications'); }
+    throw error;
+  }
 }
 
 /** Explicitly retry one durable failure. The expected failure sequence prevents
