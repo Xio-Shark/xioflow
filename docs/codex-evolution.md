@@ -507,3 +507,12 @@
 - 验证：基线758通过/7跳过；定向10通过；pnpm typecheck、pnpm test通过（762通过/7跳过，53套件通过）。
 - 下一步：持久共享输出完整性证据，防止观测有效但共享文件被改写时分发错误结果。
 - 保存18个真实SIGKILL原始样本，全部正确；过时输入恢复绑定2→1，附稳定场景验证开销及实测耗时。
+
+## 2026-10-09 — 持久共享输出完整性验证
+- 共享refresh准备时保存基线身份、coverage及文件树指纹，复用现有snapshot fingerprint，无新增快照或重算。
+- 验证resume在观测探测前后核对共享输出；output_invalid区分changed/missing/unavailable，拒绝时保留pending且不绑定。
+- AGENT_CAUSAL_SHARED_OUTPUT_VALIDATED记录plan/preparation与指纹证据，重开可查；旧无证据记录需重新刷新或宿主自行核对。
+- 覆盖新增/删除/改写/不可读、缺失证据、探测中改写及最终指纹计算期间事务关闭；更新示例、VISION与60行交接。
+- 范围沿用基线coverage，不证明上下文或分发结果；宿主保持共享fork静止，最终提交仍需强制OCC。
+- 下一步：在真实进程恢复基准增加输出损坏矩阵，并单列文件完整性验证成本。
+- 验证：初始基线669通过、3套件缺cc无法加载；安装gcc/libc6-dev后pnpm typecheck与pnpm test通过（769通过/7跳过，53套件通过），git diff --check通过。

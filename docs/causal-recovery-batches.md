@@ -412,6 +412,10 @@ const result = await resumeAgentSharedCausalRefreshWithValidation(runtime, super
   },
   bind, // 核对中断副作用，分发独立工作区并重建上下文
 });
+if (result.status === 'output_invalid') {
+  // changed / missing / unavailable：保留 pending，核对共享结果或重新刷新。
+  console.log(result.output, result.outputSeq);
+}
 if (result.status === 'stale') {
   // validation.changed 是修复后图中的失效种子；用当前 checkpoint 重新刷新相关 agent。
   console.log(result.validation.changed);
@@ -423,5 +427,20 @@ if (result.status === 'stale') {
 `AGENT_CAUSAL_RESUME_VALIDATED` 关联 planSeq、preparationSeq 和验证报告，返回的
 validationSeq 是该关联事件序号，validation.seq 是原始报告序号；重开后可查 journal。
 验证与绑定共用同一 preparation 的重叠调用保护，绑定前再次核对共享事务仍开放；
-checkpoint 变化沿用逐项 skipped。探测只验证当时基线上的声明行为，不验证共享 fork
-磁盘内容或宿主上下文；bind 仍负责输出一致性，最终文件提交仍需强制观测重放 OCC。
+checkpoint 变化沿用逐项 skipped。
+
+新的 `AGENT_CAUSAL_REFRESH_PREPARED` 在首次 bind 前持久保存 `output`：共享 fork
+文件树指纹、基线快照身份与 coverage。验证续跑在探测前和匹配后的绑定前分别核对，
+不匹配返回 `output_invalid`（`changed`），缺失旧证据返回 `missing`，读取/基线失败返回
+`unavailable`；均不调用 bind、不分配绑定事务、不消耗 agent step 预算，保持 pending。
+`AGENT_CAUSAL_SHARED_OUTPUT_VALIDATED` 持久保存每次核对的 planSeq / preparationSeq、
+expected / actual 指纹或错误，`outputSeq` 指向拒绝证据；成功核对也可从 journal 查询。
+首次核对失败不执行观测探测，探测中改变共享文件会被第二次核对拒绝。
+观测关联事件中的 `resumed` 仅表示观测匹配；之后输出核对仍可拒绝，实际发布须查询
+批次 outcomes 或持久 executions，不能仅凭该观测事件推断。
+
+覆盖范围与基线快照一致：非忽略树不包含新忽略文件，Git 树不证明时间戳、空目录或
+宿主内存/外部系统状态。该证据证明共享文件仍等于准备时结果，不证明工具实现正确。
+宿主须在准备及验证到分发期间保持共享 fork 不变；核对不持有文件系统锁，也不校验
+bind 生成的独立工作区或上下文。最终文件提交仍需强制观测重放 OCC。旧无指纹记录
+可重新刷新；宿主自行核验后也可使用原始 resume 入口，不能把它当成已通过输出验证。

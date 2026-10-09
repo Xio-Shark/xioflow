@@ -214,7 +214,7 @@ describe('agent checkpoint causal branches', () => {
     }
   });
 
-  it.each(['resume', 'advanced', 'closed', 'legacy', 'allocated', 'reservation_failed', 'validated', 'stale', 'probe_failed', 'probe_advanced', 'probe_closed'] as const)('resumes pending publication after reopen: %s', async (mode) => {
+  it.each(['resume', 'advanced', 'closed', 'legacy', 'allocated', 'reservation_failed', 'validated', 'stale', 'probe_failed', 'probe_advanced', 'probe_closed', 'output_changed', 'output_deleted', 'output_added', 'output_missing', 'output_unavailable', 'probe_output_changed', 'output_check_closed'] as const)('resumes pending publication after reopen: %s', async (mode) => {
     const source = node();
     open();
     for (const id of ['first', 'second']) {
@@ -230,6 +230,10 @@ describe('agent checkpoint causal branches', () => {
         && event.payload.txId === 'second-bound') throw new Error('reservation disk failure');
       if (mode === 'legacy' && event.type === 'AGENT_CAUSAL_REFRESH_PREPARED') {
         const { repair: _repair, ...payload } = event.payload;
+        return record({ ...event, payload });
+      }
+      if (mode === 'output_missing' && event.type === 'AGENT_CAUSAL_REFRESH_PREPARED') {
+        const { output: _output, ...payload } = event.payload;
         return record({ ...event, payload });
       }
       return record(event);
@@ -319,11 +323,30 @@ describe('agent checkpoint causal branches', () => {
       expect(bind).not.toHaveBeenCalled();
       return;
     }
-    if (['validated', 'stale', 'probe_failed', 'probe_advanced', 'probe_closed'].includes(mode)) {
+    if (['validated', 'stale', 'probe_failed', 'probe_advanced', 'probe_closed', 'output_changed',
+      'output_deleted', 'output_added', 'output_missing', 'output_unavailable', 'probe_output_changed', 'output_check_closed'].includes(mode)) {
+      const sharedRoot = path.join(temp, 'shared');
+      if (mode === 'output_changed') fs.writeFileSync(path.join(sharedRoot, 'input'), 'corrupted');
+      if (mode === 'output_deleted') fs.unlinkSync(path.join(sharedRoot, 'input'));
+      if (mode === 'output_added') fs.writeFileSync(path.join(sharedRoot, 'unexpected'), 'extra');
+      if (mode === 'output_unavailable') fs.renameSync(sharedRoot, `${sharedRoot}-moved`);
       const supervisor = new ProcessSupervisor(domain);
+      if (mode === 'output_check_closed') {
+        const driver = supervisor.getSnapshotDriver();
+        const fingerprint = driver.fingerprint.bind(driver);
+        let checks = 0;
+        vi.spyOn(driver, 'fingerprint').mockImplementation(async (roots, options) => {
+          const result = await fingerprint(roots, options);
+          if (roots[0] === sharedRoot && ++checks === 2) {
+            await supervisor.abortWorkspaceTransaction('shared', 'closed during output check');
+          }
+          return result;
+        });
+      }
       fs.writeFileSync(path.join(temp, 'repo', 'input'), mode === 'stale' ? 'changed-again' : 'new');
       const replay = vi.fn(async (_entry: unknown, root: string) => {
         await expect(resumeAgentSharedCausalRefresh(runtime, execution.seq, bind)).rejects.toThrow('already active');
+        if (mode === 'probe_output_changed') fs.writeFileSync(path.join(sharedRoot, 'input'), 'corrupted during probe');
         if (mode === 'probe_failed') throw new Error('read unavailable');
         if (mode === 'probe_advanced') runtime.restoreCheckpoint('second', runtime.checkpoints('second').at(-1)!.seq);
         if (mode === 'probe_closed') await supervisor.abortWorkspaceTransaction('shared', 'closed during probe');
@@ -332,13 +355,32 @@ describe('agent checkpoint causal branches', () => {
       const options = { validation: { txId: 'resume-check', runId: 'run', root: path.join(temp, 'repo'),
         forkPath: path.join(temp, 'resume-check'), closedWorld: true as const,
         replayPolicy: 'deterministic' as const, replay }, bind };
-      if (mode === 'probe_closed') {
+      if (mode === 'probe_closed' || mode === 'output_check_closed') {
         await expect(resumeAgentSharedCausalRefreshWithValidation(runtime, supervisor, execution.seq, options))
           .rejects.toThrow('open transaction');
         expect(bind).not.toHaveBeenCalled();
         return;
       }
       const checked = await resumeAgentSharedCausalRefreshWithValidation(runtime, supervisor, execution.seq, options);
+      if (mode.startsWith('output_') || mode === 'probe_output_changed') {
+        expect(checked.status).toBe('output_invalid');
+        if (checked.status !== 'output_invalid') throw new Error('expected output rejection');
+        expect(checked.output.status).toBe(mode === 'output_missing' ? 'missing'
+          : mode === 'output_unavailable' ? 'unavailable' : 'changed');
+        expect(bind).not.toHaveBeenCalled();
+        expect(replay).toHaveBeenCalledTimes(mode === 'probe_output_changed' ? 1 : 0);
+        expect(listAgentCausalRefreshExecutions(domain)[0].publications[1].status).toBe('pending');
+        expect(runtime.checkpoints('first').at(-1)).toEqual(first);
+        const evidence = domain.getStore().getJournalEvent(domain.domainId, checked.outputSeq);
+        expect(evidence?.payload).toMatchObject({ planSeq: execution.seq,
+          preparationSeq: execution.repair!.seq, status: checked.output.status });
+        runtime.close(); domain.close();
+        domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+        open();
+        expect(domain.getStore().getJournalEvent(domain.domainId, checked.outputSeq)).toEqual(evidence);
+        return;
+      }
+      if (checked.status === 'output_invalid') throw new Error('unexpected output rejection');
       expect(checked.status).toBe(mode === 'stale' ? 'stale' : mode === 'probe_failed' ? 'validation_failed' : 'resumed');
       expect(replay).toHaveBeenCalledTimes(1);
       expect(runtime.checkpoints('first').at(-1)).toEqual(first);

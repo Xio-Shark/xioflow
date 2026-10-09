@@ -109,7 +109,7 @@ async function recoverAgentSharedCausalPlan(
   agents: AgentRuntime,
   plan: AgentCausalRecoveryPlan,
   options: AgentSharedCausalRecoveryOptions,
-  refresh?: { planSeq: number; runId: string },
+  refresh?: { planSeq: number; runId: string; supervisor: ProcessSupervisor },
 ): Promise<AgentSharedCausalRecoveryBatch> {
   if (!plan.affected.length) return { plan, outcomes: [] };
   const repair = structuredClone(await options.prepare(structuredClone(plan)));
@@ -118,9 +118,10 @@ async function recoverAgentSharedCausalPlan(
     domainId: domain.domainId, runId: refresh!.runId, type, timestamp: new Date().toISOString(),
     payload: { version: 1, ...payload },
   });
+  const output = refresh ? await fingerprintSharedRepair(refresh.supervisor, repair) : undefined;
   // Record before invoking any binding; a crash leaves explicit pending entries.
   const preparationSeq = refresh ? record('AGENT_CAUSAL_REFRESH_PREPARED', {
-    planSeq: refresh.planSeq, txId: repair.transaction.txId, repair,
+    planSeq: refresh.planSeq, txId: repair.transaction.txId, repair, output,
   }) : undefined;
   return bindSharedRepair(agents, plan, options.bind, repair, preparationSeq, refresh?.runId);
 }
@@ -212,15 +213,31 @@ export async function resumeAgentSharedCausalRefresh(
   return bindSharedRepair(agents, plan, bind, repair, execution.repair!.seq, execution.runId);
 }
 
+async function fingerprintSharedRepair(supervisor: ProcessSupervisor, repair: WorkspaceBranchRepairResult) {
+  const base = supervisor.getDomain().getStore().getSnapshot(repair.transaction.baseSnapshotId);
+  if (!base) throw new Error('Shared repair baseline is absent');
+  return { baseSnapshotId: base.id, coverage: base.coverage,
+    fingerprint: await supervisor.getSnapshotDriver().fingerprint([repair.transaction.forkRoot], { against: base }) };
+}
+
+export type AgentSharedOutputCheck = {
+  status: 'matched' | 'changed' | 'missing' | 'unavailable';
+  expected?: string;
+  actual?: string;
+  error?: string;
+};
+
 export type AgentValidatedCausalResumeResult =
+  | { status: 'output_invalid'; output: AgentSharedOutputCheck; outputSeq: number }
   | { status: 'completed'; batch: AgentSharedCausalRecoveryBatch }
   | { status: 'validation_failed' | 'stale'; validation: CausalValidationResult; validationSeq: number }
   | { status: 'resumed'; validation: CausalValidationResult; validationSeq: number;
       batch: AgentSharedCausalRecoveryBatch };
 
 /** Revalidate durable repaired heads against one current-world baseline before
- * resuming pending bindings. Divergence/errors leave publications pending; the
- * host can refresh affected agents again. This probe is not an OCC certificate.
+ * resuming pending bindings. Also verifies the prepared snapshot-covered file
+ * tree before and after probing. Missing/changed/unreadable output stays pending.
+ * The host must keep shared output quiescent through binding; this is not an OCC certificate.
  */
 export async function resumeAgentSharedCausalRefreshWithValidation(
   agents: AgentRuntime, supervisor: ProcessSupervisor, planSeq: number,
@@ -236,10 +253,30 @@ export async function resumeAgentSharedCausalRefreshWithValidation(
   if (!pending.size) return { status: 'completed', batch: { plan, outcomes: [] } };
   const repair = readOpenSharedRepair(agents, execution);
   const validationOptions = { ...options.validation };
+  let output: AgentSharedOutputCheck | undefined;
+  let outputSeq = 0;
+  const checkOutput = async () => {
+    const saved = domain.getStore().getJournalEvent(domain.domainId, execution.repair!.seq)!.payload.output as Awaited<ReturnType<typeof fingerprintSharedRepair>> | undefined;
+    output = { status: 'missing' };
+    if (saved && typeof saved.fingerprint === 'string') {
+      try {
+        const current = await fingerprintSharedRepair(supervisor, repair);
+        output = { status: current.fingerprint === saved.fingerprint && current.coverage === saved.coverage
+          && current.baseSnapshotId === saved.baseSnapshotId ? 'matched' : 'changed',
+          expected: saved.fingerprint, actual: current.fingerprint };
+      } catch (error) { output = { status: 'unavailable', expected: saved.fingerprint, error: String(error) }; }
+    }
+    outputSeq = domain.getStore().recordJournalEvent({ domainId: domain.domainId, runId: execution.runId,
+      type: 'AGENT_CAUSAL_SHARED_OUTPUT_VALIDATED', timestamp: new Date().toISOString(),
+      payload: { version: 1, planSeq, preparationSeq: execution.repair!.seq, ...output },
+    });
+    return output.status === 'matched';
+  };
   let validation: CausalValidationResult | undefined;
   let validationSeq = 0;
   let status: 'resumed' | 'stale' | 'validation_failed' = 'resumed';
   const batch = await bindSharedRepair(agents, plan, options.bind, repair, execution.repair!.seq, execution.runId, async () => {
+    if (!await checkOutput()) return false;
     const branches = plan.affected.map(impact => {
       const matches = repair.branches.filter(branch => branch.id === impact.agentId);
       if (matches.length !== 1) throw new Error(`Missing unique shared repair branch for "${impact.agentId}"`);
@@ -257,8 +294,11 @@ export async function resumeAgentSharedCausalRefreshWithValidation(
     });
     // File operations yielded: the shared transaction may have been closed meanwhile.
     readOpenSharedRepair(agents, execution);
-    return status === 'resumed';
+    if (status !== 'resumed' || !await checkOutput()) return false;
+    readOpenSharedRepair(agents, execution);
+    return true;
   });
+  if (output && output.status !== 'matched') return { status: 'output_invalid', output, outputSeq };
   if (status !== 'resumed') return { status, validation: validation!, validationSeq };
   return { status, validation: validation!, validationSeq, batch };
 }
@@ -364,6 +404,6 @@ export async function refreshAgentSharedCausalBatch(
       checkpoints: checkpoints.map(({ id, checkpoint }) => ({ agentId: id, checkpointSeq: checkpoint.seq })) },
   });
   if (!preview.affected.length) return { status: 'unchanged', validation, planSeq, preview };
-  const batch = await recoverAgentSharedCausalPlan(agents, structuredClone(preview), recovery, { planSeq, runId: validationOptions.runId });
+  const batch = await recoverAgentSharedCausalPlan(agents, structuredClone(preview), recovery, { planSeq, runId: validationOptions.runId, supervisor });
   return { status: 'recovered', validation, planSeq, preview, batch };
 }
