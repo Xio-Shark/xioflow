@@ -2,8 +2,7 @@
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；受监督执行是底座。
 - WorkspaceTransactions：文件读写集与观测重放 OCC；同基线隔离投机执行。
 - WorkspaceCausalGraph：持久因果节点、上游查询、历史切片、失效闭包。
-- prepareWorkspaceRepair：拓扑重算失效节点、复用独立结果、记录替代关系。
-- view(heads) 显式选择分支；修复返回新 heads，支持连续多轮修复。
+- prepareWorkspaceRepair：拓扑重算失效节点、复用独立结果、记录替代关系；view(heads) 与新 heads 支持连续修复。
 - speculateWorkspace：OCC 冲突后最多一次 repair 与再提交。
 - commitPolicy first_valid / all_valid；后者依声明顺序合并 OCC 有效结果。
 - AgentRuntime create / step 原子持久化 causalHeads 与 checkpoint。
@@ -13,7 +12,6 @@
 - recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。
 - prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。
 - recoverAgentSharedCausalBatch：一次共享重算，逐项绑定独立事务与上下文。
-- 校验分支 id / sourceHeads 与 checkpoint；新 heads 自动绑定，回调收到副本。
 - 单事务单活跃 agent；bind 分发独立输出和重建上下文；拒绝绑定或回收共享事务。
 - forkAgentCheckpoint：历史 TX_BEGUN 基线重放，创建同 Run 新 agent，保留累计预算。
 - 要求 deterministic、完整 closedWorld 前缀及逐步哈希；基线缺失失败。
@@ -50,11 +48,13 @@
 - planWorkspaceCausalRefreshPolicy 纯查询；联合节点去重、持平探测、拒绝非法估算与溢出。
 - CAUSAL_REFRESH_POLICY_SELECTED 先记意图，关联源 branches / atSeq / probeTxPrefix / repairTxId。
 - 预测不授权复用；直接重算沿用 repair 身份、无 validateReuse；两条发布路径均强制 OCC。
-- 概率不自动学习；forecast 与 costModel 同单位，条件刷新成本含复用和完整提交重放。
 - 策略入口 CAUSAL_REFRESH_MEASURED 返回 telemetrySeq，关联 decisionSeq / validationSeq。
 - listWorkspaceCausalRefreshTelemetry 支持跨 Run / atSeq / 重开；四类回调分别计次数、异常、耗时。
-- probe / reuse / execute / commitReplay：缓存命中不计调用，复用批次回调次数不是工具数。
 - 总耗时含快照/OCC/清理；保留 unchanged/failed/committed/conflict/threw，未知提交查事务journal。
-- 遥测落盘失败报告执行状态，双失败AggregateError；缺失不算零成本；仅覆盖策略入口，不自动学习。
-- 下一步：按任务特征聚合历史遥测，独立保留验证集评估成本估计，区分失败和缺失样本。
-- 最新验证：typecheck/build通过；针对性56项；pnpm test 683通过/7跳过（146.55秒）。
+- 遥测落盘失败报告执行状态，双失败AggregateError；缺失不算零成本；仅覆盖策略入口。
+- 策略可选 taskKey 标记可比较任务；estimateWorkspaceCausalRefreshHistory 按类别跨Run聚合。
+- 固定 trainingAtSeq；训练须决策和遥测均已完成，后续决策为验证集；迟到完成只计训练缺失。
+- 成功探测同时有 changed / unchanged 才输出forecast；failed / missing / recompute独立统计。
+- 单位 callback_duration_ms；验证集报告成本MAE；宿主显式采用并提供同单位costModel，选择偏差仍在。
+- 下一步：基准接入固定训练窗口与独立探测评估任务，对比历史预测和静态先验策略的实测成本。
+- 最新验证：typecheck/build通过；pnpm test 690通过/7跳过（145.59秒）；基线683通过/7跳过。

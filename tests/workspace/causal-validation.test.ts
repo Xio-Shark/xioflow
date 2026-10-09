@@ -63,7 +63,7 @@ describe('workspace causal validation', () => {
       return { actorId: node.actorId, observation: { ...node.observation, resultHash } };
     });
     const result = await refreshWorkspaceCausalBranchesWithPolicy(supervisor, {
-      ...options([{ id: 'a', heads: [input.seq] }]), replay,
+      ...options([{ id: 'a', heads: [input.seq] }]), replay, taskKey: 'read:v1',
       forecast: { changeProbability: scenario.probability, probeUnchanged: 1, probeChanged: 1, refreshChanged: 2 },
       costModel: () => ({ execute: 1, reuse: 1, replay: 1 }),
       repair: { txId: 'policy-repair', forkPath: path.join(temp, 'policy-repair'), validateReuse, execute },
@@ -85,7 +85,7 @@ describe('workspace causal validation', () => {
     domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal');
     const events = domain.getStore().getJournalEvents(domain.domainId);
     expect(events.find(event => event.seq === result.decisionSeq)).toMatchObject({
-      type: 'CAUSAL_REFRESH_POLICY_SELECTED', payload: { policy: result.policy,
+      type: 'CAUSAL_REFRESH_POLICY_SELECTED', payload: { policy: result.policy, taskKey: 'read:v1',
         sourceBranches: [{ id: 'a', heads: [input.seq] }], repairTxId: 'policy-repair', probeTxPrefix: 'validate' },
     });
     const reports = listWorkspaceCausalRefreshTelemetry(domain, { runId: 'run' });

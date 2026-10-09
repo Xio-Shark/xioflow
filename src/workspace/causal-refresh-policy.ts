@@ -47,6 +47,8 @@ export function planWorkspaceCausalRefreshPolicy(
 }
 
 export interface WorkspaceCausalRefreshPolicyOptions extends WorkspaceCausalRefreshOptions {
+  /** Host-defined comparable workload category for historical estimates. */
+  taskKey?: string;
   costModel: CausalRefreshCostModel;
   forecast: CausalRefreshForecast;
 }
@@ -78,6 +80,9 @@ export async function refreshWorkspaceCausalBranchesWithPolicy(
   if (options.replayReuse !== undefined && !['none', 'baseline_observations'].includes(options.replayReuse)) {
     throw new Error('Invalid causal replay reuse policy');
   }
+  if (options.taskKey !== undefined && !options.taskKey.trim()) {
+    throw new Error('Causal refresh policy requires a nonempty taskKey');
+  }
   const domain = supervisor.getDomain();
   const nodes = new WorkspaceCausalGraph(domain).view(
     options.branches.flatMap(branch => [...branch.heads]), options.atSeq,
@@ -85,7 +90,7 @@ export async function refreshWorkspaceCausalBranchesWithPolicy(
   const policy = planWorkspaceCausalRefreshPolicy(nodes, options.forecast, options.costModel);
   const decisionSeq = domain.getStore().recordJournalEvent({
     domainId: domain.domainId, runId: options.runId, type: 'CAUSAL_REFRESH_POLICY_SELECTED',
-    payload: { version: 1, policy, sourceBranches: options.branches, atSeq: options.atSeq,
+    payload: { version: 1, policy, taskKey: options.taskKey, sourceBranches: options.branches, atSeq: options.atSeq,
       probeTxPrefix: options.txId, repairTxId: options.repair.txId },
     timestamp: new Date().toISOString(),
   });

@@ -250,3 +250,38 @@ for (const report of reports) {
 遥测写入失败会抛错并说明已观察到的执行状态、决策和事务 ID；不会重试执行或撤销成功提交；
 执行和遥测均失败时用 `AggregateError` 保留两者。记录不包含回调参数、结果或异常文本。
 当前只覆盖策略包装器，不自动学习概率，也不测量直接调用其他刷新入口的执行。
+
+### 从历史遥测估计预测与时间验证集
+
+策略入口可选 `taskKey`，持久标记可比较的任务类别，例如
+`compile:v2:four-branches:baseline-observations`。宿主应把工具版本、工作量、重放复用策略等
+影响成本的特征纳入类别；旧日志没有类别，不参与聚合。空白类别被拒绝。
+
+```ts
+import { estimateWorkspaceCausalRefreshHistory } from '@xioflow/kernel';
+const estimate = estimateWorkspaceCausalRefreshHistory(domain, {
+  taskKey: 'compile:v2:four-branches:baseline-observations',
+  trainingAtSeq: 1200, // 固定训练截止点；先固定，再运行后续评估任务
+  atSeq: 1800,        // 可选：整个查询的历史截止点
+});
+console.log(estimate.training, estimate.heldOut, estimate.evaluation);
+if (estimate.forecast) {
+  // 可传给 refreshWorkspaceCausalBranchesWithPolicy 的 forecast。
+  // 同时必须提供以回调毫秒估算 execute/reuse/replay 的 costModel。
+  console.log(estimate.forecast);
+}
+```
+
+`estimateWorkspaceCausalRefreshHistory` 是不创建工作区、不修改策略的纯查询。
+训练只使用决策和完成遥测均在 `trainingAtSeq` 之前（含）的成功探测；后续决策为验证集。
+截止点前开始、之后完成的任务按训练缺失计数，不能泄漏进任一数据集。
+`training / heldOut` 分别统计 changed、unchanged、failed、missing、recompute；
+冲突、抛错和回调错误均排除，直接重算没有变化标签，不用于推断概率。
+没有同时观察到变化与未变化时 `forecast: null`，没有可评估样本时 `evaluation: null`。
+
+预测单位固定为 `callback_duration_ms`：变化比例来自成功探测，条件成本来自对应样本均值，
+变化后成本含复用、重算和提交重放。验证集报告总探测路径成本的预测值、实际均值和平均绝对误差；
+后续样本不更新训练预测。固定 `atSeq` 的查询可在重开 domain 后重现。
+这不包含快照与清理开销，不估计 token，不提供未执行路径的反事实收益。
+策略选择和成功样本筛选存在选择偏差；宿主应保留独立探测评估任务，不能将该比例视为无偏总体概率。
+所有预测仍仅影响执行路径，发布必须通过原有 OCC。
