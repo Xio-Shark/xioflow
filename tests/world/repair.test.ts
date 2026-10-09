@@ -3,11 +3,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { openWorldState } from '../../src/world/state.js';
 import { prepareWorldStep } from '../../src/world/prepare.js';
 import { validateWorldCandidate } from '../../src/world/validation.js';
 import { prepareWorldRepair } from '../../src/world/repair.js';
+import { readWorldArtifacts } from '../../src/world/artifacts.js';
 import type { ObservationEntry } from '../../src/workspace/transactions.js';
 
 const exec = promisify(execFile);
@@ -43,7 +45,14 @@ async function fixture() {
       await adapter.replay(mutation, forkRoot);
       heads.push(await record({ ...mutation, resultHash: value }, [read]));
     }
-    return { coverage: { status: 'complete', manifestHash: version.manifestHash }, heads, artifacts: [] };
+    const artifacts = [
+      { id: 'changed', dependsOn: [heads[0]] },
+      { id: 'stable', dependsOn: [heads[1]] },
+      { id: 'summary', dependsOn: heads },
+      { id: 'constant', dependsOn: [] },
+    ].map(artifact => ({ ...artifact, kind: 'model_response' as const, body: artifact.id,
+      hash: createHash('sha256').update(artifact.id).digest('hex') }));
+    return { coverage: { status: 'complete', manifestHash: version.manifestHash }, heads, artifacts };
   } }, { task: 'copy both' });
   if (prepared.status !== 'prepared') throw new Error(JSON.stringify(prepared));
   await fs.writeFile(path.join(world.state.root, 'a'), 'new-a');
@@ -73,6 +82,35 @@ it('materializes reusable writes and recomputes only invalidated nodes on the du
   expect(await fs.readFile(path.join(root, 'a'), 'utf8')).toBe('later-a');
   await expect(fs.stat(path.join(root, 'out-a'))).rejects.toMatchObject({ code: 'ENOENT' });
   expect(world.domain.getStore().getJournalEvent('world', result.ref.atSeq)?.type).toBe('WORLD_REPAIR_PREPARED');
+});
+
+it('exposes only verified independent artifacts to repair callbacks using frozen history', async () => {
+  const { candidate, probe } = await fixture();
+  const original = structuredClone(readWorldArtifacts(world, candidate));
+  world.close();
+  world = await openWorldState({ root: path.join(temp, 'repo'), statePath: path.join(temp, 'state'), adapter });
+  await fs.writeFile(path.join(world.state.root, 'b'), 'later-b');
+  const contexts: unknown[] = [];
+  const result = await prepareWorldRepair(world, probe.ref, adapter, async (source, tx, _deps, refresh) => {
+    expect(refresh.previous).toEqual(candidate);
+    expect(refresh.previous).not.toHaveProperty('artifacts');
+    expect(refresh.plan).toEqual(probe.plan);
+    expect(refresh.reusableArtifacts).toEqual(original.filter(a => ['stable', 'constant'].includes(a.id)));
+    expect(await fs.readFile(path.join(tx.forkRoot, 'out-b'), 'utf8')).toBe('stable-b');
+    contexts.push(structuredClone(refresh));
+    // Even a host bypassing readonly cannot poison subsequent callbacks or durable evidence.
+    (refresh.reusableArtifacts[0] as { body?: string }).body = 'host mutation';
+    (refresh.plan.unaffected as unknown[]).length = 0;
+    return { actorId: 'repair', observation: { ...source.observation,
+      resultHash: await adapter.replay(source.observation, tx.forkRoot) } };
+  });
+  expect(contexts).toHaveLength(2);
+  expect(result.refresh).toEqual(contexts[0]);
+  expect(readWorldArtifacts(world, candidate)).toEqual(original);
+  const event = world.domain.getStore().getJournalEvent('world', result.ref.atSeq)!;
+  expect(event.payload.reusableArtifacts).toEqual(['stable', 'constant']);
+  expect(event.payload.invalidatedArtifacts).toEqual(['changed', 'summary']);
+  await expect(fs.stat(path.join(world.state.root, 'out-b'))).rejects.toMatchObject({ code: 'ENOENT' });
 });
 
 it.each(['mismatch', 'exception', 'source_tampered', 'final_coverage'] as const)('aborts %s without publishing and retains the validation baseline', async failure => {

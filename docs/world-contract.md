@@ -228,6 +228,10 @@ commit，也不构成文件系统锁。
 复用产物；首差或异常阻断重算。修复前、复用后及完成后核验原候选产物和两个固定版本，
 最终核验新产物覆盖与指纹。失败中止隔离事务并记录 WORLD_REPAIR_FAILED，验证基线保留。
 WORLD_REPAIR_PREPARED 记录验证引用、版本、复用/替换节点、输出指纹及事务身份。
-本切片只返回内部 open 事务；未绑定 WorldAgent 上下文、未产生新的 WorldCandidate，
+修复回调第四参及返回值 `refresh` 提供 WorldAgent 增量上下文：固定原候选元数据、解释计划、
+全部依赖均在 unaffected 集合内的持久产物。显式 [] 可复用，null 不可复用；传递依赖失效
+及混合依赖产物均排除。只在复用重放和源产物核验通过后暴露上下文，各回调获得独立副本。
+原候选元数据不夹带 journal 中的失效正文；WORLD_REPAIR_PREPARED 保存可复用/失效产物 ID。
+本切片仍只返回内部 open 事务；未执行 WorldAgent 或绑定新 checkpoint，未产生新的 WorldCandidate，
 尚未接入 refresh 自动增量路径。工具结果哈希依赖适配器声明，不代替最终 OCC、业务验收或
-独立 oracle；非确定性模型响应仍须由后续 agent 适配层选择持久产物，不能作为工具重放。
+独立 oracle；非确定性模型响应只选择持久正文，失效后的模型调用仍须由后续 agent 适配层执行。

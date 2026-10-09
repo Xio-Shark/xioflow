@@ -1,7 +1,7 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约已冻结，统一公开入口待M2实现；M3/M4未完成。
-- 下一轮最小切片：将内部prepareWorldRepair接到WorldAgent增量上下文与候选准备，复用本轮版本/产物依赖保存路径；changed刷新仍保守全量，不扩大公开入口。
+- 下一轮最小切片：将内部prepareWorldRepair已筛选的refresh上下文接到WorldAgent执行与候选/checkpoint准备，复用已有版本/产物依赖保存路径；changed刷新仍保守全量，不扩大公开入口。
 - M2完成标准仍缺：统一句柄、增量refresh、完整explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md冻结六入口状态表、覆盖和六类失败/重试/资源归属；src/world/contract.ts共享非公开契约，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
@@ -36,8 +36,11 @@
 - 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，每轮先确认cc，当前容器已重新安装gcc/libc6-dev。
 - 内部prepareWorldRepair消费changed/selected_nodes持久报告，接既有prepareWorkspaceRepair；固定基线拓扑重放复用节点并验全部hash，物化复用写入后才重算闭包。
 - 修复前/复用后/完成后重验原产物及版本，最终覆盖/指纹检查；失败abort并留WORLD_REPAIR_FAILED与验证基线；成功记录事务、复用/替换及指纹。
-- 该基础层只返回open事务，未产生WorldCandidate/绑定模型上下文；不替代OCC或业务验收；已有5项回归覆盖修复准备边界。
+- 该基础层返回open事务及筛选后的refresh上下文，未产生WorldCandidate/执行模型或绑定checkpoint；不替代OCC或业务验收；已有5项回归覆盖修复准备边界。
 - matched刷新接prepareWorldStep：固定验证版本上完整重放/物化，映射节点、heads与已保存产物依赖，保存新候选及checkpoint，不调用模型。
 - WORLD_REUSE_PREPARED/FAILED保存引用和映射；原产物重验、重放首差/异常失败且不兜底重算，资源仍保留；strict commit尚未接入。
 - 本轮收尾7bfbb9c的matched复用WIP；补充重开后连续刷新、显式空依赖复用、首差/异常立即停止回归，仍不调用模型或发布主目录。
 - 验证：refresh/step/validation共61项及pnpm typecheck通过；全量pnpm test通过：63文件/926项，跳过1文件/7项，232.50秒；下一轮无需全量基线。
+- 本轮修复回调第四参/返回refresh含固定previous、plan和可复用产物；依赖须全部unaffected，[]保留，null/传递失效/混合依赖排除。
+- 复用验证后才暴露正文，各回调独立副本；previous仅投影候选元数据防止夹带失效正文；持久记录可复用/失效产物ID。
+- 本轮验证：repair共6项及pnpm typecheck通过；未跑全量（时间不足5分钟），下一轮先补跑一次全量。
