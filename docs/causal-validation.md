@@ -1,6 +1,8 @@
 # 因果分支再验证
 
-`validateWorkspaceCausalBranches` 把现有因果图和观测重放接起来：在当前文件世界拍一次基线，对每个选定分支创建独立工作区，按因果拓扑顺序重放，返回首次变化对应的节点序号及联合失效闭包。无需在宿主中把观测日志下标手工映射回因果节点。
+`validateWorkspaceCausalBranches` 把现有因果图和观测重放接起来：默认在当前文件世界拍一次基线，对每个选定分支创建独立工作区，按因果拓扑顺序重放，返回首次变化对应的节点序号及联合失效闭包。无需在宿主中把观测日志下标手工映射回因果节点。
+
+可选 `baseSnapshotId` 使用调用方已有的同 domain/root 快照；缺失或不匹配时报错，不改抓当前目录。验证不删除显式快照，可将同一 ID 传给 `prepareWorkspaceRepair` / `prepareWorkspaceBranchRepair`，在同版本上准备修复。复用证据、物化输出与最终 OCC 仍须校验。组合 `prepareWorkspaceCausalRefresh` 的修复阶段暂仍另建当前基线，顶层此选项只固定探测。
 
 ```ts
 import { validateWorkspaceCausalBranches, prepareWorkspaceBranchRepair } from '@xioflow/kernel';
@@ -27,7 +29,7 @@ if (report.changed.length) {
 
 每条分支返回 `matched`、`changed` 或 `failed`，以及成功匹配的 `matchedSteps`。后两者携带首次停止的因果节点 `seq`；`failed` 还携带错误。成功执行但哈希不一致才加入去重后的 `changed`。工具异常（包括 mutation 无法应用）不冒充世界变化，也不阻止其他分支再验证。`replayedSteps` 统计实际调用次数，包括失败尝试；`reusedSteps` 另计跨分支复用次数，默认不复用。
 
-分支在首次变化或错误处立即停止。发生变化的 mutation 可能已经污染自己的 fork，因此所有验证工作区均被丢弃；其他分支从相同不可变基线重新开始，不继承这些效果。成功完成或工具失败后回收临时事务及本次基线；基础设施或清理失败抛出异常。验证不创建替代因果节点、不更新 agent checkpoint、不提交文件。
+分支在首次变化或错误处立即停止。发生变化的 mutation 可能已经污染自己的 fork，因此所有验证工作区均被丢弃；其他分支从相同不可变基线重新开始，不继承这些效果。成功完成或工具失败后回收临时事务及本次自建基线；基础设施或清理失败抛出异常。验证不创建替代因果节点、不更新 agent checkpoint、不提交文件。
 
 宿主必须声明：每个分支包含在该文件根上重放所需的完整操作前缀和全部依赖，适配器确定性执行，观测无写效果，mutation 仅作用于传入工作区。图结构与结果哈希无法证明这些声明，也不覆盖模型调用或外部系统副作用。互斥策略可分别验证，但只有兼容分支才能一起共享修复。
 
@@ -36,7 +38,7 @@ if (report.changed.length) {
 
 ## 持久报告与自动修复准备
 
-返回的 `seq` 是报告的 journal 身份；`atSeq` 是源因果图切片。报告保存 `validationId`、`runId`、规范化 `root`、每条分支的 `sourceBranches` heads，以及基线 `SnapshotRef` 的 ID、树指纹、覆盖范围等元数据。验证结束仍回收快照和工作区，因此这些元数据用于追溯，不能承诺重新物化已回收的快照。
+返回的 `seq` 是报告的 journal 身份；`atSeq` 是源因果图切片。报告保存 `validationId`、`runId`、规范化 `root`、每条分支的 `sourceBranches` heads，以及基线 `SnapshotRef` 的 ID、树指纹、覆盖范围等元数据。默认验证结束回收自建快照和工作区，因此元数据不能承诺重新物化已回收的快照。
 
 `listWorkspaceCausalValidations(domain, { runId?, atSeq? })` 在 domain 重开后仍可查询。查询的 `atSeq` 截止于报告事件序号；每份报告的失效计划从其自身冻结的源图重新构建。返回副本，修改查询结果不改变 journal。
 

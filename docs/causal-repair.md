@@ -1,8 +1,10 @@
 # 因果子图局部重算（实验性）
 
-`prepareWorkspaceRepair` 把 `WorkspaceCausalGraph.planRecomputation` 的失效闭包变成可执行的修复事务。它从**当前主工作区**创建 snapshot / fork，按拓扑顺序执行受影响工具，把下游依赖指向新结果，保留独立节点的历史身份。返回的事务仍然打开，宿主可以检查结果，再用现有 OCC 提交。
+`prepareWorkspaceRepair` 把 `WorkspaceCausalGraph.planRecomputation` 的失效闭包变成可执行的修复事务。它默认从**当前主工作区**创建 snapshot / fork，按拓扑顺序执行受影响工具，把下游依赖指向新结果，保留独立节点的历史身份。返回的事务仍然打开，宿主可以检查结果，再用现有 OCC 提交。
 
 修复前可用 [`graph.explainRecomputation`](causal-explanations.md) 查询每个失效节点的变化源和最短依赖路径，解释跨 agent 的重算原因。
+
+可选 `baseSnapshotId` 固定实际修复基线，可与验证器使用同一快照；仍执行 `validateReuse`。显式传入的快照由调用方负责生命周期，修复失败只回收 fork，不删除共享快照；`CAUSAL_REPAIR_PREPARED.baseSnapshotId` 记录实际基线。
 
 适用场景：已有输出已落入主工作区，某个输入发生变化，宿主确定失效种子后，只重算依赖该输入的分支。未提交的投机分支输出不会自动出现在新基线；宿主必须先物化可复用输出，或将相关节点也列为失效种子。
 
@@ -55,7 +57,7 @@ pnpm exec vitest run tests/workspace/causal-graph.test.ts
 - 多个失效种子合并为一个闭包，菱形汇合节点只执行一次；未受影响节点不会调用 `execute`。
 - `CAUSAL_REPAIR_PREPARED` journal 事件持久记录源节点到替代节点的映射、复用节点、`sourceHeads` 和替代后的 `heads`；原历史不被覆写。该事件表示准备完成，不表示已提交，应结合 TX 生命周期查询。
 - 回调必须等待 fork 内的工作全部结束，不自行提交或中止事务；否则无法保证清理时没有后台写入。
-- 验证或工具失败时停止执行，abort 并回收本次基线；已经记录的部分节点保留在被中止事务的历史中。清理失败同时报告原错误和清理错误。
+- 验证或工具失败时停止执行，abort 并回收本次自建基线；已经记录的部分节点保留在被中止事务的历史中。清理失败同时报告原错误和清理错误。
 - 准备成功后由调用方管理事务、提交冲突和 snapshot 回收。提交抛错可能已进入应用阶段，此时保留 fork 和基线，并按既有事务恢复协议处理，不能直接回收。
 
 ## 验证边界
@@ -121,4 +123,4 @@ const outcome = await supervisor.commitWorkspaceTransaction(
 
 所有分支必须能在同一文件世界中共同成立；互斥的投机策略应继续使用独立 fork。此 API 不自动合并互相覆盖的语义输出，也不证明依赖声明完整。去重按历史节点 seq，而非工具参数或结果哈希；来自不同历史节点的相同调用不会被误认为可共享。
 
-任一复用验证或工具失败会终止整个准备，回收共享 fork 和本次基线，不分发部分成功结果。失败前的节点仍保留在中止事务的历史中。成功时，分支映射与替代关系写入同一 `CAUSAL_REPAIR_PREPARED` 事件的 `branches` 字段，可在重启后恢复；它不是提交事实，仍需查看 TX 生命周期。准备成功后的资源由宿主统一管理，不能让每个 agent 独立提交或回收同一个事务。文件提交与多个 agent checkpoint 绑定不是一个原子操作。
+任一复用验证或工具失败会终止整个准备，回收共享 fork 和本次自建基线，不分发部分成功结果。失败前的节点仍保留在中止事务的历史中。成功时，分支映射与替代关系写入同一 `CAUSAL_REPAIR_PREPARED` 事件的 `branches` 字段，可在重启后恢复；它不是提交事实，仍需查看 TX 生命周期。准备成功后的资源由宿主统一管理，不能让每个 agent 独立提交或回收同一个事务。文件提交与多个 agent checkpoint 绑定不是一个原子操作。

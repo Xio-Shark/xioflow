@@ -1,7 +1,7 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1 契约设计齐备，统一公开入口仍未实现；M3/M4未完成。
-- 下一轮最小切片：将selected_nodes验证接到既有修复准备，固定实际修复基线并重验复用节点/物化产物；保持异常阻断，不扩大公开入口。
+- 下一轮最小切片：用验证报告version接入既有修复准备，在固定基线上重验复用节点并物化/核验产物；保持异常阻断，不扩大公开入口。
 - M2 完成标准仍缺：统一句柄、增量refresh、完整explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md 冻结六入口状态表、适配器覆盖和六类失败/重试/资源归属；src/world/contract.ts 共享非公开契约，spec重导出，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
@@ -37,7 +37,7 @@
 - 本轮validateWorldCandidate接入既有隔离重放，按持久候选而非调用方heads/coverage取证；adapter身份核对，unknown不重放并保存原原因。
 - 验证前验正文及候选输出，验证后再验输出；matched/changed/unknown/failed分流，工具异常和篡改不当作changed；不产生新候选或发布许可。
 - WORLD_VALIDATION_STARTED/COMPLETED保存旧候选引用、底层validationSeq及固定计划/路径；readWorldCandidateValidation重开只读恢复，未接通完整explain。
-- 探测沿用旧入口回收正常结束的临时fork/快照；失败保留journal证据，无统一资源报告/自动恢复。changed仅首差种子，不是完整变化清单。
+- 探测回收临时fork，世界验证的固定版本快照保留供修复；失败保留journal证据，无统一资源报告/自动恢复。changed仅首差种子，不是完整变化清单。
 - 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev；本轮工具链已可用。
 - 本轮recomputeWorldCandidate按持久旧候选/task显式全量重算；捕获当前固定新版本，复用prepareWorldStep，保存旧候选→新结果关系，不复用旧产物。
 - captureWorldRevision复用精确覆盖/快照校验，原句柄基线不变；版本及重算started/completed/failed持久化。unknown重算仍须新证据完整；失败保留资源。
@@ -49,4 +49,7 @@
 - 本轮内部explainWorldPreparation收敛候选/验证/refresh只读查询，固定引用且拒绝越界/错误身份；不读文件、不调用模型、不推进journal。
 - 解释区分旧候选验证计划与新候选及实际full/reuse结果；unknown/异常无计划。关闭重开及后续历史不影响同截止点，返回值隔离。
 - 仍缺发布/绑定/资源事实的完整explain；未导出新公开入口。下一轮仍优先实际修复基线固定与复用重验，不扩成本策略。
-- 本轮基线888通过/7跳过；typecheck及refresh相关14项通过（新增4项）；最终全量复验待完成。
+- 本轮固定验证/修复基线：两者支持baseSnapshotId，显式快照属调用方，探测结束/修复失败不误删，修复事件记录实际基线。
+- world验证先captureWorldRevision核验当前覆盖，报告持久version；旧报告读为null。symlink/目录/忽略漏收在工具调用前failed。
+- 固定版本跨主目录后续变化用于修复，失败仍保留；未接通自动增量刷新或免除复用重验/最终OCC。
+- 本轮基线892通过/7跳过；typecheck与验证相关17项通过（新增5项）；最终全量复验进行中。

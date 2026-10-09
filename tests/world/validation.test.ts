@@ -4,6 +4,8 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, expect, it } from 'vitest';
+import { ProcessSupervisor } from '../../src/supervisor/supervisor.js';
+import { prepareWorkspaceRepair } from '../../src/workspace/causal-repair.js';
 import { openWorldState } from '../../src/world/state.js';
 import { prepareWorldStep } from '../../src/world/prepare.js';
 import { validateWorldCandidate, readWorldCandidateValidation } from '../../src/world/validation.js';
@@ -159,4 +161,69 @@ it.each(['stable', 'changed', 'failed'] as const)('checks independent evidence b
   world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
   expect(readWorldCandidateValidation(world, result.ref)).toEqual(result);
   expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+});
+
+it.each(['symlink', 'directory', 'ignored'] as const)('rejects invalid current coverage before replay: %s', async kind => {
+  const candidate = await prepare();
+  const input = path.join(world.state.root, 'input');
+  await fs.unlink(input);
+  if (kind === 'symlink') {
+    await fs.writeFile(path.join(temp, 'external'), 'original');
+    await fs.symlink(path.join(temp, 'external'), input);
+  } else if (kind === 'directory') await fs.mkdir(input);
+  else {
+    await fs.writeFile(input, 'original');
+    await fs.writeFile(path.join(world.state.root, '.gitignore'), 'input\n');
+  }
+  let calls = 0;
+  const result = await validateWorldCandidate(world, candidate, { ...adapter, replay: async () => {
+    calls++;
+    return 'original';
+  } }, 'selected_nodes');
+  expect(result).toMatchObject({ status: 'failed', plan: null, version: null });
+  expect(calls).toBe(0);
+});
+
+it.each(['prepared', 'reuse_failed'] as const)('shares the validated fixed version with repair: %s', async outcome => {
+  const candidate = await prepare();
+  await fs.writeFile(path.join(world.state.root, 'input'), 'new');
+  const validation = await validateWorldCandidate(world, candidate, adapter, 'selected_nodes');
+  expect(validation.status).toBe('changed');
+  const version = validation.version!;
+  expect(version.snapshotId).not.toBe(candidate.version.snapshotId);
+  await fs.writeFile(path.join(world.state.root, 'input'), 'raced');
+  const supervisor = new ProcessSupervisor(world.domain);
+  let executions = 0;
+  const repair = prepareWorkspaceRepair(supervisor, {
+    txId: 'fixed-repair', runId: candidate.id, root: world.state.root,
+    forkPath: path.join(temp, 'repair'), baseSnapshotId: version.snapshotId,
+    changed: [validation.plan!.invalidated[0].seq], atSeq: candidate.atSeq, heads: candidate.heads!,
+    validateReuse: async tx => {
+      expect(await fs.readFile(path.join(tx.forkRoot, 'input'), 'utf8')).toBe('new');
+      if (outcome === 'reuse_failed') throw new Error('reuse rejected');
+    },
+    execute: async (node, tx) => {
+      executions++;
+      const resultHash = await adapter.replay(node.observation, tx.forkRoot);
+      return { actorId: node.actorId, observation: { ...node.observation, resultHash } };
+    },
+  });
+  if (outcome === 'reuse_failed') {
+    await expect(repair).rejects.toThrow('reuse rejected');
+    expect(executions).toBe(0);
+  } else {
+    const result = await repair;
+    expect(result.transaction.baseSnapshotId).toBe(version.snapshotId);
+    expect(await fs.readFile(path.join(result.transaction.forkRoot, 'output'), 'utf8')).toBe('new');
+    const event = world.domain.getStore().getJournalEvents('world').find(e => e.type === 'CAUSAL_REPAIR_PREPARED')!;
+    expect(event.payload.baseSnapshotId).toBe(version.snapshotId);
+  }
+  expect(world.domain.getStore().getSnapshot(version.snapshotId)?.treeFingerprint).toBe(version.fingerprint);
+  await exec('git', ['rev-parse', '--verify', `refs/xioflow/snapshots/${version.snapshotId}`], { cwd: world.state.root });
+  expect(await fs.readFile(path.join(world.state.root, 'input'), 'utf8')).toBe('raced');
+  await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
+  const root = world.state.root;
+  world.close();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(readWorldCandidateValidation(world, validation.ref)).toEqual(validation);
 });

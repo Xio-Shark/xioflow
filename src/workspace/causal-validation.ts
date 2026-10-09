@@ -14,6 +14,8 @@ export interface CausalValidationOptions {
   root: string;
   forkPath: string;
   atSeq: number;
+  /** Caller-owned fixed baseline; never pruned by validation. */
+  baseSnapshotId?: string;
   branches: readonly WorkspaceRepairBranch[];
   /** Every selected branch contains its complete, ordered filesystem effects and inputs. */
   closedWorld: true;
@@ -34,7 +36,7 @@ export interface CausalValidationResult {
   validationId: string;
   runId: string;
   root: string;
-  /** Historical identity only: validation reclaims the snapshot itself. */
+  /** Default snapshots are reclaimed; an explicit baseSnapshotId remains caller-owned. */
   baseline: SnapshotRef;
   sourceBranches: { id: string; heads: number[] }[];
   atSeq: number;
@@ -74,7 +76,7 @@ export async function validateWorkspaceCausalBranches(
   const heads = [...new Set(branches.flatMap(({ view }) => view.heads))];
   const results: CausalBranchValidation[] = [];
   const changed = new Set<number>();
-  let baseline: string | undefined;
+  let baseline: string | undefined = options.baseSnapshotId;
   let replayedSteps = 0;
   let reusedSteps = 0;
   // Node identity, not call equality: distinct evidence is never conflated.
@@ -130,7 +132,9 @@ export async function validateWorkspaceCausalBranches(
       }
     }
   } finally {
-    if (baseline) await supervisor.pruneSnapshots([baseline], { runId: options.runId });
+    if (baseline && options.baseSnapshotId === undefined) {
+      await supervisor.pruneSnapshots([baseline], { runId: options.runId });
+    }
   }
   const seeds = [...changed].sort((a, b) => a - b);
   const report: Omit<CausalValidationResult, 'seq' | 'plan'> = {

@@ -149,7 +149,7 @@ readWorldCandidateValidation 只读恢复准确历史报告，关闭重开后不
 matched 仅说明此次探测匹配，changed 的计划仅从首个分歧扩展，不是完整变化清单；两者都不是
 刷新候选或提交许可。宿主仍须完整声明依赖和确定性工具语义，保持候选静止；未接通
 增量/全量重算、新版本候选、strict commit 和资源恢复状态机。验证正常结束沿用旧入口回收探测
-fork/快照；异常保留 started/事务证据，尚无自动恢复或统一资源报告。
+fork；固定世界版本快照保留供修复使用，异常保留 started/事务证据，尚无自动恢复或统一资源报告。
 
 内部 `recomputeWorldCandidate` 补齐显式全量重算路径，供后续统一 refresh 的
 `onUnknown: 'recompute'` 和完整重跑对照使用。按持久候选引用读取原 task，重新捕获当前
@@ -191,3 +191,12 @@ unknown 或验证异常没有计划；失败刷新仍保留旧候选及实际失
 候选自身截止点早于后续验证，因此直接解释候选时 plan 为 null，不隐式取最新验证。
 该内部视图尚不包含发布、checkpoint 绑定或资源清理事实；完整 WorldExplanation/公开句柄
 仍待这些状态机接入，不把未实现字段填成虚假的成功或资源已回收状态。
+
+内部验证现先用 captureWorldRevision 核验当前精确文件覆盖并固定版本，报告保存 version；
+旧报告缺此字段时返回 null，不把旧探测身份冒充可用修复基线。当前覆盖变成 symlink、
+目录或被忽略的现存文件时，返回 failed 且不重放。版本随历史保留，重开查询不重新抓取。
+validateWorkspaceCausalBranches 与 prepareWorkspaceRepair（含共享分支）接受可选 baseSnapshotId，
+可对同一固定版本探测和修复；省略时保持既有当前快照行为。显式快照由调用方拥有，
+验证结束或修复失败均不删除它；修复 journal 保存实际 baseSnapshotId，失败仍回收修复 fork。
+共享快照不豁免 validateReuse、产物物化检查或最终 OCC；当前目录再次改变时不能凭旧探测发布。
+world refresh 尚未自动接入增量修复，changed 仍全量重算；下一步需连接复用节点重验与产物物化。

@@ -7,6 +7,8 @@ export interface WorkspaceRepairOptions {
   runId: string;
   root: string;
   forkPath: string;
+  /** Caller-owned baseline shared with validation; retained even on repair failure. */
+  baseSnapshotId?: string;
   changed: readonly number[];
   /** Freeze the source history; later repair nodes must not enter this plan. */
   atSeq: number;
@@ -81,6 +83,7 @@ async function executeWorkspaceRepair(
   options: WorkspaceRepairOptions,
   branches: readonly WorkspaceRepairBranch[],
 ): Promise<WorkspaceBranchRepairResult> {
+  options = { ...options };
   const domain = supervisor.getDomain();
   const graph = new WorkspaceCausalGraph(domain);
   const changed = [...options.changed];
@@ -94,6 +97,7 @@ async function executeWorkspaceRepair(
     : [...new Set(options.heads)];
   const transaction = await supervisor.beginWorkspaceTransaction({
     txId: options.txId, runId: options.runId, root: options.root, forkPath: options.forkPath,
+    baseSnapshotId: options.baseSnapshotId,
   });
   const replacements: WorkspaceRepairResult['replacements'] = [];
   try {
@@ -115,7 +119,7 @@ async function executeWorkspaceRepair(
     }));
     domain.getStore().recordJournalEvent({
       domainId: domain.domainId, runId: options.runId, type: 'CAUSAL_REPAIR_PREPARED',
-      payload: { version: 1, txId: transaction.txId, atSeq, sourceHeads, heads,
+      payload: { version: 1, txId: transaction.txId, baseSnapshotId: transaction.baseSnapshotId, atSeq, sourceHeads, heads,
         changed, reused: plan.unaffected.map((node) => node.seq),
         ...(branches.length ? { branches: repairedBranches } : {}),
         replacements: replacements.map(({ sourceSeq, node }) => ({ sourceSeq, replacementSeq: node.seq })) },
@@ -126,7 +130,9 @@ async function executeWorkspaceRepair(
     // No commit has started, so a failed repair can discard its isolated writes.
     try {
       await supervisor.abortWorkspaceTransaction(transaction.txId, 'causal repair failed');
-      await supervisor.pruneSnapshots([transaction.baseSnapshotId], { runId: options.runId });
+      if (options.baseSnapshotId === undefined) {
+        await supervisor.pruneSnapshots([transaction.baseSnapshotId], { runId: options.runId });
+      }
     } catch (cleanupError) {
       throw new AggregateError([error, cleanupError], `Repair failed; cleanup incomplete for ${transaction.txId}`);
     }

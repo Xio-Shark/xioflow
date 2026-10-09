@@ -5,8 +5,8 @@ import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
 import { WorkspaceCausalGraph, type ExplainedRecomputationPlan } from '../workspace/causal-graph.js';
 import { validateWorkspaceCausalBranches } from '../workspace/causal-validation.js';
 import { readWorldArtifacts } from './artifacts.js';
-import type { FileWorldAdapter, WorldCandidate, WorldRef } from './contract.js';
-import type { openWorldState } from './state.js';
+import type { FileWorldAdapter, WorldCandidate, WorldRef, WorldVersion } from './contract.js';
+import { captureWorldRevision, type openWorldState } from './state.js';
 
 type WorldState = Awaited<ReturnType<typeof openWorldState>>;
 export interface WorldCandidateValidation {
@@ -16,6 +16,8 @@ export interface WorldCandidateValidation {
   status: 'matched' | 'changed' | 'unknown' | 'failed';
   reasons: string[];
   validationSeq: number | null;
+  /** Fixed covered baseline retained for subsequent repair; null for legacy/unknown reports. */
+  version: WorldVersion | null;
   plan: ExplainedRecomputationPlan | null;
 }
 
@@ -48,6 +50,7 @@ export async function validateWorldCandidate(world: WorldState, ref: WorldRef,
   let status: WorldCandidateValidation['status'] = 'failed';
   let reasons: string[] = [];
   let validationSeq: number | null = null;
+  let version: WorldVersion | null = null;
   let plan: ExplainedRecomputationPlan | null = null;
   try {
     if (candidate.coverage.status === 'unknown' || candidate.heads === null
@@ -71,6 +74,10 @@ export async function validateWorldCandidate(world: WorldState, ref: WorldRef,
         if (actual !== candidate.outputFingerprint) throw new Error('Candidate output changed');
       };
       await checkOutput();
+      const revision = await captureWorldRevision(world);
+      version = { worldId: state.worldId, id: revision.state.snapshotId, atSeq: revision.state.atSeq,
+        snapshotId: revision.state.snapshotId, manifestHash: state.manifestHash,
+        fingerprint: revision.state.fingerprint };
       const graph = new WorkspaceCausalGraph(domain);
       // A joined branch stops at its first mismatch. Check every node's complete
       // declared ancestry on isolated forks of ONE baseline so an independent
@@ -82,7 +89,7 @@ export async function validateWorldCandidate(world: WorldState, ref: WorldRef,
       const validation = await validateWorkspaceCausalBranches(new ProcessSupervisor(domain), {
         txId: id, runId: candidate.id, root: state.root,
         forkPath: path.join(domain.domainPath, 'forks', id), atSeq: ref.atSeq,
-        branches,
+        branches, baseSnapshotId: version.snapshotId,
         closedWorld: true, replayPolicy: 'deterministic', replay: (entry, root) => adapter.replay(entry, root),
       });
       validationSeq = validation.seq;
@@ -99,8 +106,8 @@ export async function validateWorldCandidate(world: WorldState, ref: WorldRef,
     plan = null;
   }
   reasons = [...new Set(reasons)];
-  const atSeq = append('WORLD_VALIDATION_COMPLETED', { scope, status, reasons, validationSeq, plan });
-  return { ref: { worldId: state.worldId, id, atSeq }, previous, scope, status, reasons, validationSeq, plan };
+  const atSeq = append('WORLD_VALIDATION_COMPLETED', { scope, status, reasons, validationSeq, version, plan });
+  return { ref: { worldId: state.worldId, id, atSeq }, previous, scope, status, reasons, validationSeq, version, plan };
 }
 
 /** Exact historical report; does not probe files, call tools or advance the journal. */
@@ -111,6 +118,6 @@ export function readWorldCandidateValidation(world: WorldState, ref: WorldRef): 
       || event.payload.worldId !== ref.worldId || event.payload.id !== ref.id) {
     throw new Error('Validation history reference mismatch');
   }
-  const { previous, status, reasons, validationSeq, plan, scope = 'prefix' } = event.payload;
-  return structuredClone({ ref, previous, scope, status, reasons, validationSeq, plan }) as WorldCandidateValidation;
+  const { previous, status, reasons, validationSeq, plan, version = null, scope = 'prefix' } = event.payload;
+  return structuredClone({ ref, previous, scope, status, reasons, validationSeq, version, plan }) as WorldCandidateValidation;
 }
