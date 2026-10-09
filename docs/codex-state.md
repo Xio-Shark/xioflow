@@ -29,7 +29,7 @@
 - selected_nodes按每个节点祖先建分支，同一快照隔离重放，独立变化汇入闭包，独立异常阻断且plan=null；默认prefix仍保留。
 - 内部refreshWorldCandidate组合validate/recompute：matched重建固定验证版本候选，unknown拒绝或重算，changed增量；工具/产物异常不触发重算。
 - changed增量准备使用持久validation固定版本；unknown/显式全量默认新采集，原句柄基线不变。restoreWorldRevision缺失/错配不回退当前目录、不调用agent。
-- readWorldRefresh/readWorldCandidateValidation/explainWorldPreparation固定引用只读恢复，重开和后续历史不影响同截止点；解释区分验证计划与实际full/reuse结果。
+- readWorldRefresh/readWorldCandidateValidation/explainWorldPreparation固定引用只读恢复，重开和后续历史不影响同截止点；解释区分验证计划与实际full/reuse/incremental结果。
 - 内部入口均未公开；无重算幂等、中断自动续跑或统一资源清理；explain仍缺发布/绑定/资源事实。
 - 候选产物覆盖检查：执行完成及验证前后复用精确路径/Git树核验，拒绝symlink、目录和指纹漏收的忽略文件，failed并保留证据，不发布。
 - 该检查不推断隐性读取或未声明写入，也不是文件系统锁；仍需strict commit。合法写入/删除、声明不存在路径保持可用。
@@ -40,6 +40,8 @@
 - matched刷新接prepareWorldStep：固定验证版本上完整重放/物化，映射节点、heads与已保存产物依赖，保存新候选及checkpoint，不调用模型。
 - WORLD_REUSE_PREPARED/FAILED保存引用和映射；原产物重验、重放首差/异常失败且不兜底重算，资源仍保留；strict commit尚未接入。
 - 复用验证后才暴露正文，各回调独立副本；previous仅投影候选元数据防止夹带失效正文；持久记录可复用/失效产物ID。
+- prepareRepairedWorldCandidate共用matched准备执行器和repair产物筛选，重验物化unaffected后调用一次WorldAgent并保存候选/checkpoint。
+- null事件及其传递后继保留实际依赖但不进入可复用图，候选/checkpoint heads为null；伪造引用仍失败。
 - refresh产物依赖映射到本次节点；旧节点引用failed，null为unknown；源产物前后核验，复用工具异常不调用agent，仍不发布主目录。
 - 本轮M2：changed refresh自动增量；refresh.reusedNodes覆盖无产物节点映射，explain.reuse持久区分实际映射和验证计划。
-- 验证：repair/step/refresh共58项及pnpm typecheck通过；全量待本轮收尾补跑。M2尚未完成。
+- 验证：repair/step/refresh共58项及pnpm typecheck通过；全量63文件/935项通过，跳过1文件/7项，259.83秒；下一轮无需全量基线。M2尚未完成。
