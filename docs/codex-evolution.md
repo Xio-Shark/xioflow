@@ -446,3 +446,13 @@
 - 增加六种重试场景，覆盖重开、再次失败、历史切片、无重复共享计算、事务关闭、checkpoint推进和落盘故障；更新API示例与定位。
 - 验证：基线739通过/7跳过，typecheck通过，定向66通过；全量745通过/7跳过，diff检查通过。
 - 下一步：查询历史checkpoint资源引用，为部分分配和孤立事务提供可审查回收计划。
+
+## 2026-10-09 — 历史工作区引用与资源回收预览
+- 新增listAgentCheckpointWorkspaceReferences，查询checkpoint工作区、历史TX_BEGUN基线与当前标志，支持Run/事务/时间切片和重开。
+- 新增planAgentCausalResourceCleanup，冻结journal截止点，关联共享修复、绑定尝试、生命周期与checkpoint引用，输出retain/review和证据。
+- 资源归属过滤不缩小引用扫描：跨Run、跨事务共用基线仍保留；共享输出、pending发布、历史引用与committing均附保留原因。
+- 纯查询不删除文件、不重放工具或写journal；未登记分配、外部使用者与磁盘存在性仍需宿主核对，暂不拆分fork与基线回收。
+- 集成覆盖中断、续跑、孤立分配、跨Run共享基线、checkpoint推进、历史切片与重开；补充API示例和定位。
+- 初始基线657通过/7跳过，2套件缺cc；已补gcc/libc6-dev。typecheck通过；全量745通过/7跳过，1处新增测试断言失败。
+- 失败因runtime关闭追加journal导致默认截止点前进；改用冻结atSeq后pnpm test定向67通过，时间预算内未再次重跑全量。
+- 下一步：区分可释放fork和需保留历史基线，接通显式资源回收与冻结证据核对。

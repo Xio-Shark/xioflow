@@ -289,6 +289,33 @@ committing / committed / conflicted / aborted，以及已开始事务的 forkRoo
 可用既有 abortWorkspaceTransaction 回收开放事务，历史切片仍保留回收前证据。
 续跑为同一 agent 创建新的尝试身份，不覆盖此前登记，也不会自动重试 failed / skipped。
 
+### 历史工作区引用与回收预览
+
+`listAgentCheckpointWorkspaceReferences(domain, { atSeq?, runId?, txId? })` 查询各 checkpoint
+绑定的事务、forkRoot、当时的 TX_BEGUN 基线快照和主工作区。`current` 表示截止点的最新
+checkpoint；完成或失败的 agent 仍保留引用。没有历史 TX_BEGUN 时 baseline 缺省，查询
+不以当前快照补造历史，也不保证记录中的文件仍存在。
+
+```ts
+import { planAgentCausalResourceCleanup } from '@xioflow/kernel';
+
+const review = planAgentCausalResourceCleanup(domain, { planSeq });
+for (const resource of review.resources) {
+  console.log(review.atSeq, resource.txId, resource.disposition, resource.reasons);
+  console.log(resource.references); // checkpointSeq / agentId / runId / baseline
+}
+```
+
+预览包含选中计划的共享修复事务和已登记绑定事务，关联 preparationSeqs / attemptSeqs、
+事务生命周期与所有历史 checkpoint。`runId` / `planSeq` 只筛选资源所属计划，引用检查
+始终覆盖同 domain 的所有 Run；其他事务的 checkpoint 共用同一基线也会列入引用。
+共享输出、pending 发布、当前或历史 checkpoint、被引用基线及 committing 事务标为
+`retain`，并给出具体原因。其他资源标为 `review`，需宿主核实部分分配、外部副作用及
+未登记使用者；它不是可直接删除清单。即使 TX_ABORTED 已记录，也不推断磁盘清理成功。
+预览不启动 runtime、不重放工具、不写 journal、不执行回收。`atSeq` 可重建历史结果，
+默认冻结到查询开始时的最后序号；实际操作前重新查询。当前保守地整体保留涉及历史的
+事务资源，尚未把可释放 fork 与必须保留的基线分开规划。
+
 ### 显式重试失败绑定
 
 `retryAgentSharedCausalRefresh(runtime, planSeq, { agentId, failureSeq }, bind)` 只重试指定

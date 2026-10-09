@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, retryAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCheckpointWorkspaceReferences, planAgentCausalResourceCleanup, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, retryAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace, AgentSharedCausalRecoveryOptions } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -40,6 +40,30 @@ describe('agent checkpoint causal branches', () => {
     runtime?.close();
     domain.close();
     fs.rmSync(temp, { recursive: true, force: true });
+  });
+
+  it('queries historical workspace references across restore and reopen', async () => {
+    open();
+    create([]);
+    const created = runtime.checkpoints('a')[0].seq;
+    runtime.pause('a');
+    runtime.restoreCheckpoint('a', created);
+    const restored = runtime.checkpoints('a').at(-1)!.seq;
+    const refs = listAgentCheckpointWorkspaceReferences(domain);
+    expect(refs.map(ref => [ref.checkpointSeq, ref.current])).toEqual([[created, false], [restored, true]]);
+    expect(refs[0]).toMatchObject({ agentId: 'a', runId: 'run', txId: 'tx', baseline: {
+      beginSeq: (workspace as import('../../src/index.js').WorkspaceTransaction).beginSeq,
+      snapshotId: (workspace as import('../../src/index.js').WorkspaceTransaction).baseSnapshotId,
+    } });
+    expect(listAgentCheckpointWorkspaceReferences(domain, { atSeq: created })[0].current).toBe(true);
+    expect(listAgentCheckpointWorkspaceReferences(domain, { txId: 'absent' })).toEqual([]);
+    expect(listAgentCheckpointWorkspaceReferences(domain, { runId: 'absent' })).toEqual([]);
+    expect(() => listAgentCheckpointWorkspaceReferences(domain, { atSeq: NaN })).toThrow('sequence');
+    expect(() => planAgentCausalResourceCleanup(domain, { atSeq: -1 })).toThrow('sequence');
+    runtime.close(); domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    expect(listAgentCheckpointWorkspaceReferences(domain)).toEqual(refs);
+    expect(planAgentCausalResourceCleanup(domain).resources).toEqual([]);
   });
 
   it('rejects unknown refresh identities without invoking host binding', async () => {
@@ -211,6 +235,14 @@ describe('agent checkpoint causal branches', () => {
     expect(execution.publications.map(entry => entry.status)).toEqual(['repaired', 'pending']);
     const first = runtime.checkpoints('first').at(-1);
     const attempts = listAgentCausalBindingAttempts(domain);
+    const resourcePlan = planAgentCausalResourceCleanup(domain, { planSeq: execution.seq });
+    expect(resourcePlan.resources.find(entry => entry.txId === 'shared'))
+      .toMatchObject({ disposition: 'retain', reasons: ['shared_repair'] });
+    expect(resourcePlan.resources.find(entry => entry.txId === 'first-bound'))
+      .toMatchObject({ disposition: 'retain', reasons: ['current_checkpoint'] });
+    if (mode !== 'reservation_failed') expect(resourcePlan.resources.find(entry => entry.txId === 'second-bound'))
+      .toMatchObject({ disposition: 'retain', reasons: ['pending_publication'] });
+    expect(planAgentCausalResourceCleanup(domain, { runId: 'other' }).resources).toEqual([]);
     expect(attempts).toHaveLength(2);
     expect(attempts[0].reservations[0]).toMatchObject({ txId: 'first-bound', state: 'open', referencedBy: ['first'] });
     if (mode === 'reservation_failed') {
@@ -226,6 +258,7 @@ describe('agent checkpoint causal branches', () => {
     domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
     open();
     expect(listAgentCausalBindingAttempts(domain)).toEqual(attempts);
+    expect(planAgentCausalResourceCleanup(domain, { planSeq: execution.seq })).toEqual(resourcePlan);
     const usage = runtime.getRunUsage('run');
     if (mode === 'advanced') runtime.restoreCheckpoint('second', runtime.checkpoints('second').at(-1)!.seq);
     if (mode === 'closed') domain.getStore().recordJournalEvent({ domainId: domain.domainId,
@@ -257,6 +290,23 @@ describe('agent checkpoint causal branches', () => {
     if (savedAttempt) expect(() => savedAttempt!.reserveTransaction('late')).toThrow('no longer active');
     expect(listAgentCausalBindingAttempts(domain, { planSeq: execution.seq })).toHaveLength(mode === 'advanced' ? 2 : 3);
     if (mode === 'allocated') {
+      const beforeQuery = domain.getStore().getJournalEvents(domain.domainId);
+      expect(planAgentCausalResourceCleanup(domain, { planSeq: execution.seq }).resources
+        .find(entry => entry.txId === 'second-bound')).toMatchObject({ disposition: 'review', reasons: [], state: 'open' });
+      expect(domain.getStore().getJournalEvents(domain.domainId)).toEqual(beforeQuery);
+      expect(planAgentCausalResourceCleanup(domain, { planSeq: execution.seq, atSeq: resourcePlan.atSeq })).toEqual(resourcePlan);
+      // A different Run can retain this baseline even though the candidate has no direct binding.
+      domain.getStore().saveRun({ id: 'other', taskId: 'task', domainId: domain.domainId,
+        owner: 'test', status: 'running', startedAt: new Date().toISOString() });
+      const orphanBegin = beforeQuery.find(event => event.type === 'TX_BEGUN' && event.payload.txId === 'second-bound')!;
+      const external = await new ProcessSupervisor(domain).beginWorkspaceTransaction({ txId: 'external', runId: 'other',
+        root: path.join(temp, 'repo'), forkPath: path.join(temp, 'external'),
+        baseSnapshotId: orphanBegin.payload.baseSnapshotId as string });
+      runtime.create({ id: 'external', runId: 'other', input: null, checkpoint: null, workspace: external, maxSteps: 1 });
+      const protectedResource = planAgentCausalResourceCleanup(domain, { runId: 'run', planSeq: execution.seq })
+        .resources.find(entry => entry.txId === 'second-bound')!;
+      expect(protectedResource).toMatchObject({ disposition: 'retain', reasons: ['referenced_baseline'] });
+      expect(protectedResource.references).toMatchObject([{ agentId: 'external', runId: 'other', txId: 'external' }]);
       await new ProcessSupervisor(domain).abortWorkspaceTransaction('second-bound', 'reconciled orphan');
       expect(listAgentCausalBindingAttempts(domain)[1].reservations[0].state).toBe('aborted');
       expect(listAgentCausalBindingAttempts(domain, { atSeq: attempts[1].reservations[0].seq })[1].reservations[0].state).toBe('reserved');
@@ -268,6 +318,20 @@ describe('agent checkpoint causal branches', () => {
     expect((await resumeAgentSharedCausalRefresh(runtime, execution.seq, bind)).outcomes).toEqual([]);
     expect(listAgentCausalRefreshExecutions(domain, { atSeq: execution.repair!.seq })[0].publications
       .map(entry => entry.status)).toEqual(['pending', 'pending']);
+    if (mode === 'allocated') {
+      const replacement = await new ProcessSupervisor(domain).beginWorkspaceTransaction({ txId: 'replacement', runId: 'run',
+        root: path.join(temp, 'repo'), forkPath: path.join(temp, 'replacement') });
+      runtime.restoreCheckpoint('first', first!.seq, replacement);
+      const historical = planAgentCausalResourceCleanup(domain, { planSeq: execution.seq }).resources
+        .find(entry => entry.txId === 'first-bound')!;
+      expect(historical).toMatchObject({ disposition: 'retain', reasons: ['historical_checkpoint'] });
+      expect(historical.references).toMatchObject([{ checkpointSeq: first!.seq, current: false }]);
+      const cutoff = planAgentCausalResourceCleanup(domain, { planSeq: execution.seq });
+      runtime.close(); domain.close();
+      domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+      open();
+      expect(planAgentCausalResourceCleanup(domain, { planSeq: execution.seq, atSeq: cutoff.atSeq })).toEqual(cutoff);
+    }
   });
 
   it.each(['repaired', 'failed', 'skipped', 'publication_failed'] as const)('tracks shared publication with second binding %s durably', async (mode) => {

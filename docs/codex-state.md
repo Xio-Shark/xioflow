@@ -4,14 +4,9 @@
 - speculateWorkspace：OCC 冲突后最多一次 repair 与再提交。 commitPolicy first_valid / all_valid；后者依声明顺序合并 OCC 有效结果。
 - AgentRuntime create / step 原子持久化 causalHeads 与 checkpoint。 heads 引用同 domain 已有节点；null 未跟踪，[] 空分支；checkpoint 历史可查，恢复不回退预算。
 - planCausalRecovery 查询跨 agent 失效；recoverCausalCheckpoint 校验版本、独占绑定宿主重建。 成功后 causal_repaired 原子保存上下文 / heads / workspace 并 paused。
-- recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。
-- prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。
-- recoverAgentSharedCausalBatch：一次共享重算，逐项绑定独立事务与上下文。
-- 单事务单活跃 agent；bind 分发独立输出和重建上下文；拒绝绑定或回收共享事务。
+- recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。 prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。 recoverAgentSharedCausalBatch：一次共享重算，逐项绑定独立事务与上下文。 单事务单活跃 agent；bind 分发独立输出和重建上下文；拒绝绑定或回收共享事务。
 - forkAgentCheckpoint：历史 TX_BEGUN 基线重放，创建同 Run 新 agent，保留累计预算。
-- 要求 deterministic、完整 closedWorld 前缀及逐步哈希；基线缺失失败。
-- compareAgentCheckpoints：跨 agent / 事务 / Run 对比上下文 JSON Pointer 与因果分支。
-- compareAgentCheckpointFiles：重建历史工作区并比较实际文件 A/D/M/T。
+- 要求 deterministic、完整 closedWorld 前缀及逐步哈希；基线缺失失败。 compareAgentCheckpoints：跨 agent / 事务 / Run 对比上下文 JSON Pointer 与因果分支。 compareAgentCheckpointFiles：重建历史工作区并比较实际文件 A/D/M/T。
 - 共享重建 src/agents/checkpoint-workspace.ts；不创建 agent / 消耗 agent step 预算。
 - 宿主保证依赖完整、确定性和文件效果；时间旅行仅 checkpoint 粒度，不重放模型/外部系统。
 - 已知坑：全量测试期间不要改源码 / 测试或并行 build，避免 dist 竞态。
@@ -56,5 +51,8 @@
 - listAgentCausalBindingAttempts：planSeq/runId/atSeq/重开查询尝试、登记、TX生命周期、forkRoot和当前agent引用。登记非锁；无引用不代表可删除，宿主核实后用既有abort回收。
 - retryAgentSharedCausalRefresh：按agentId+最新failureSeq显式重试一个failed；复用共享repair，其他项不动，旧失败序号/终态/重叠调用拒绝。
 - AGENT_CAUSAL_BINDING_RETRY_REQUESTED先落盘，failed→pending(retrySeq)→新结果；历史查询验证转换，重开可复现。中断沿用resume；再次失败需新序号，保留宿主资源核对与OCC责任。
-- 验证：基线739通过/7跳过；本轮typecheck通过、定向66通过；全量745通过/7跳过，diff检查通过。
-- 下一步：扩展历史checkpoint资源引用查询，形成部分分配与孤立事务的可审查回收计划；不自动删除共享或历史资源。
+- listAgentCheckpointWorkspaceReferences：跨Run/txId/atSeq查询历史checkpoint工作区、TX_BEGUN基线和当前标志；缺失基线不补造，不保证磁盘仍存在。
+- planAgentCausalResourceCleanup：冻结journal截止点，关联共享修复/登记尝试、事务生命周期、当前及历史checkpoint和跨事务共享基线引用。
+- runId/planSeq只筛资源归属，引用扫描全domain；共享、pending、历史/当前、共享基线与committing均retain，其余review。纯查询不删资源，未登记分配/外部引用仍由宿主核对。
+- 验证：初始基线657通过/7跳过，2套件因缺cc未运行；已安装gcc/libc6-dev。typecheck通过；全量745通过/7跳过、1处新增测试截止点断言失败，修正后定向67通过；修正后未重跑全量。
+- 下一步：把历史基线保留与可释放fork分开规划，接通按冻结证据核对的显式资源回收；仍保留共享输出和未完成发布。

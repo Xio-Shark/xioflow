@@ -10,6 +10,10 @@ xioflow 的目标是让多个 agent 在同一个不断变化的世界中投机�
 
 `retryAgentSharedCausalRefresh` 支持按最新失败序号显式重试单个绑定，复用共享因果计算；重试意图、原失败与新发布按时间切片可查，中断后沿用 resume。其他 agent 保持原结果，资源副作用仍由宿主核对，见[重试示例](causal-recovery-batches.md#显式重试失败绑定)。
 
+`planAgentCausalResourceCleanup` 将中断绑定的事务归属与当前、历史 checkpoint 及跨 Run
+共享基线引用接通，输出带 journal 截止点的资源保留和人工核对预览；保护时间旅行依据，
+不自动删除资源。见[历史资源预览](causal-recovery-batches.md#历史工作区引用与回收预览)。
+
 ## 核心抽象
 
 - **世界版本**：已有 snapshot / fork / rollback 定义文件系统的版本与分支；外部系统需要显式的版本化适配器。
