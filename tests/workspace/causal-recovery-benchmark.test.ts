@@ -38,6 +38,8 @@ describe('causal recovery fault benchmark', () => {
     }
   });
   it('rejects invalid workload sizes before allocating resources', async () => {
+    // Runtime callers (including the CLI) are not constrained by TypeScript unions.
+    await expect(runCausalRecoveryBenchmark({ interruption: 'invalid' as 'close' })).rejects.toThrow('Invalid interruption');
     await expect(runCausalRecoveryBenchmark({ branches: 1 })).rejects.toThrow('Invalid branches');
     await expect(runCausalRecoveryBenchmark({ trials: 0 })).rejects.toThrow('Invalid trials');
     await expect(runCausalRecoveryBenchmark({ hashRounds: NaN })).rejects.toThrow('Invalid hashRounds');

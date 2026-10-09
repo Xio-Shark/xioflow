@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, fork } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -21,22 +21,29 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const modes = ['durable-recovery', 'rerun-unfinished'] as const;
 const faults = ['binding-failure', 'outcome-interruption'] as const;
 
+type Counters = { executionToolCalls: number; probeCalls: number; bindingCalls: number;
+  distributionReads: number; distributionWrites: number; distributionValidationReads: number; injectedFaults: number };
+type Boundary = { before: ReturnType<typeof listAgentCausalRefreshExecutions>[number]; settled: number[];
+  counters: Counters; abandonedTxId: string; elapsedBeforeRecovery: number };
+type SampleConfig = { branches: number; hashRounds: number };
+
 /** Measures durable recovery, with optional OCC publication after a second input change. */
-export async function runCausalRecoveryBenchmark(options: { trials?: number; branches?: number; hashRounds?: number; publication?: 'stable' | 'input-changed' } = {}) {
+export async function runCausalRecoveryBenchmark(options: { trials?: number; branches?: number; hashRounds?: number; publication?: 'stable' | 'input-changed'; interruption?: 'close' | 'sigkill' } = {}) {
   if (options.publication !== undefined && !['stable', 'input-changed'].includes(options.publication)) throw new Error('Invalid publication');
+  if (options.interruption !== undefined && !['close', 'sigkill'].includes(options.interruption)) throw new Error('Invalid interruption');
   const config = { trials: options.trials ?? 3, branches: options.branches ?? 4, hashRounds: options.hashRounds ?? 1000 };
   for (const [key, value] of Object.entries(config)) {
     if (!Number.isSafeInteger(value) || value < (key === 'branches' ? 2 : 1)) throw new Error(`Invalid ${key}`);
   }
-  const samples: Awaited<ReturnType<typeof runSample>>[] = [];
+  const samples: (Awaited<ReturnType<typeof runSample>> | Awaited<ReturnType<typeof runKilledSample>>)[] = [];
   for (let trial = 0; trial < config.trials; trial++) {
     for (const fault of faults) {
       for (let offset = 0; offset < modes.length; offset++) {
-        samples.push(await runSample(modes[(trial + offset) % modes.length], fault, trial, config, options.publication));
+        samples.push(await (options.interruption === 'sigkill' ? runKilledSample : runSample)(modes[(trial + offset) % modes.length], fault, trial, config, options.publication));
       }
     }
   }
-  return { schemaVersion: 2, config, publication: options.publication ?? null, modelTokens: null,
+  return { schemaVersion: 3, config, interruption: options.interruption ?? 'close', publication: options.publication ?? null, modelTokens: null,
     scope: options.publication ? 'recovery-through-occ-publication' : 'checkpoint-and-isolated-workspace-recovery',
     environment: { node: process.version, platform: process.platform, arch: process.arch }, samples,
     summary: faults.flatMap(fault => modes.map(mode => {
@@ -49,21 +56,28 @@ export async function runCausalRecoveryBenchmark(options: { trials?: number; bra
     })) };
 }
 
-async function runSample(mode: typeof modes[number], fault: typeof faults[number], trial: number,
-  config: { branches: number; hashRounds: number }, publication?: 'stable' | 'input-changed') {
-  const temp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'xio-recovery-bench-')));
+export async function runSample(mode: typeof modes[number], fault: typeof faults[number], trial: number,
+  config: SampleConfig, publication?: 'stable' | 'input-changed',
+  lifecycle?: { temp: string; resume?: Boundary; stop?: (boundary: Boundary) => Promise<never> }) {
+  const temp = lifecycle?.temp ?? fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'xio-recovery-bench-')));
+  const resume = lifecycle?.resume;
+  const resumedAt = performance.now();
   let domain: ExecutionDomain | undefined;
   let runtime: AgentRuntime | undefined;
   try {
     const root = path.join(temp, 'repo');
-    fs.mkdirSync(root);
-    await exec('git', ['init', '-q', '-b', 'main', root]);
-    fs.writeFileSync(path.join(root, 'input.txt'), 'old');
+    if (!resume) {
+      fs.mkdirSync(root);
+      await exec('git', ['init', '-q', '-b', 'main', root]);
+      fs.writeFileSync(path.join(root, 'input.txt'), 'old');
+    }
     domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'recovery-benchmark');
-    const now = new Date().toISOString();
-    domain.getStore().saveTask({ id: 'task', domainId: domain.domainId, name: 'recovery benchmark', createdAt: now });
-    domain.getStore().saveRun({ id: 'run', taskId: 'task', domainId: domain.domainId,
-      owner: 'benchmark', status: 'running', startedAt: now });
+    if (!resume) {
+      const now = new Date().toISOString();
+      domain.getStore().saveTask({ id: 'task', domainId: domain.domainId, name: 'recovery benchmark', createdAt: now });
+      domain.getStore().saveRun({ id: 'run', taskId: 'task', domainId: domain.domainId,
+        owner: 'benchmark', status: 'running', startedAt: now });
+    }
     const openRuntime = () => new AgentRuntime(domain!, { maxConcurrentAgents: 1,
       step: async () => { throw new Error('Benchmark does not schedule model steps'); } });
     runtime = openRuntime();
@@ -74,21 +88,23 @@ async function runSample(mode: typeof modes[number], fault: typeof faults[number
       for (let i = 0; i < config.hashRounds; i++) input = hash(input);
       return input;
     };
-    const initial = await supervisor.beginWorkspaceTransaction(txOptions('initial'));
-    const input = graph.record({ txId: initial.txId, actorId: 'shared', dependsOn: [],
-      observation: { kind: 'observe', call: { tool: 'read', args: {} }, resultHash: hash('old') } });
-    const output = graph.record({ txId: initial.txId, actorId: 'shared', dependsOn: [input.seq],
-      observation: { kind: 'mutate', call: { tool: 'derive', args: {} }, resultHash: hash(derive('old')) },
-      writes: [{ status: 'A', path: 'derived.txt' }] });
-    fs.writeFileSync(path.join(initial.forkRoot, 'derived.txt'), derive('old'));
     const ids = Array.from({ length: config.branches }, (_, i) => `agent-${i}`);
-    for (const id of ids) {
-      runtime.create({ id, runId: 'run', input: null, checkpoint: derive('old'), causalHeads: [output.seq], maxSteps: 2 });
-      runtime.pause(id);
+    if (!resume) {
+      const initial = await supervisor.beginWorkspaceTransaction(txOptions('initial'));
+      const input = graph.record({ txId: initial.txId, actorId: 'shared', dependsOn: [],
+        observation: { kind: 'observe', call: { tool: 'read', args: {} }, resultHash: hash('old') } });
+      const output = graph.record({ txId: initial.txId, actorId: 'shared', dependsOn: [input.seq],
+        observation: { kind: 'mutate', call: { tool: 'derive', args: {} }, resultHash: hash(derive('old')) },
+        writes: [{ status: 'A', path: 'derived.txt' }] });
+      fs.writeFileSync(path.join(initial.forkRoot, 'derived.txt'), derive('old'));
+      for (const id of ids) {
+        runtime.create({ id, runId: 'run', input: null, checkpoint: derive('old'), causalHeads: [output.seq], maxSteps: 2 });
+        runtime.pause(id);
+      }
     }
     const updated = `new-${trial}`;
-    fs.writeFileSync(path.join(root, 'input.txt'), updated);
-    const counters = { executionToolCalls: 0, probeCalls: 0, bindingCalls: 0, distributionReads: 0,
+    if (!resume) fs.writeFileSync(path.join(root, 'input.txt'), updated);
+    const counters: Counters = resume?.counters ?? { executionToolCalls: 0, probeCalls: 0, bindingCalls: 0, distributionReads: 0,
       distributionWrites: 0, distributionValidationReads: 0, injectedFaults: 0 };
     const execute = async (entry: CausalNode, tx: WorkspaceTransaction) => {
       counters.executionToolCalls++;
@@ -98,7 +114,7 @@ async function runSample(mode: typeof modes[number], fault: typeof faults[number
       return { actorId: entry.actorId, observation: { ...entry.observation, resultHash: hash(result) }, writes: entry.writes };
     };
     let inject = true;
-    let abandonedTxId = '';
+    let abandonedTxId = resume?.abandonedTxId ?? '';
     const bind: AgentSharedCausalRecoveryOptions['bind'] = async ({ agentId }, repair, attempt) => {
       counters.bindingCalls++;
       const txId = `bound-${attempt!.attemptSeq}`;
@@ -135,30 +151,36 @@ async function runSample(mode: typeof modes[number], fault: typeof faults[number
         branches: plan.affected.map(row => ({ id: row.agentId, heads: row.checkpoint.causalHeads! })),
         validateReuse: async (_tx, nodes) => { if (nodes.length) throw new Error('Unexpected reuse'); }, execute }), bind,
     });
-    const started = performance.now();
-    const store = domain.getStore();
-    const record = store.recordJournalEvent.bind(store);
-    if (fault === 'outcome-interruption') store.recordJournalEvent = event => {
-      if (event.type === 'AGENT_CAUSAL_REFRESH_OUTCOME') throw new Error('Injected outcome journal interruption');
-      return record(event);
-    };
-    try {
-      const result = await refresh('first', ids);
-      if (result.status !== 'recovered') throw new Error(`Unexpected refresh: ${result.status}`);
-    } catch (error) {
-      if (fault !== 'outcome-interruption' || !(error instanceof Error) || error.message !== 'Injected outcome journal interruption') throw error;
-    } finally { store.recordJournalEvent = record; }
-    const before = listAgentCausalRefreshExecutions(domain)[0];
+    const started = performance.now() - (resume?.elapsedBeforeRecovery ?? 0);
+    if (!resume) {
+      const store = domain.getStore();
+      const record = store.recordJournalEvent.bind(store);
+      if (fault === 'outcome-interruption') store.recordJournalEvent = event => {
+        if (event.type === 'AGENT_CAUSAL_REFRESH_OUTCOME') throw new Error('Injected outcome journal interruption');
+        return record(event);
+      };
+      try {
+        const result = await refresh('first', ids);
+        if (result.status !== 'recovered') throw new Error(`Unexpected refresh: ${result.status}`);
+      } catch (error) {
+        if (fault !== 'outcome-interruption' || !(error instanceof Error) || error.message !== 'Injected outcome journal interruption') throw error;
+      } finally { store.recordJournalEvent = record; }
+    }
+    const before = resume?.before ?? listAgentCausalRefreshExecutions(domain)[0];
     if (before.publications.at(-1)?.status !== (fault === 'binding-failure' ? 'failed' : 'pending')) {
       throw new Error('Fault did not produce the expected durable state');
     }
-    const settled = ids.slice(0, -1).map(id => runtime!.checkpoints(id).at(-1)!.seq);
+    const settled = resume?.settled ?? ids.slice(0, -1).map(id => runtime!.checkpoints(id).at(-1)!.seq);
     const executionBeforeRecovery = counters.executionToolCalls;
-    const recoveryStarted = performance.now();
-    runtime.close(); domain.close();
-    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'recovery-benchmark');
-    runtime = openRuntime();
-    supervisor = new ProcessSupervisor(domain);
+    if (lifecycle?.stop) await lifecycle.stop({ before, settled, counters, abandonedTxId,
+      elapsedBeforeRecovery: performance.now() - started });
+    const recoveryStarted = resume ? resumedAt : performance.now();
+    if (!resume) {
+      runtime.close(); domain.close();
+      domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'recovery-benchmark');
+      runtime = openRuntime();
+      supervisor = new ProcessSupervisor(domain);
+    }
     const historySurvived = JSON.stringify(listAgentCausalRefreshExecutions(domain)[0]) === JSON.stringify(before);
     inject = false;
     if (mode === 'rerun-unfinished') await refresh('rerun', [ids.at(-1)!]);
@@ -258,4 +280,33 @@ async function runSample(mode: typeof modes[number], fault: typeof faults[number
     runtime?.close(); domain?.close();
     fs.rmSync(temp, { recursive: true, force: true });
   }
+}
+
+/** Kill only the isolated fixture worker, after it reports the durable recovery boundary. */
+async function runKilledSample(mode: typeof modes[number], fault: typeof faults[number], trial: number,
+  config: SampleConfig, publication?: 'stable' | 'input-changed') {
+  const temp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'xio-recovery-kill-')));
+  const killStarted = performance.now();
+  try {
+    const boundary = await new Promise<Boundary>((resolve, reject) => {
+      const child = fork(new URL('./causal-recovery-worker.js', import.meta.url),
+        [JSON.stringify({ mode, fault, trial, config, publication, temp })],
+        { stdio: ['ignore', 'ignore', 'pipe', 'ipc'], execArgv: [] });
+      let ready: Boundary | undefined;
+      let stderr = '';
+      let timedOut = false;
+      child.stderr!.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-4000); });
+      const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 30_000);
+      child.once('error', error => { clearTimeout(timer); reject(error); });
+      child.once('message', message => { ready = message as Boundary; child.kill('SIGKILL'); });
+      child.once('exit', (code, signal) => {
+        clearTimeout(timer);
+        if (!timedOut && ready && signal === 'SIGKILL') resolve(ready);
+        else reject(new Error(`Recovery worker did not reach crash boundary: ${code}/${signal}; timeout=${timedOut}; ${stderr}`));
+      });
+    });
+    const crashBoundaryMs = performance.now() - killStarted;
+    const result = await runSample(mode, fault, trial, config, publication, { temp, resume: boundary });
+    return { ...result, elapsedMs: performance.now() - killStarted, processCrash: { signal: 'SIGKILL' as const, gracefulClose: false, crashBoundaryMs } };
+  } finally { fs.rmSync(temp, { recursive: true, force: true }); }
 }

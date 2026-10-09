@@ -50,7 +50,7 @@
 | 结果记录中断 | 持久续跑 | 2 | 4 | 55.74 | 393.71 |
 | 结果记录中断 | 重跑未完成分支 | 4 | 5 | 153.00 | 481.63 |
 
-这些是确定性合成负载的小样本，不是生产收益保证。下一步可扩展为子进程真正退出与恢复过程中输入再次改变。
+这些是确定性合成负载的小样本，不是生产收益保证。进程终止模式见下文；恢复过程中输入再次改变仍待覆盖。
 
 ## 恢复到 OCC 发布的闭环
 
@@ -67,7 +67,7 @@ JSON 升级为 schemaVersion 2，`publication` 标明场景，旧的隔离恢复
 
 这衡量的是共享、相同文件输出的一次发布，不是多个独立事务的原子提交。
 成功提交会回收该绑定 fork；checkpoint 历史保留，不能假定其旧 fork 仍存在。
-输入扰动发生在恢复之后、提交之前，尚未覆盖恢复过程中输入变化或真正的进程退出。
+输入扰动发生在恢复之后、提交之前，尚未覆盖恢复过程中输入变化；真正的进程退出可叠加下文模式。
 
 `publication` 子对象单列提交尝试、提交重放、额外重算、探测与阶段耗时。
 顶层执行/分发计数及 `elapsedMs` 包含发布阶段；`recoveryExecutionToolCalls` 和
@@ -87,3 +87,24 @@ JSON 升级为 schemaVersion 2，`publication` 标明场景，旧的隔离恢复
 | 重跑未完成分支 | 8 | 4 | 3 | 1008.04 |
 
 均值合并两种故障，仅为本机合成负载测量；未运行模型，无 token 收益结论。
+
+## 真实进程终止与恢复
+
+`pnpm benchmark:recovery 3 4 1000 input-changed sigkill` 将每个样本的首次刷新放入
+独立 Node 子进程。最后一个 agent 的 failed 或 pending 状态形成后，worker 通过 IPC
+报告基准计数与核对信息，保持 domain / SQLite 连接打开。父进程发送 `SIGKILL`，
+核对退出 signal 后重新获取 domain，从 journal 执行 retry / resume 或重跑未完成分支。
+worker 不调用 runtime.close / domain.close，也不执行 finally 清理；这验证真实进程死亡、
+遗留 domain 锁和持久共享输出的恢复，但不模拟机器掉电或任意写入指令处崩溃。
+两类故障仍先按上述方式注入，再在已知持久边界杀进程。
+
+第五参数默认 `close`，保留正常关闭对照。schemaVersion 3 增加 `interruption`，
+进程终止样本附 `processCrash.signal / gracefulClose / crashBoundaryMs`。
+`crashBoundaryMs` 包含子进程启动、夹具构建、首次刷新、IPC 和确认死亡；
+该模式的 `elapsedMs` 包含上述开销及完整恢复与发布，不能直接与旧模式总耗时比较。
+`recoveryMs` 从新实例首次获取 domain 前开始，计入遗留锁处理与 journal 重开。
+业务恢复只读取持久 journal / 工作区；IPC 内容只用于基准计数、故障定位和历史对照。
+`stable` 与 `input-changed` 均覆盖两类故障和两种恢复策略；输入扰动仍在恢复后发生。
+
+[进程终止原始报告](causal-recovery-crash.sample.json) 提供可复现的成对样本，
+工具调用与正确性独立于进程启动耗时统计，不运行模型或推算 token 收益。

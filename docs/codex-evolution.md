@@ -482,3 +482,11 @@
 - 初始基线因环境缺cc导致两套原生测试无法加载，已安装gcc/libc6-dev；最终验证结果见下行。
 - 下一步：真实子进程退出与恢复过程中的输入变化，检查持久共享输出失效后的恢复策略。
 - 验证：pnpm typecheck、pnpm build、pnpm test通过（751通过/7跳过，52套件通过）；12个OCC样本正确，git diff --check通过。
+
+## 2026-10-09 — 真实进程终止后的共享因果恢复
+- benchmark:recovery 新增第五参数 sigkill；在 failed/pending 持久边界保持 domain/SQLite 打开，由父进程 SIGKILL worker 后接管。
+- 复用既有夹具与 retry/resume/OCC 链路；IPC 仅携带计数和核对证据，业务状态从 journal 与共享工作区恢复。
+- schemaVersion=3 分离进程边界耗时，恢复计时包含首次接管；明确不是断电、任意指令边界或模型测试。
+- 两类故障×两种策略×稳定/再变化集成测试通过；3次重复/4 agent/1000轮哈希的12个变化样本正确，全程工具8→4。
+- 更新协议、VISION、原始报告与60行交接；下一步覆盖恢复期间输入变化与持久共享输出失效。
+- 验证：基线751通过/7跳过；pnpm typecheck、pnpm build、pnpm test通过（753通过/7跳过，53套件通过）；12个SIGKILL样本正确，git diff --check通过。
