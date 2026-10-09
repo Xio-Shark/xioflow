@@ -1,6 +1,6 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
-- 下一步最小切片：统一句柄/close生命周期，消费已纳入world事务的共享资源规划器；接通准备、刷新、提交与解释。
+- 下一步最小切片：统一句柄/close生命周期，消费共享规划器与已接入explain的资源事实；等待操作结束后持久回收报告。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约冻结，M3/M4待推进。
 - M2完成标准仍缺：统一句柄、close资源事实；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md冻结六入口状态表、覆盖和六类失败/重试/资源归属；src/world/contract.ts共享非公开契约，types测试随typecheck检查。
@@ -30,13 +30,12 @@
 - 内部refreshWorldCandidate组合validate/recompute：matched重建固定验证版本候选，unknown拒绝或重算，changed增量；工具/产物异常不触发重算。
 - changed增量准备使用持久validation固定版本；unknown/显式全量默认新采集，原句柄基线不变。restoreWorldRevision缺失/错配不回退当前目录、不调用agent。
 - readWorldRefresh/readWorldCandidateValidation/explainWorldPreparation固定引用只读恢复，重开和后续历史不影响同截止点；解释区分验证计划与实际full/reuse/incremental结果。
-- 内部入口均未公开；无重算幂等、中断自动续跑或统一资源清理；explain仍缺发布/绑定/资源事实。
+- 内部入口均未公开；无重算幂等、中断自动续跑或统一资源清理；发布/绑定/资源已接入explain。
 - 候选产物覆盖检查：执行完成及验证前后复用精确路径/Git树核验，拒绝symlink、目录和指纹漏收的忽略文件，failed并保留证据，不发布。
 - 该检查不推断隐性读取或未声明写入，也不是文件系统锁；最终由内部strict commit重验。合法写入/删除、声明不存在路径保持可用。
 - 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，每轮先确认cc；当前容器command -v cc无结果，须先补工具链。
 - 内部prepareWorldRepair消费changed/selected_nodes持久报告，接既有prepareWorkspaceRepair；固定基线拓扑重放复用节点并验全部hash，物化复用写入后才重算闭包。
 - 修复前/复用后/完成后重验原产物及版本，最终覆盖/指纹检查；失败abort并留WORLD_REPAIR_FAILED与验证基线；成功记录事务、复用/替换及指纹。
-- 该基础层返回open事务及筛选后的refresh上下文，未产生WorldCandidate/执行模型或绑定checkpoint；不替代OCC或业务验收；已有5项回归覆盖修复准备边界。
 - matched刷新接prepareWorldStep：固定验证版本上完整重放/物化，映射节点、heads与已保存产物依赖，保存新候选及checkpoint，不调用模型。
 - WORLD_REUSE_PREPARED/FAILED保存引用和映射；原产物重验、重放首差/异常失败且不兜底重算，资源仍保留；strict commit已通过内部桥接接入。
 - 复用验证后才暴露正文，各回调独立副本；previous仅投影候选元数据防止夹带失效正文；持久记录可复用/失效产物ID。
@@ -56,5 +55,6 @@
 - 绑定仅关联内核候选checkpoint，未接外部宿主存储；落盘异常可查原发布身份后重试，失败绑定暂无重规划。
 - 本轮M2：共享资源规划器纳入WORLD_STEP_STARTED/WORLD_REPAIR_STARTED，含中断的reserved分配；run/plan过滤保持边界。
 - 待发布及current checkpoint/committing保留；无引用失败fork复用原清理、失败记录和重试，保留baseline；固定截止点重开一致。
-- 尚无统一close调度、逐资源WorldCloseResult或explain.resources；规划不是锁，也不回收未登记的物理分配。
-- 验证：resources与causal-checkpoints共89项及typecheck通过；本轮未跑全量（留到末尾时不足5分钟），下一轮最后留足时间补跑。
+- 本轮M2：explain.resources复用共享规划/清理历史；区分保留、回收、失败，带固定恢复身份，重开解释一致。
+- 尚无统一close调度或逐资源WorldCloseResult；发布成功不冒充回收成功，规划不是锁，未登记分配待核对。
+- 验证：resources/commit共26项及typecheck通过；本轮未跑全量（剩余不足5分钟），下一轮需补跑并先补齐cc工具链。

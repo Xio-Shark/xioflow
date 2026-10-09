@@ -304,5 +304,17 @@ explainWorldPublication.bindings 独立报告 pending/bound/failed；TX_COMMITTE
 失败fork可通过现有 `cleanupAgentCausalFork` 回收，失败与重试沿用原持久记录；
 历史基线不删除，固定截止点的规划可在重开后复查。
 
-这只是统一close的资源发现基础，尚未提供关闭调度、WorldCloseResult或
-explain.resources；规划截止点不是文件锁，未登记物理分配仍需恢复核对。
+这只是统一close的资源发现基础，尚未提供关闭调度或WorldCloseResult；
+规划截止点不是文件锁，未登记物理分配仍需恢复核对。
+
+
+### World资源历史解释
+
+内部 `explainWorldPublication(...).resources` 复用共享规划器及清理历史，按同一截止点
+返回候选事务的fork、事务/世界基线与journal；独立 `explainWorldResources` 也支持
+准备失败和中断分配。资源带持久发布身份，尚未绑定key时带准备或分配引用。
+`TX_ABORTED` 在成功移除fork后记录，可报告 `reclaimed`；清理失败报告
+`cleanup_failed`，未决清理、当前checkpoint、待发布及committing保留。
+仅有 `TX_COMMITTED` 不能证明其后尽力清理完成，无回收记录时仍报告保留证据。
+这是journal事实视图，不检查今天的文件是否存在、不执行清理，也不修改预算；
+固定截止点在重开后保持一致。基线及journal始终保留，close调度仍待接入。

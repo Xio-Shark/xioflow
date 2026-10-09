@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { openWorldState } from '../../src/world/state.js';
+import { explainWorldResources } from '../../src/world/resources.js';
 import { executeWorldStep } from '../../src/world/step.js';
 import { ProcessSupervisor } from '../../src/supervisor/supervisor.js';
 import { cleanupAgentCausalFork, listAgentCausalForkCleanups, planAgentCausalResourceCleanup } from '../../src/agents/workspace-resources.js';
@@ -74,9 +75,24 @@ it.each(['STEP', 'REPAIR'])('tracks interrupted %s allocation and reclaims a fai
   const fail = vi.spyOn(supervisor, 'abortWorkspaceTransaction').mockRejectedValueOnce(new Error('cleanup unavailable'));
   await expect(cleanupAgentCausalFork(supervisor, { txId: id, atSeq: plan().atSeq })).rejects.toThrow('cleanup unavailable');
   expect(listAgentCausalForkCleanups(world.domain)[0]).toMatchObject({ status: 'failed', error: 'cleanup unavailable' });
+  const ref = { worldId: world.state.worldId, id, atSeq: plan().atSeq };
+  const failed = explainWorldResources(world, ref);
+  expect(failed[0]).toMatchObject({ id, kind: 'fork', status: 'cleanup_failed', reason: 'cleanup unavailable' });
+  expect(failed.slice(1)).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: world.state.snapshotId, kind: 'snapshot', status: 'retained' }),
+    expect.objectContaining({ kind: 'journal', status: 'retained' }),
+  ]));
   fail.mockRestore();
   await cleanupAgentCausalFork(supervisor, { txId: id, atSeq: plan().atSeq });
   expect(plan().resources[0].state).toBe('aborted');
+  expect(explainWorldResources(world, { ...ref, atSeq: plan().atSeq })[0]).toMatchObject({ status: 'reclaimed' });
+  expect(explainWorldResources(world, ref)).toEqual(failed);
+  const events = world.domain.getStore().getJournalEvents('world');
+  const root = world.state.root;
+  world.close();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(explainWorldResources(world, ref)).toEqual(failed);
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
   await expect(fs.stat(tx.forkRoot)).rejects.toMatchObject({ code: 'ENOENT' });
   expect(world.domain.getStore().getSnapshot(world.state.snapshotId)).toBeDefined();
   expect(await fs.readFile(path.join(world.state.root, 'input'), 'utf8')).toBe('original');
@@ -92,4 +108,15 @@ it('never releases an unresolved publication even after a preparation failure', 
   expect(plan().resources[0]).toMatchObject({ state: 'committing', reasons: ['commit_in_progress'],
     fork: { disposition: 'retain' } });
   await expect(cleanupAgentCausalFork(supervisor, { txId: 'pending', atSeq: plan().atSeq })).rejects.toThrow('retained');
+});
+
+it('reports allocation uncertainty and rejects references outside the frozen world history', () => {
+  const atSeq = record('WORLD_REPAIR_STARTED', 'reserved');
+  const ref = { worldId: world.state.worldId, id: 'reserved', atSeq };
+  expect(explainWorldResources(world, ref)[0]).toMatchObject({ status: 'retained', reason: 'pending_publication' });
+  expect(() => explainWorldResources(world, { ...ref, worldId: 'other' })).toThrow('reference mismatch');
+  expect(() => explainWorldResources(world, { ...ref, id: 'other' })).toThrow('reference mismatch');
+  expect(() => explainWorldResources(world, { ...ref, atSeq: atSeq + 100 })).toThrow('cutoff');
+  world.close();
+  expect(() => explainWorldResources(world, ref)).toThrow('closed');
 });

@@ -231,6 +231,8 @@ it.each([false, true])('explains publication and refresh evidence read-only acro
   const candidate = refresh.result.candidate;
   const before = explainWorldPublication(world, refresh.ref);
   expect(before.publication).toBeNull();
+  expect(before.resources[0]).toMatchObject({ id: candidate.txId, status: 'retained',
+    reason: expect.stringContaining('pending_publication') });
   expect(explainWorldPublication(world, before.ref)).toEqual(before);
   const validation = explainWorldPublication(world, refresh.validation!);
   expect(explainWorldPublication(world, validation.ref)).toEqual(validation);
@@ -243,6 +245,8 @@ it.each([false, true])('explains publication and refresh evidence read-only acro
   expect(pending.publication).toMatchObject({ status: 'undetermined' });
   const saved = explainWorldPublication(world, { identity: result.identity, atSeq: result.receipt.commitSeq });
   expect(saved.publication).toEqual(result);
+  expect(saved.resources[0]).toMatchObject({ id: candidate.txId, status: 'retained', recovery: result.identity });
+  expect(saved.resources.some(resource => resource.status === 'reclaimed')).toBe(false);
   expect(saved.bindings).toMatchObject([{ status: 'pending', commitSeq: result.receipt.commitSeq }]);
   expect(saved.preparation.refresh).toEqual(refresh);
   expect(saved.preparation.reuse?.mode).toBe(changed ? 'incremental' : 'matched');
