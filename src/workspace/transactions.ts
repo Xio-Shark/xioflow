@@ -297,7 +297,7 @@ export class WorkspaceTransactions {
       plan = { effects, sourceRoot: tx.forkRoot, validation: effects.readSet === null ? 'write_only' : 'files' };
       if (conflicts.length > 0 || alwaysReplay) {
         const byObservation = options?.observations
-          ? await this.validateByObservations(tx, effects, conflicts, options.observations)
+          ? await this.validateByObservations(tx, effects, conflicts, options.observations, options.publication !== undefined)
           : undefined;
         if (!byObservation?.plan) return this.conflicted(tx, conflicts, effects, byObservation?.outcome);
         plan = byObservation.plan;
@@ -399,7 +399,8 @@ export class WorkspaceTransactions {
     tx: OpenTransaction,
     effects: TransactionEffects,
     conflicts: TransactionConflict[],
-    observations: ObservationValidation
+    observations: ObservationValidation,
+    strictPublication = false
   ): Promise<{ plan?: CommitPlan; outcome?: ObservationOutcome }> {
     // 两边都写过的路径不靠观测放行：内核分不清带范围的编辑与整文件覆盖，后者会抹掉对方的改动
     const myWrites = new Set(effects.writeSet.map((w) => w.path));
@@ -426,6 +427,16 @@ export class WorkspaceTransactions {
 
     const replayed = await replayObservationLog(observations, replayRoot);
     if (replayed.status === 'diverged') {
+      // A failed tool provides no evidence of a conflict. Keep strict candidates
+      // open so the original publication identity can retry all validation gates.
+      if (strictPublication && replayed.error !== undefined) {
+        this.record(tx.runId, 'TX_REPLAY_FAILED', {
+          txId: tx.txId, snapshotId: snapshot.id, divergedAt: replayed.divergedAt,
+          matchedSteps: replayed.matchedSteps, error: replayed.error,
+        });
+        await this.discardReplayFork(tx);
+        this.rejectPublication(tx, 'validation_failed');
+      }
       await this.host.dematerialize(replayPath);
       await this.host.pruneSnapshot(snapshot.id, tx.runId);
       return { outcome: { attempted: true, divergedAt: replayed.divergedAt, reason: replayed.reason } };

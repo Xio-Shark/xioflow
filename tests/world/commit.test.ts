@@ -167,3 +167,56 @@ it('reads a missing world result from the durable transaction receipt at its cut
     .toMatchObject({ status: 'undetermined', identity: result.identity });
   expect(readWorldPublication(world, 'lost-response', result.receipt.commitSeq).result).toEqual(result);
 });
+
+it.each(['observe', 'mutate'])('retries %s failures ten times across reopen with the original identity', async kind => {
+  const candidate = await prepare();
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const visited: string[] = [];
+    const failed = await commitWorldCandidate(world, candidate, { ...adapter, replay: async (entry, root) => {
+      visited.push(entry.kind);
+      if (entry.kind === kind) {
+        if (kind === 'mutate') await fs.writeFile(path.join(root, 'output'), 'partial');
+        throw new Error('tool offline');
+      }
+      return adapter.replay(entry, root);
+    } }, { key: 'tool-retry' });
+    expect(failed).toMatchObject({ status: 'validation_failed', reason: 'tool offline' });
+    expect(visited).toEqual(kind === 'observe' ? ['observe'] : ['observe', 'mutate']);
+    await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
+    const events = world.domain.getStore().getJournalEvents('world');
+    expect(events.filter(e => e.type === 'TX_CONFLICTED' && e.payload.txId === candidate.txId)).toEqual([]);
+    expect(events.filter(e => e.type === 'TX_REPLAY_FAILED').at(-1)?.payload)
+      .toMatchObject({ txId: candidate.txId, divergedAt: kind === 'observe' ? 0 : 1, error: 'tool offline' });
+    const replayPath = events.filter(e => e.type === 'TX_REPLAY_STARTED').at(-1)!.payload.replayPath as string;
+    await expect(fs.stat(replayPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    const saved = readWorldPublication(world, 'tool-retry');
+    const root = world.state.root;
+    world.close();
+    world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+    expect(readWorldPublication(world, 'tool-retry', saved.atSeq)).toEqual(saved);
+  }
+  const failed = readWorldPublication(world, 'tool-retry').result!;
+  const visited: string[] = [];
+  const result = await commitWorldCandidate(world, candidate, { ...adapter, replay: async (entry, root) => {
+    visited.push(entry.kind);
+    return adapter.replay(entry, root);
+  } }, { key: 'tool-retry' });
+  expect(result).toMatchObject({ status: 'committed', identity: failed.identity });
+  expect(visited).toEqual(['observe', 'mutate']);
+  expect(await fs.readFile(path.join(world.state.root, 'output'), 'utf8')).toBe('original');
+  expect(calls).toBe(1);
+}, 60_000);
+
+it('revalidates world changes after a retryable tool failure', async () => {
+  const candidate = await prepare();
+  const failed = await commitWorldCandidate(world, candidate, { ...adapter,
+    replay: async () => { throw new Error('tool offline'); } });
+  expect(failed.status).toBe('validation_failed');
+  await fs.writeFile(path.join(world.state.root, 'input'), 'changed');
+  const result = await commitWorldCandidate(world, candidate, adapter);
+  expect(result).toMatchObject({ status: 'conflict', identity: failed.identity });
+  await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
+  const events = world.domain.getStore().getJournalEvents('world');
+  expect(await commitWorldCandidate(world, candidate, adapter)).toEqual(result);
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+});

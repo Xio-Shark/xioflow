@@ -87,7 +87,7 @@ async function publishWorldCandidate(world: WorldState, ref: WorldRef,
     if (pending) return finish({ status: 'undetermined', reason: error instanceof Error ? error.message : String(error) });
     if (error instanceof WorkspacePublicationError) return finish({
       status: error.reason === 'output_changed' || error.reason === 'acceptance_rejected' ? 'rejected' : 'validation_failed',
-      reason: error.reason,
+      reason: replayError ?? error.reason,
     });
     return finish({ status: 'validation_failed', reason: error instanceof Error ? error.message : String(error) });
   }

@@ -719,3 +719,9 @@
 - readWorldPublication只读固定截止点，TX_COMMITTED补足world结果丢失；绑定前null、未决保留身份。
 - 新增并发幂等、重开历史查询、终态拒绝、非法引用、验收异常重试和回执恢复回归。
 - 验证：commit 13项、pnpm typecheck通过；未跑全量，下一轮补。M2尚未完成，工具异常重试/绑定/close仍缺。
+
+### 2026-10-09 — M2 retryable strict publication tool failures
+- strict publication区分工具异常与确定性分歧，保存TX_REPLAY_FAILED的步骤/错误，清理重放资源并保留open候选。
+- world层保留具体工具错误，原key/事务跨重开可完整重验；旧非publication入口兼容原语义。
+- 观测与部分写入异常各10次跨重开，验证主目录不变、临时fork删除、历史身份不变及恢复后成功；另验重试前输入变化仍冲突。
+- 相关43项及pnpm typecheck通过；全量待本轮最后补跑。M2仍缺绑定、统一句柄/close和完整验收。

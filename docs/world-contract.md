@@ -267,4 +267,7 @@ WORLD_PUBLICATION_KEY_RESULT 持久保存带 worldId/candidateId/txId/key 的结
 `readWorldPublication(world, key, atSeq?)` 固定截止点只读查询；绑定前为 null，绑定后缺结果为 undetermined，
 若截止点内已有 TX_COMMITTED 则直接恢复 committed（即使 world 结果未写入）。查询不依赖候选文件。
 这是内部桥接，不是冻结的 WorldHandle.commit 实现：仍缺 checkpoint 绑定状态及 close 资源报告；
-工具异常可令底层事务终止为 conflicted，重算须准备新候选。不能据此宣称 M2 或崩溃恢复已完成。
+strict publication 的工具异常保存 TX_REPLAY_FAILED（失败索引、已匹配步数与错误），清理临时重放 fork/快照，
+底层事务保持 open；原候选原 key 在关闭重开后可重试，重新完整重放并核验所有门禁。
+异常发生在写入一部分之后也不发布临时内容；重试前世界变化仍须判冲突。旧的非 publication 入口保持既有冲突语义。
+不能据此宣称 M2 或崩溃恢复已完成。
