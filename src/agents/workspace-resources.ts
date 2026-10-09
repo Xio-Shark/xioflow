@@ -124,6 +124,53 @@ export function planAgentCausalResourceCleanup(
   }) };
 }
 
+export interface AgentCausalForkCleanup {
+  requestSeq: number;
+  txId: string;
+  runId?: string;
+  atSeq: number;
+  forkRoot: string;
+  baseSnapshotId: string;
+  preserveBaseline: true;
+  /** Journal evidence only; pending does not imply that files still exist. */
+  status: 'pending' | 'aborted' | 'failed';
+  outcomeSeq?: number;
+  error?: string;
+}
+
+/** Reconstruct cleanup outcomes without accessing the filesystem or retrying deletion. */
+export function listAgentCausalForkCleanups(
+  domain: ExecutionDomain, options: { atSeq?: number; runId?: string; txId?: string } = {},
+): AgentCausalForkCleanup[] {
+  const atSeq = options.atSeq ?? Number.MAX_SAFE_INTEGER;
+  if (!Number.isSafeInteger(atSeq) || atSeq < 0) throw new Error('Invalid cleanup history sequence');
+  const events = domain.getStore().getJournalEvents(domain.domainId).filter(event => event.seq <= atSeq);
+  const runIds = new Map<string, string | undefined>();
+  const requests = new Map<number, AgentCausalForkCleanup>();
+  for (const event of events) {
+    const txId = event.payload.txId as string;
+    if (event.type === 'TX_BEGUN') runIds.set(txId, event.runId);
+    if (event.type === 'AGENT_CAUSAL_FORK_CLEANUP_REQUESTED') {
+      requests.set(event.seq, { requestSeq: event.seq, txId, runId: runIds.get(txId),
+        atSeq: event.payload.atSeq as number, forkRoot: event.payload.forkRoot as string,
+        baseSnapshotId: event.payload.baseSnapshotId as string, preserveBaseline: true, status: 'pending' });
+    } else if (event.type === 'AGENT_CAUSAL_FORK_CLEANUP_FAILED') {
+      const request = requests.get(event.payload.requestSeq as number);
+      if (request?.txId === txId && request.status === 'pending') {
+        request.status = 'failed'; request.outcomeSeq = event.seq; request.error = event.payload.error as string;
+      }
+    } else if (event.type === 'TX_ABORTED') {
+      const match = /^causal fork cleanup request ([1-9]\d*)$/.exec(String(event.payload.reason));
+      const request = match ? requests.get(Number(match[1])) : undefined;
+      if (request?.txId === txId && request.status === 'pending') {
+        request.status = 'aborted'; request.outcomeSeq = event.seq;
+      }
+    }
+  }
+  return [...requests.values()].filter(request => (options.runId === undefined || request.runId === options.runId)
+    && (options.txId === undefined || request.txId === options.txId));
+}
+
 /** Explicit host reconciliation: call while workspace writers and agent publication are quiescent.
  * The cutoff is an optimistic preflight, not a lock over asynchronous filesystem operations.
  * Only registered open/conflicted forks are released; historical baseline snapshots survive.
@@ -145,6 +192,17 @@ export async function cleanupAgentCausalFork(
     type: 'AGENT_CAUSAL_FORK_CLEANUP_REQUESTED', timestamp: new Date().toISOString(),
     payload: { txId: resource.txId, atSeq: plan.atSeq, forkRoot: resource.forkRoot,
       baseSnapshotId: resource.baseSnapshotId, preserveBaseline: true } });
-  await supervisor.abortWorkspaceTransaction(resource.txId, `causal fork cleanup request ${requestSeq}`);
+  try {
+    await supervisor.abortWorkspaceTransaction(resource.txId, `causal fork cleanup request ${requestSeq}`);
+  } catch (error) {
+    try {
+      domain.getStore().recordJournalEvent({ domainId: domain.domainId,
+        type: 'AGENT_CAUSAL_FORK_CLEANUP_FAILED', timestamp: new Date().toISOString(),
+        payload: { txId: resource.txId, requestSeq, error: error instanceof Error ? error.message : String(error) } });
+    } catch (journalError) {
+      throw new AggregateError([error, journalError], 'Causal fork cleanup failed and its outcome could not be recorded');
+    }
+    throw error;
+  }
   return { txId: resource.txId, requestSeq };
 }

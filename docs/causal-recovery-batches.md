@@ -334,10 +334,35 @@ if (candidate?.fork?.disposition === 'review' &&
 入口重新查询整个 domain；任何新增 journal 事件使旧截止点失效。共享修复、pending 发布、
 当前 checkpoint 与 committing 事务拒绝回收，仅允许已登记的 open/conflicted 事务。
 先记录 `AGENT_CAUSAL_FORK_CLEANUP_REQUESTED`（含截止点、fork、基线），再走既有 abort；
-返回 requestSeq，成功由 TX_ABORTED 的 reason 关联。意图落盘失败不删除，abort 失败原样抛出；
+返回 requestSeq，成功由 TX_ABORTED 的 reason 关联。意图落盘失败不删除，abort 失败记录结果后抛出（详见下节）；
 意图不代表成功，中断后应检查事务和磁盘再重新规划。每次回收后重取计划。
 不删除基线快照，旧 checkpoint 仍可通过完整确定性观测重放恢复，包含 domain 重开后。
 不支持已 committed/aborted 事务残留目录清理。
+
+### 回收结果与中断核对
+
+`listAgentCausalForkCleanups(domain, { runId?, txId?, atSeq? })` 从 journal 重建每次请求，
+返回冻结的 fork/基线信息、`requestSeq` 和 `pending` / `aborted` / `failed` 状态。
+只有同事务且 reason 精确关联请求的 `TX_ABORTED` 才标为 aborted；其他 abort 不冒充本次结果。
+失败记录关联请求并保留错误文本。pending 表示没有持久终态，不能推断操作仍在运行或没有删除文件。
+查询不访问磁盘、不启动 runtime、不改变事务；重开和历史切片得到相同证据。
+
+```ts
+import { listAgentCausalForkCleanups } from '@xioflow/kernel';
+
+const requests = listAgentCausalForkCleanups(domain, { runId });
+for (const request of requests) {
+  if (request.status !== 'aborted') {
+    // 核对 request.forkRoot 的实际文件和事务状态，再取新的回收计划。
+    console.log(request.requestSeq, request.txId, request.status);
+  }
+}
+```
+
+aborted 只确认 abort 路径完成并已落盘，不保证之后目录没有被重建。
+abort 失败后记录 `AGENT_CAUSAL_FORK_CLEANUP_FAILED` 并抛出原错误；失败记录也无法落盘时，
+抛出包含两个错误的 `AggregateError`，请求保持未决。磁盘删除与 journal 不是原子事务，
+结果未决或失败均需宿主核对；本查询不会自动重试删除。
 
 ### 显式重试失败绑定
 

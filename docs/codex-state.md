@@ -56,4 +56,5 @@
 - planAgentCausalResourceCleanup 新增 fork 独立 retain/review；历史 checkpoint 与跨事务基线引用不再单独阻止 fork 回收，顶层保留语义不变。
 - cleanupAgentCausalFork：整个 domain 最新截止点核对→持久请求→既有 abort；只处理已登记 open/conflicted，保留所有基线。共享/pending/当前/committing拒绝，关闭事务不重复回收。
 - 截止点是前置核对，不锁异步文件操作；宿主须停止相关写入/发布并核对外部使用。请求不代表成功，TX_ABORTED reason关联requestSeq；中断需核对磁盘后重新规划。
-- 下一步：为fork回收请求补充持久结果查询与中断核对，或扩展共享输出完成后的生命周期；不删除时间旅行基线。
+- listAgentCausalForkCleanups：runId/txId/atSeq/重开查询pending/aborted/failed；精确关联TX_ABORTED reason，失败持久记录；双重故障抛AggregateError，未决不推断磁盘。
+- 下一步：扩展共享输出完成后的生命周期与可审查回收，或将恢复/重试/回收故障场景纳入可复现基准；不删除时间旅行基线。

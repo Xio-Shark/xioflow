@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCheckpointWorkspaceReferences, planAgentCausalResourceCleanup, cleanupAgentCausalFork, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, retryAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
+import { AgentRuntime, ExecutionDomain, ProcessSupervisor, WorkspaceCausalGraph, prepareWorkspaceRepair, forkAgentCheckpoint, compareAgentCheckpoints, compareAgentCheckpointFiles, recoverAgentCausalBatch, recoverAgentSharedCausalBatch, refreshAgentSharedCausalBatch, listAgentCausalRefreshPlans, listAgentCausalBindingAttempts, listAgentCheckpointWorkspaceReferences, planAgentCausalResourceCleanup, cleanupAgentCausalFork, listAgentCausalForkCleanups, listAgentCausalRefreshExecutions, resumeAgentSharedCausalRefresh, retryAgentSharedCausalRefresh, prepareWorkspaceBranchRepair } from '../../src/index.js';
 import type { AgentRuntimeOptions, AgentWorkspace, AgentSharedCausalRecoveryOptions } from '../../src/index.js';
 
 describe('agent checkpoint causal branches', () => {
@@ -40,6 +40,38 @@ describe('agent checkpoint causal branches', () => {
     runtime?.close();
     domain.close();
     fs.rmSync(temp, { recursive: true, force: true });
+  });
+
+  it('reconstructs cleanup outcomes with exact lineage, cutoffs and domain reopen', () => {
+    const record = (type: string, payload: Record<string, unknown>) => domain.getStore().recordJournalEvent({
+      domainId: domain.domainId, type, timestamp: new Date().toISOString(), payload,
+    });
+    const request = () => record('AGENT_CAUSAL_FORK_CLEANUP_REQUESTED', {
+      txId: 'tx', atSeq: 0, forkRoot: workspace.forkRoot, baseSnapshotId: 'baseline', preserveBaseline: true,
+    });
+    const first = request();
+    record('TX_ABORTED', { txId: 'other', reason: `causal fork cleanup request ${first}` });
+    record('TX_ABORTED', { txId: 'tx', reason: 'aborted by host' });
+    expect(listAgentCausalForkCleanups(domain)[0].status).toBe('pending');
+    const aborted = record('TX_ABORTED', { txId: 'tx', reason: `causal fork cleanup request ${first}` });
+    const second = request();
+    const failed = record('AGENT_CAUSAL_FORK_CLEANUP_FAILED', { txId: 'tx', requestSeq: second, error: 'disk unavailable' });
+    const third = request();
+    const before = domain.getStore().getJournalEvents(domain.domainId);
+    const history = listAgentCausalForkCleanups(domain, { runId: 'run', txId: 'tx' });
+    expect(history).toMatchObject([
+      { requestSeq: first, status: 'aborted', outcomeSeq: aborted },
+      { requestSeq: second, status: 'failed', outcomeSeq: failed, error: 'disk unavailable' },
+      { requestSeq: third, status: 'pending' },
+    ]);
+    expect(listAgentCausalForkCleanups(domain, { atSeq: first })).toMatchObject([{ status: 'pending' }]);
+    expect(listAgentCausalForkCleanups(domain, { runId: 'other' })).toEqual([]);
+    expect(listAgentCausalForkCleanups(domain, { txId: 'other' })).toEqual([]);
+    expect(() => listAgentCausalForkCleanups(domain, { atSeq: -1 })).toThrow('sequence');
+    expect(domain.getStore().getJournalEvents(domain.domainId)).toEqual(before);
+    domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    expect(listAgentCausalForkCleanups(domain)).toEqual(history);
   });
 
   it('queries historical workspace references across restore and reopen', async () => {
@@ -327,9 +359,28 @@ describe('agent checkpoint causal branches', () => {
       })).rejects.toThrow('cleanup journal unavailable');
       expect(fs.existsSync(path.join(temp, 'second-bound'))).toBe(true);
       vi.restoreAllMocks();
-      const cleaned = await cleanupAgentCausalFork(new ProcessSupervisor(domain), {
+      const failingSupervisor = new ProcessSupervisor(domain);
+      vi.spyOn(failingSupervisor, 'abortWorkspaceTransaction').mockRejectedValue(new Error('disk unavailable'));
+      await expect(cleanupAgentCausalFork(failingSupervisor, {
         txId: 'second-bound', atSeq: cleanupPlan.atSeq,
+      })).rejects.toThrow('disk unavailable');
+      expect(listAgentCausalForkCleanups(domain, { txId: 'second-bound' }))
+        .toMatchObject([{ status: 'failed', error: 'disk unavailable' }]);
+      expect(fs.existsSync(path.join(temp, 'second-bound'))).toBe(true);
+      vi.spyOn(domain.getStore(), 'recordJournalEvent').mockImplementation(event => {
+        if (event.type === 'AGENT_CAUSAL_FORK_CLEANUP_FAILED') throw new Error('outcome journal unavailable');
+        return recordCleanup(event);
       });
+      await expect(cleanupAgentCausalFork(failingSupervisor, {
+        txId: 'second-bound', atSeq: planAgentCausalResourceCleanup(domain).atSeq,
+      })).rejects.toBeInstanceOf(AggregateError);
+      expect(listAgentCausalForkCleanups(domain, { txId: 'second-bound' }).at(-1)?.status).toBe('pending');
+      vi.restoreAllMocks();
+      const cleaned = await cleanupAgentCausalFork(new ProcessSupervisor(domain), {
+        txId: 'second-bound', atSeq: planAgentCausalResourceCleanup(domain).atSeq,
+      });
+      expect(listAgentCausalForkCleanups(domain, { txId: 'second-bound' }).at(-1))
+        .toMatchObject({ requestSeq: cleaned.requestSeq, status: 'aborted' });
       expect(fs.existsSync(path.join(temp, 'second-bound'))).toBe(false);
       expect(domain.getStore().getJournalEvents(domain.domainId).find(event => event.seq === cleaned.requestSeq))
         .toMatchObject({ type: 'AGENT_CAUSAL_FORK_CLEANUP_REQUESTED', payload: { preserveBaseline: true } });

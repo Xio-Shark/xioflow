@@ -456,3 +456,11 @@
 - 初始基线657通过/7跳过，2套件缺cc；已补gcc/libc6-dev。typecheck通过；全量745通过/7跳过，1处新增测试断言失败。
 - 失败因runtime关闭追加journal导致默认截止点前进；改用冻结atSeq后pnpm test定向67通过，时间预算内未再次重跑全量。
 - 下一步：区分可释放fork和需保留历史基线，接通显式资源回收与冻结证据核对。
+
+## 2026-10-09 — 因果 fork 回收的持久结果
+- 新增 listAgentCausalForkCleanups，按请求关联 pending/aborted/failed，支持 Run/事务/atSeq 和 domain 重开。
+- 精确核对 TX_ABORTED 的事务与请求 reason；无终态不推断文件存在或操作仍运行，历史请求不会借用后续重试结果。
+- abort 失败持久记录 AGENT_CAUSAL_FORK_CLEANUP_FAILED；结果落盘也失败时 AggregateError 保留两个错误。
+- 覆盖异事务/无关终止、历史切片、只读查询、重开、失败后重新规划及双重故障；补充 API 示例与交接。
+- 下一步：扩展共享输出生命周期，或将恢复/重试/回收故障场景纳入可复现基准；继续保留时间旅行基线。
+- 验证：基线746通过/7跳过；pnpm typecheck通过，pnpm test全量747通过/7跳过（51套件通过），git diff --check通过。
