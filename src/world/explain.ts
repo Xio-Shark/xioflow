@@ -1,9 +1,56 @@
-import type { WorldCandidate, WorldExplanation, WorldRef } from './contract.js';
+import type { CommitIdentity, WorldCandidate, WorldExplanation, WorldRef } from './contract.js';
+import { readWorldPublication, type KeyedWorldPublication } from './commit.js';
 import type { openWorldState } from './state.js';
 import { readWorldCandidateValidation, type WorldCandidateValidation } from './validation.js';
 import { readWorldRefresh, type WorldRefreshReport } from './refresh.js';
 
 type WorldState = Awaited<ReturnType<typeof openWorldState>>;
+
+/** Internal evidence view; checkpoint binding and resource disposition remain separate work. */
+export interface WorldPublicationExplanation {
+  ref: WorldRef;
+  preparation: WorldPreparationExplanation;
+  publication: KeyedWorldPublication | null;
+}
+
+/** Resolve publication and its preparation from one immutable journal prefix. */
+export function explainWorldPublication(world: WorldState,
+  target: WorldRef | { identity: CommitIdentity; atSeq?: number }): WorldPublicationExplanation {
+  if (world.domain.isClosed()) throw new Error('World is closed');
+  const events = world.domain.getStore().getJournalEvents(world.domain.domainId);
+  const cutoff = target.atSeq ?? events.at(-1)?.seq ?? 0;
+  if (!Number.isSafeInteger(cutoff) || cutoff < 0
+      || (cutoff !== 0 && !events.some(e => e.seq === cutoff))) throw new Error('Explanation history cutoff missing');
+  const history = events.filter(e => e.seq <= cutoff);
+  let preparationRef: WorldRef;
+  let publication: KeyedWorldPublication | null;
+  if ('identity' in target) {
+    const identity = target.identity;
+    const binding = history.find(e => e.type === 'WORLD_PUBLICATION_KEY_BOUND'
+      && e.payload.worldId === world.state.worldId && e.payload.key === identity.key);
+    const saved = binding?.payload.identity as CommitIdentity | undefined;
+    if (!saved || saved.worldId !== identity.worldId || saved.candidateId !== identity.candidateId
+        || saved.txId !== identity.txId || saved.key !== identity.key) {
+      throw new Error('Explanation publication identity mismatch');
+    }
+    preparationRef = binding!.payload.previous as unknown as WorldRef;
+    publication = readWorldPublication(world, identity.key, cutoff).result;
+    // A refreshed candidate must retain the validation paths and actual reuse evidence.
+    const refresh = history.find(e => e.type === 'WORLD_REFRESH_COMPLETED'
+      && e.payload.worldId === identity.worldId
+      && (e.payload.result as { candidate?: WorldRef } | undefined)?.candidate?.id === identity.candidateId);
+    if (refresh) preparationRef = { worldId: identity.worldId, id: refresh.payload.id as string, atSeq: refresh.seq };
+  } else {
+    preparationRef = target;
+    const candidate = explainWorldPreparation(world, preparationRef).candidate;
+    const binding = history.find(e => e.type === 'WORLD_PUBLICATION_KEY_BOUND'
+      && e.payload.worldId === candidate.worldId && e.payload.candidateId === candidate.id);
+    publication = binding ? readWorldPublication(world, binding.payload.key as string, cutoff).result : null;
+  }
+  const preparation = explainWorldPreparation(world, preparationRef);
+  return structuredClone({ ref: { worldId: world.state.worldId, id: preparation.candidate.id, atSeq: cutoff },
+    preparation, publication });
+}
 
 /** Preparation evidence only; publication, binding and cleanup are not yet integrated. */
 export interface WorldPreparationExplanation extends Pick<WorldExplanation, 'ref' | 'coverage' | 'plan'> {

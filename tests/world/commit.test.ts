@@ -5,6 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { commitWorldCandidate, readWorldPublication } from '../../src/world/commit.js';
+import { explainWorldPublication } from '../../src/world/explain.js';
 import { openWorldState } from '../../src/world/state.js';
 import { prepareWorldStep } from '../../src/world/prepare.js';
 import { refreshWorldCandidate } from '../../src/world/refresh.js';
@@ -219,4 +220,49 @@ it('revalidates world changes after a retryable tool failure', async () => {
   const events = world.domain.getStore().getJournalEvents('world');
   expect(await commitWorldCandidate(world, candidate, adapter)).toEqual(result);
   expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+});
+
+
+it.each([false, true])('explains publication and refresh evidence read-only across reopen changed=%s', async changed => {
+  const previous = await prepare();
+  if (changed) await fs.writeFile(path.join(world.state.root, 'input'), '120');
+  const refresh = await refreshWorldCandidate(world, previous, adapter, agent, { onUnknown: 'reject' });
+  if (refresh.result.status !== 'prepared') throw new Error(refresh.result.status);
+  const candidate = refresh.result.candidate;
+  const before = explainWorldPublication(world, refresh.ref);
+  expect(before.publication).toBeNull();
+  const result = await commitWorldCandidate(world, candidate, adapter, { key: 'explain' });
+  if (result.status !== 'committed') throw new Error(result.status);
+  const store = world.domain.getStore();
+  const events = store.getJournalEvents('world');
+  const binding = events.find(e => e.type === 'WORLD_PUBLICATION_KEY_BOUND')!;
+  const pending = explainWorldPublication(world, { identity: result.identity, atSeq: binding.seq });
+  expect(pending.publication).toMatchObject({ status: 'undetermined' });
+  const saved = explainWorldPublication(world, { identity: result.identity, atSeq: result.receipt.commitSeq });
+  expect(saved.publication).toEqual(result);
+  expect(saved.preparation.refresh).toEqual(refresh);
+  expect(saved.preparation.reuse?.mode).toBe(changed ? 'incremental' : 'matched');
+  expect(saved.preparation.plan).toEqual(before.preparation.plan);
+  const run = store.getRun(candidate.id);
+  const root = world.state.root;
+  await fs.writeFile(path.join(root, 'input'), 'later');
+  const latest = explainWorldPublication(world, { identity: result.identity });
+  expect(latest.ref.atSeq).toBe(events.at(-1)!.seq);
+  for (const field of ['worldId', 'candidateId', 'txId', 'key'] as const) {
+    expect(() => explainWorldPublication(world, { identity: { ...result.identity, [field]: 'forged' } }))
+      .toThrow('identity mismatch');
+  }
+  expect(() => explainWorldPublication(world, { identity: result.identity, atSeq: -1 })).toThrow('cutoff');
+  expect(() => explainWorldPublication(world, { identity: result.identity, atSeq: candidate.atSeq })).toThrow('identity mismatch');
+  expect(store.getJournalEvents('world')).toEqual(events);
+  expect(store.getRun(candidate.id)).toEqual(run);
+  expect(await fs.readFile(path.join(root, 'input'), 'utf8')).toBe('later');
+  expect(await fs.readFile(path.join(root, 'output'), 'utf8')).toBe(changed ? '120' : 'original');
+  world.close();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(explainWorldPublication(world, refresh.ref)).toEqual(before);
+  expect(explainWorldPublication(world, { identity: result.identity, atSeq: pending.ref.atSeq })).toEqual(pending);
+  expect(explainWorldPublication(world, { identity: result.identity, atSeq: saved.ref.atSeq })).toEqual(saved);
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+  expect(world.domain.getStore().getRun(candidate.id)).toEqual(run);
 });

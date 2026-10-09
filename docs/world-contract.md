@@ -271,3 +271,14 @@ strict publication 的工具异常保存 TX_REPLAY_FAILED（失败索引、已�
 底层事务保持 open；原候选原 key 在关闭重开后可重试，重新完整重放并核验所有门禁。
 异常发生在写入一部分之后也不发布临时内容；重试前世界变化仍须判冲突。旧的非 publication 入口保持既有冲突语义。
 不能据此宣称 M2 或崩溃恢复已完成。
+
+
+### 内部 publication explanation（M2 部分实现）
+`explainWorldPublication` 组合现有 preparation 和 publication 只读查询，返回固定截止点、
+准备证据及发布事实。候选/验证/refresh 引用沿用其精确截止点；提交身份查询省略 atSeq
+时只捕获一次当前 journal head。身份的 worldId/candidateId/txId/key 必须全部匹配
+该截止点内的持久 key 绑定；绑定尚未发生的身份查询拒绝，准备引用仍可查询 publication=null。
+绑定后缺结果为 undetermined；TX_COMMITTED 截止点即可报告发布，不依赖后续 world 结果事件。
+刷新候选的提交解释关联其 WORLD_REFRESH_COMPLETED，保留变化路径、实际复用映射和验证基线。
+查询不读取当前工作区、不执行工具、不写 journal 或改变 Run 预算；固定截止点重开结果一致。
+这是内部组合视图，尚未实现 checkpoint 绑定或 close 资源事实，也未新增公开 API。

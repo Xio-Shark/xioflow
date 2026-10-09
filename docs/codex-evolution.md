@@ -725,3 +725,10 @@
 - world层保留具体工具错误，原key/事务跨重开可完整重验；旧非publication入口兼容原语义。
 - 观测与部分写入异常各10次跨重开，验证主目录不变、临时fork删除、历史身份不变及恢复后成功；另验重试前输入变化仍冲突。
 - 相关43项及pnpm typecheck通过；全量待本轮最后补跑。M2仍缺绑定、统一句柄/close和完整验收。
+
+### 2026-10-09 — M2 fixed-prefix publication explanations
+- explainWorldPublication组合准备/刷新证据与发布查询，严格核验持久world/candidate/tx/key身份。
+- 固定截止点区分准备未发布、发布未决和TX_COMMITTED，关联刷新验证路径与实际复用映射。
+- 无变化/局部变化回归验证文件、journal、Run预算不变，历史与身份跨重开稳定，拒绝伪造身份。
+- 验证：commit/refresh相关38项及pnpm typecheck通过；全量待最后补跑。
+- M2仍缺checkpoint绑定、资源事实、统一句柄和完整验收；未新增公开API。
