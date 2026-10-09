@@ -1,6 +1,6 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
-- 下一步最小切片：统一句柄/close生命周期，消费共享规划器与已接入explain的资源事实；等待操作结束后持久回收报告。
+- 下一步最小切片：统一句柄阻止新操作并等待已接收操作结束，持久中止未发布候选后调用closeWorldResources。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约冻结，M3/M4待推进。
 - M2完成标准仍缺：统一句柄、close资源事实；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md冻结六入口状态表、覆盖和六类失败/重试/资源归属；src/world/contract.ts共享非公开契约，types测试随typecheck检查。
@@ -33,7 +33,7 @@
 - 内部入口均未公开；无重算幂等、中断自动续跑或统一资源清理；发布/绑定/资源已接入explain。
 - 候选产物覆盖检查：执行完成及验证前后复用精确路径/Git树核验，拒绝symlink、目录和指纹漏收的忽略文件，failed并保留证据，不发布。
 - 该检查不推断隐性读取或未声明写入，也不是文件系统锁；最终由内部strict commit重验。合法写入/删除、声明不存在路径保持可用。
-- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，每轮先确认cc；当前容器command -v cc无结果，须先补工具链。
+- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，每轮先确认cc；本轮已补齐gcc/libc6-dev，cc可用。
 - 内部prepareWorldRepair消费changed/selected_nodes持久报告，接既有prepareWorkspaceRepair；固定基线拓扑重放复用节点并验全部hash，物化复用写入后才重算闭包。
 - 修复前/复用后/完成后重验原产物及版本，最终覆盖/指纹检查；失败abort并留WORLD_REPAIR_FAILED与验证基线；成功记录事务、复用/替换及指纹。
 - matched刷新接prepareWorldStep：固定验证版本上完整重放/物化，映射节点、heads与已保存产物依赖，保存新候选及checkpoint，不调用模型。
@@ -53,8 +53,8 @@
 - 本轮M2：文件发布后持久关联候选完成checkpoint与commitSeq，核对归属/响应/heads及当前checkpoint；失败独立记录，不改原回执。
 - explain.bindings在固定截止点报告pending/bound/failed；重开原key补齐缺失记录，不重放/重复发布或回退预算；已记录结果幂等。
 - 绑定仅关联内核候选checkpoint，未接外部宿主存储；落盘异常可查原发布身份后重试，失败绑定暂无重规划。
-- 本轮M2：共享资源规划器纳入WORLD_STEP_STARTED/WORLD_REPAIR_STARTED，含中断的reserved分配；run/plan过滤保持边界。
-- 待发布及current checkpoint/committing保留；无引用失败fork复用原清理、失败记录和重试，保留baseline；固定截止点重开一致。
 - 本轮M2：explain.resources复用共享规划/清理历史；区分保留、回收、失败，带固定恢复身份，重开解释一致。
-- 尚无统一close调度或逐资源WorldCloseResult；发布成功不冒充回收成功，规划不是锁，未登记分配待核对。
-- 验证：resources/commit共26项及typecheck通过；本轮未跑全量（剩余不足5分钟），下一轮需补跑并先补齐cc工具链。
+- 本轮M2：内部closeWorldResources复用共享规划/清理，持久WORLD_RESOURCES_CLOSED后释放domain；重复调用返回独立副本，不重复回收。
+- readWorldClose按固定ref重开只读查询；清理失败逐项记录，报告落盘失败不宣称关闭；新会话可重试失败清理。
+- 仍需调用方先排空操作；待发布/current checkpoint/未决资源继续保留，未实现候选abandon或统一句柄调度，未新增公开API。
+- 验证：resources共8项及typecheck通过；本轮未跑全量（不足5分钟），下一轮需补跑；gcc/libc6-dev已安装。
