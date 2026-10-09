@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { readWorldArtifacts } from '../../src/world/artifacts.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -17,7 +19,7 @@ let world: Awaited<ReturnType<typeof openWorldState>>;
 let calls: number;
 let unknown: boolean;
 const adapter = { id: 'test', version: '1', declareCoverage: async () => ({
-  paths: ['input', 'output'], excluded: [], symlinks: 'reject' as const,
+  paths: ['input', 'output', 'unrelated'], excluded: [], symlinks: 'reject' as const,
   externalReads: 'unsupported' as const, externalWrites: 'unsupported' as const,
 }), replay: async (entry: { kind: string }, root: string) => {
   const value = await fs.readFile(path.join(root, 'input'), 'utf8');
@@ -80,7 +82,7 @@ it.each([false, true])('refreshes changed=%s and preserves exact read-only histo
   expect(calls).toBe(changed ? 2 : 1);
   if (report.result.status !== 'prepared') throw new Error(JSON.stringify(report));
   const candidate = report.result.candidate;
-  expect(candidate.id === previous.id).toBe(!changed);
+  expect(candidate.id).not.toBe(previous.id);
   expect(candidate.heads).not.toEqual([]);
   const completed = world.domain.getStore().getJournalEvents('world').find(e =>
     e.type === 'WORLD_STEP_COMPLETED' && e.payload.id === candidate.id)!;
@@ -221,4 +223,65 @@ it('rejects foreign, mismatched and unfinished explanation references without ad
   expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
   world.close();
   expect(() => explainWorldPreparation(world, candidate)).toThrow('World is closed');
+});
+
+it('rebases matched artifacts and dependencies onto the fixed version without model calls', async () => {
+  const body = 'saved model response';
+  const initial = await prepareWorldStep(world, { execute: async (context, input) => {
+    const execution = await agent.execute(context, input);
+    return { ...execution, artifacts: [{ id: 'response', kind: 'model_response', body,
+      hash: createHash('sha256').update(body).digest('hex'), dependsOn: execution.heads }] };
+  } }, { task: 'copy' });
+  if (initial.status !== 'prepared') throw new Error('Preparation failed');
+  const previous = initial.candidate;
+  await fs.writeFile(path.join(world.state.root, 'unrelated'), 'new covered file');
+  const report = await refreshWorldCandidate(world, previous, { ...adapter, replay: async (entry, root) => {
+    // A later world change cannot replace the version captured by this probe.
+    await fs.writeFile(path.join(world.state.root, 'unrelated'), 'later change');
+    return adapter.replay(entry, root);
+  } }, agent, { onUnknown: 'reject' });
+  expect(report.strategy).toBe('reuse');
+  if (report.result.status !== 'prepared') throw new Error(JSON.stringify(report));
+  const candidate = report.result.candidate;
+  expect(candidate.version).toEqual(readWorldCandidateValidation(world, report.validation!).version);
+  expect(candidate.version.fingerprint).not.toBe(previous.version.fingerprint);
+  expect(candidate.id).not.toBe(previous.id);
+  expect(candidate.heads).not.toEqual(previous.heads);
+  expect(readWorldArtifacts(world, candidate)).toEqual([{ id: 'response', kind: 'model_response', body,
+    hash: createHash('sha256').update(body).digest('hex'), dependsOn: candidate.heads }]);
+  const events = world.domain.getStore().getJournalEvents('world');
+  const completed = events.find(e => e.type === 'WORLD_STEP_COMPLETED' && e.payload.id === candidate.id)!;
+  expect(await fs.readFile(path.join(completed.payload.forkRoot as string, 'unrelated'), 'utf8')).toBe('new covered file');
+  expect(await fs.readFile(path.join(completed.payload.forkRoot as string, 'output'), 'utf8')).toBe('original');
+  expect(events.find(e => e.type === 'WORLD_REUSE_PREPARED')?.payload).toMatchObject({ previous: {
+    worldId: previous.worldId, id: previous.id, atSeq: previous.atSeq }, replacements: expect.any(Array) });
+  expect(calls).toBe(1);
+  const root = world.state.root;
+  world.close();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(readWorldArtifacts(world, candidate)[0].body).toBe(body);
+  expect(readWorldRefresh(world, report.ref)).toEqual(report);
+  expect((await validateWorldCandidate(world, candidate, adapter)).status).toBe('matched');
+  expect(calls).toBe(1);
+});
+
+it.each(['mismatch', 'exception', 'source_tampered'] as const)('rejects %s during matched materialization without model fallback', async failure => {
+  const previous = await prepare();
+  const original = world.domain.getStore().getJournalEvents('world').find(e => e.type === 'WORLD_STEP_COMPLETED')!;
+  const report = await refreshWorldCandidate(world, previous, { ...adapter, replay: async (entry, root) => {
+    const materializing = world.domain.getStore().getJournalEvents('world')
+      .filter(e => e.type === 'WORLD_STEP_STARTED').length === 2;
+    if (materializing) {
+      if (failure === 'exception') throw new Error('reuse tool offline');
+      if (failure === 'mismatch') return 'wrong hash';
+      await fs.writeFile(path.join(original.payload.forkRoot as string, 'output'), 'tampered');
+    }
+    return adapter.replay(entry, root);
+  } }, agent, { onUnknown: 'recompute' });
+  expect(report.result.status).toBe('failed');
+  expect(readWorldCandidateValidation(world, report.validation!).status).toBe('matched');
+  expect(calls).toBe(1);
+  expect(world.domain.getStore().getJournalEvents('world').some(e => e.type === 'WORLD_REUSE_FAILED')).toBe(true);
+  expect(readWorldRefresh(world, report.ref)).toEqual(report);
+  await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
 });

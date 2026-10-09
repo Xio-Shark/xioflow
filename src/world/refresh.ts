@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { FileWorldAdapter, PreparationResult, WorldAgent, WorldCandidate, WorldRef } from './contract.js';
 import type { openWorldState } from './state.js';
 import { validateWorldCandidate } from './validation.js';
+import { prepareMatchedWorldCandidate } from './reuse.js';
 import { recomputeWorldCandidate } from './recompute.js';
 
 type WorldState = Awaited<ReturnType<typeof openWorldState>>;
@@ -49,7 +50,7 @@ export async function refreshWorldCandidate(world: WorldState, ref: WorldRef,
     if (probe.status === 'failed') throw new Error(probe.reasons.join('; ') || 'Validation failed');
     if (probe.status === 'matched') {
       strategy = 'reuse';
-      result = { status: 'prepared', candidate };
+      result = await prepareMatchedWorldCandidate(world, probe.ref, adapter);
     } else if (probe.status === 'unknown' && onUnknown === 'reject') {
       strategy = 'reject';
       result = { status: 'unknown', candidate, reasons: probe.reasons };

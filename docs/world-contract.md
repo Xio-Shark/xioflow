@@ -163,7 +163,7 @@ fork；固定世界版本快照保留供修复使用，异常保留 started/事�
 准备不发布文件，失败保留 journal、快照及既有执行资源；尚无自动续跑、幂等重算或统一资源回收。
 本入口仍为内部实现，未自动选择策略，未接增量刷新或公开 WorldHandle。
 
-内部 `refreshWorldCandidate` 现将持久探测与全量重算收敛为同一流程：matched 复用原候选，
+内部 `refreshWorldCandidate` 现将持久探测与全量重算收敛为同一流程：matched 在探测固定版本上重建候选，
 unknown 按 onUnknown 返回 unknown 或完整重算；工具异常、产物篡改直接 failed，不自动重试。
 changed 暂时完整重算，通过验证引用让 recomputeWorldCandidate 使用同一固定版本；
 恢复前核对版本事件、覆盖、快照归属以及 Git ref/commit/tree/blob，缺失或错配直接 failed，
@@ -171,8 +171,11 @@ changed 暂时完整重算，通过验证引用让 recomputeWorldCandidate 使�
 unknown 没有可用探测版本，继续重新采集。接入增量修复前仍须重验复用节点和物化产物。
 WORLD_REFRESH_STARTED/RECOMPUTING/FAILED/COMPLETED 保存原引用、验证引用、选择路径和结果；
 readWorldRefresh 按固定引用只读查询，关闭重开后不调用模型或推进 journal。
-此内部流程在 matched 时返回原候选身份，不创建刷新版本，也不授予发布许可；strict commit
-仍须重验，尤其是刷新后再次发生变化时。它尚非公开 WorldHandle 的完整实现，未提供断点续跑、
+matched 复用路径不调用模型：在探测版本的新事务中完整重放所选祖先子图，核对每个结果 hash，
+物化写入并映射节点、heads 和已保存产物的依赖；通过普通 prepareWorldStep 保存新版本候选与 checkpoint。
+重放前后核验原候选产物，重放不匹配或异常返回 failed，不自动完整重算；失败资源保留。
+WORLD_REUSE_PREPARED/FAILED 保存验证引用、新结果及节点映射，关闭重开后仍能读取产物和解释。
+复用仍不授予发布许可；strict commit 须再次重验，尤其是刷新后再次发生变化时。它尚非公开 WorldHandle 的完整实现，未提供断点续跑、
 幂等刷新或统一资源清理；中断后只有 started 的操作不被当作完成，已有资源保留供后续恢复。
 
 内部验证增加 `selected_nodes` 范围，refresh 使用该范围；原 `prefix` 首差探测保持可用。

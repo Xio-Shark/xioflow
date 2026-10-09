@@ -1,7 +1,7 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1契约已冻结，统一公开入口待M2实现；M3/M4未完成。
-- 下一轮最小切片：将内部prepareWorldRepair接到WorldAgent增量上下文与候选准备，保存新版本/产物依赖；refresh仍保守全量，不扩大公开入口。
+- 下一轮最小切片：将内部prepareWorldRepair接到WorldAgent增量上下文与候选准备，复用本轮版本/产物依赖保存路径；changed刷新仍保守全量，不扩大公开入口。
 - M2完成标准仍缺：统一句柄、增量refresh、完整explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md冻结六入口状态表、覆盖和六类失败/重试/资源归属；src/world/contract.ts共享非公开契约，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
@@ -27,13 +27,15 @@
 - validateWorldCandidate只用持久候选取证，核对adapter、候选版本及验证前后产物；matched/changed/unknown/failed分流，异常不冒充changed。
 - world验证先captureWorldRevision核验当前覆盖，保存固定version；重放前后核验版本，缺失/错配failed；旧报告version=null。
 - selected_nodes按每个节点祖先建分支，同一快照隔离重放，独立变化汇入闭包，独立异常阻断且plan=null；默认prefix仍保留。
-- 内部refreshWorldCandidate组合validate/recompute：matched复用原身份，unknown拒绝或重算，changed保守全量；工具/产物异常不触发重算。
+- 内部refreshWorldCandidate组合validate/recompute：matched重建固定验证版本候选，unknown拒绝或重算，changed保守全量；工具/产物异常不触发重算。
 - changed全量重算使用持久validation固定版本；unknown/显式全量默认新采集，原句柄基线不变。restoreWorldRevision缺失/错配不回退当前目录、不调用agent。
 - readWorldRefresh/readWorldCandidateValidation/explainWorldPreparation固定引用只读恢复，重开和后续历史不影响同截止点；解释区分验证计划与实际full/reuse结果。
-- 内部入口均未公开；无WorldAgent增量refresh、新matched版本、重算幂等、中断自动续跑或统一资源清理；explain仍缺发布/绑定/资源事实。
-- 本轮候选产物覆盖检查：执行完成及验证前后复用精确路径/Git树核验，拒绝symlink、目录和指纹漏收的忽略文件，failed并保留证据，不发布。
+- 内部入口均未公开；无WorldAgent增量refresh、重算幂等、中断自动续跑或统一资源清理；explain仍缺发布/绑定/资源事实。
+- 候选产物覆盖检查：执行完成及验证前后复用精确路径/Git树核验，拒绝symlink、目录和指纹漏收的忽略文件，failed并保留证据，不发布。
 - 该检查不推断隐性读取或未声明写入，也不是文件系统锁；仍需strict commit。合法写入/删除、声明不存在路径保持可用。
-- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，当前已可用。
+- 已知坑：全量测试期间不要改源码/测试或并行build，避免dist竞态；原生套件需gcc/libc6-dev，每轮先确认cc，当前容器已重新安装gcc/libc6-dev。
 - 内部prepareWorldRepair消费changed/selected_nodes持久报告，接既有prepareWorkspaceRepair；固定基线拓扑重放复用节点并验全部hash，物化复用写入后才重算闭包。
 - 修复前/复用后/完成后重验原产物及版本，最终覆盖/指纹检查；失败abort并留WORLD_REPAIR_FAILED与验证基线；成功记录事务、复用/替换及指纹。
-- 该基础层只返回open事务，未产生WorldCandidate/绑定模型上下文；不替代OCC或业务验收；新增5项回归，最终全量结果见本轮演进记录。
+- 该基础层只返回open事务，未产生WorldCandidate/绑定模型上下文；不替代OCC或业务验收；已有5项回归覆盖修复准备边界。
+- 本轮matched刷新接prepareWorldStep：固定验证版本上完整重放/物化，映射节点、heads与已保存产物依赖，保存新候选及checkpoint，不调用模型。
+- WORLD_REUSE_PREPARED/FAILED保存引用和映射；原产物重验、重放首差/异常失败且不兜底重算，资源仍保留；strict commit尚未接入。
