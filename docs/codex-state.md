@@ -2,7 +2,7 @@
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
 - 下一步最小切片：在确定性报价宿主上接真实模型工具调度和持久响应/usage，保持每客户独立上下文；随后同首次产物公平配对报告。
 - 当前里程碑：M3（报价demo）；M1契约冻结、M2有界文件世界正确性验收通过，M4待推进。
-- M3已具备可复现20客户/19SKU输入、stable/local/all/again扰动CLI、独立BigInt oracle及逐字节验收，见docs/quote-demo.md。
+- M3已有20客户/19SKU输入、四类扰动CLI、独立BigInt oracle；quote-host经内部openWorld接独立客户/汇总依赖，四场景验收通过；尚无真实模型，见docs/quote-demo.md。
 - M3完成标准仍缺：真实模型20客户报价、同初始产物公平全量对照、端到端JSON成本总账、三场景各30对与再次改价10次；usage及延迟门槛未验证。
 - WorkspaceCausalGraph持久节点、祖先/历史切片/失效闭包；explainRecomputation返回变化源及最短路径，explainCausalRecovery关联checkpoint。
 - prepareWorkspaceRepair拓扑重算与独立结果复用；view(heads)连续修复；共享多分支按源seq去重。
@@ -58,4 +58,3 @@
 - 本轮M2：新增统一句柄六场景60例，独立BigInt oracle核对发布正文，检查隔离、生成次数、重开固定解释与终态key。
 - M2验收：六场景每次explain直接比较原始/刷新Run非零getRunUsage、完整journal、覆盖正文和调用次数；重开预算不变。证据索引11文件统一复核通过，见docs/world-acceptance.md。
 - 上轮全量：68文件通过/1跳过，1044通过/7跳过（325s）。本轮quote-host 4/4与typecheck通过；未跑全量，下一轮先补跑。
-- 本轮M3：quote-host通过内部openWorld接20客户独立读取与汇总依赖，安全整数计算/渲染独立于BigInt oracle；确定性宿主非真实模型。
