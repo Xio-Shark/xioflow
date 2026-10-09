@@ -56,5 +56,5 @@
 - drift：独立验证变化率差值、Brier分数与样本量；单类别仍可统计，不自动改变策略。
 - 新增 causal-drift 独立基准：冻结旧/近期窗口，多重复成对对照、Brier/MAE与实测成本；见 docs/causal-drift-benchmark.md。下一步：异质工具成本与双向漂移。
 - explainRecomputation(changed, atSeq?, heads?)：逐失效节点列出所有变化源及各自最短依赖路径。
-- 路径含端点，等长按seq字典序；去重种子、跨agent、历史切片与重开可复现；纯查询不授权复用。见 docs/causal-explanations.md。
-- 最新验证：基线713通过；定向20项、typecheck与最终715项通过（7跳过）；下一步将解释路径接入checkpoint恢复预览。原有暂存基准改动保留。
+- explainCausalRecovery：跨agent恢复预览附每个checkpoint的recomputation解释与工具/actor元数据；按checkpoint历史切片筛选变化源，未知全局种子报错；只读且重开可复现。
+- 最新验证：原生构建与typecheck通过，定向38通过，全量717通过/7跳过；环境已补齐gcc/libc开发依赖。下一步：把观测验证changed接到恢复预览，形成探测→解释→共享恢复示例；原有暂存基准改动保留。

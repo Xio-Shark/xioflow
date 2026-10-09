@@ -163,6 +163,17 @@ their presence does not make them restorable under existing lifecycle rules.
 Returned checkpoints are detached copies. Empty seeds still report untracked
 agents. Restored branches are used on subsequent queries, including after reopen.
 
+`agents.explainCausalRecovery(changedNodeSeqs)` returns the same plan with an
+additional `recomputation: ExplainedRecomputationPlan` on each affected entry.
+Each report selects the inspected checkpoint's heads at its journal sequence,
+filters globally known seeds to that branch, and includes every invalidated
+node's shortest dependency path from each reachable changed seed. Unknown seeds
+still throw before branch filtering. Node metadata identifies actors, transactions
+and tool calls. Historical/sibling nodes outside the selected branch cannot enter
+the report. The query is read-only, returns detached data, and uses the existing
+graph explanation ordering and tie-breaking rules. Ordinary planning does not
+compute paths. See [recovery preview example](../docs/causal-explanations.md#跨-agent-的-checkpoint-恢复预览).
+
 ```ts
 // Host has detected a changed observation and stopped this agent's work.
 const plan = agents.planCausalRecovery([changedNodeSeq]);

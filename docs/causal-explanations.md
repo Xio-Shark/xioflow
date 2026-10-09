@@ -35,4 +35,27 @@ pnpm exec vitest run tests/workspace/causal-graph.test.ts
 
 每个变化源进行一次广度优先遍历，避免枚举菱形图的全部路径。遍历与路径输出复杂度为 O(S × (V + E) + P)，另有种子排序开销，其中 S 是去重变化源数，V/E 是所选图的节点/边数，P 是返回路径的总长度；大量源与长链仍可能产生较大报告，调试时应选择具体 heads。
 
+## 跨 agent 的 checkpoint 恢复预览
+
+`AgentRuntime.explainCausalRecovery(changed)` 保留 `planCausalRecovery` 的影响分类和最近未受影响的恢复候选，为每个 `affected` 项增加 `recomputation: ExplainedRecomputationPlan`。宿主可以一次查询呈现“哪个 checkpoint 需要修复、哪些结果可保留、每个失效结果为何需要重算”：
+
+```ts
+const preview = agents.explainCausalRecovery(changed);
+for (const impact of preview.affected) {
+  console.log(impact.agentId, impact.checkpoint.seq, impact.restartFrom?.seq);
+  const nodes = new Map(impact.recomputation.invalidated.map(node => [node.seq, node]));
+  for (const explanation of impact.recomputation.explanations) {
+    for (const cause of explanation.causes) {
+      console.log(explanation.nodeSeq, cause.changedSeq,
+        cause.path.map(seq => ({ seq, actorId: nodes.get(seq)!.actorId,
+          tool: nodes.get(seq)!.observation.call.tool })));
+    }
+  }
+}
+```
+
+`agents` 是宿主的 `AgentRuntime`。每份解释只包含该 checkpoint 的 heads 及其祖先，并以 checkpoint 序号冻结历史；其他分支和该 checkpoint 之后出现的变化源不会混入。全局未知变化源仍报错，已知但不属于某个 checkpoint 的变化源只在该分支解释中排除。多源与最短路径规则沿用图查询。
+
+空变化集仍区分 `unaffected` 与 `untracked`，终态 agent 也参与预览。查询不执行恢复、不消耗 step 预算、不追加事件；返回值与持久数据隔离。实际恢复前仍需核对 `impact.checkpoint.seq`，恢复候选不代表文件或观测在当前世界有效。常规恢复计划不生成路径，只有显式调用解释 API 才支付路径输出成本。对应测试：`pnpm exec vitest run tests/agents/causal-checkpoints.test.ts`。
+
 解释表达宿主声明的依赖传播，不证明依赖完整、输出已提交或变化源确实改变，也不授权复用 `unaffected`。发现变化仍由观测验证负责，修复提交仍使用现有 OCC；本查询不自动回滚文件或外部副作用。

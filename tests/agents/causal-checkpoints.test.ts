@@ -498,6 +498,82 @@ describe('agent checkpoint causal branches', () => {
     expect(runtime.planCausalRecovery([source.seq]).affected.map((entry) => entry.agentId)).toEqual(['consumer']);
   });
 
+  it('explains checkpoint recovery with all relevant causes and cross-actor paths', async () => {
+    const first = node();
+    const second = node();
+    const stable = node();
+    const left = node([first.seq]);
+    const right = node([first.seq]);
+    const joined = graph.record({ txId: 'tx', actorId: 'producer', dependsOn: [right.seq, second.seq, left.seq],
+      observation: { kind: 'observe', call: { tool: 'join', args: {} }, resultHash: 'joined' } });
+    const sibling = node([first.seq]);
+    open({ step: async () => {
+      runtime.pause('a');
+      return { status: 'ready', checkpoint: 'joined', causalHeads: [joined.seq, stable.seq] };
+    } });
+    create([stable.seq]);
+    const initial = runtime.checkpoints('a')[0];
+    await runtime.drain();
+    // A later changed result must not leak into the older checkpoint report.
+    const future = node([joined.seq]);
+    for (const [id, heads] of [['consumer', [second.seq]], ['empty', []], ['untracked', null]] as const) {
+      runtime.create({ id, runId: 'run', input: null, checkpoint: id,
+        causalHeads: heads === null ? null : [...heads], maxSteps: 1 });
+    }
+    const changed = [future.seq, second.seq, first.seq, first.seq, sibling.seq];
+    const states = runtime.list();
+    const budget = runtime.getRunUsage('run');
+    const events = domain.getStore().getJournalEvents(domain.domainId);
+    const preview = runtime.explainCausalRecovery(changed);
+    const { recomputation, ...impact } = preview.affected[0];
+    expect(impact).toEqual(runtime.planCausalRecovery(changed).affected[0]);
+    expect(impact.restartFrom).toEqual(initial);
+    expect(recomputation.invalidated.map((entry) => entry.seq)).toEqual(impact.invalidatedNodes);
+    expect(recomputation.unaffected.map((entry) => entry.seq)).toEqual([stable.seq]);
+    expect(recomputation.explanations.find((entry) => entry.nodeSeq === joined.seq)?.causes).toEqual([
+      { changedSeq: first.seq, path: [first.seq, left.seq, joined.seq] },
+      { changedSeq: second.seq, path: [second.seq, joined.seq] },
+    ]);
+    expect(recomputation.invalidated.at(-1)).toMatchObject({ actorId: 'producer', txId: 'tx',
+      observation: { call: { tool: 'join' } } });
+    expect(preview.affected[1].recomputation.explanations).toEqual([
+      { nodeSeq: second.seq, causes: [{ changedSeq: second.seq, path: [second.seq] }] },
+    ]);
+    expect(preview.unaffected).toEqual(['empty']);
+    expect(preview.untracked).toEqual(['untracked']);
+    expect(runtime.list()).toEqual(states);
+    expect(runtime.getRunUsage('run')).toEqual(budget);
+    expect(domain.getStore().getJournalEvents(domain.domainId)).toEqual(events);
+    const original = structuredClone(preview);
+    recomputation.explanations[0].causes[0].path.push(future.seq);
+    recomputation.invalidated[0].observation.call.tool = 'tampered';
+    preview.affected[0].checkpoint.causalHeads!.push(future.seq);
+    expect(runtime.explainCausalRecovery(changed)).toEqual(original);
+    runtime.close();
+    domain.close();
+    domain = ExecutionDomain.acquire(path.join(temp, 'domain'), 'causal-checkpoints');
+    open();
+    expect(runtime.explainCausalRecovery(changed)).toEqual(original);
+    expect(runtime.explainCausalRecovery([...changed].reverse()).affected).toEqual(original.affected);
+  });
+
+  it('keeps terminal outputs visible and validates explanation seeds before branch filtering', async () => {
+    const source = node();
+    open({ step: async () => ({ status: 'completed', checkpoint: 'output', causalHeads: [source.seq] }) });
+    create();
+    await runtime.drain();
+    runtime.create({ id: 'untracked', runId: 'run', input: null, checkpoint: null, maxSteps: 1 });
+    const preview = runtime.explainCausalRecovery([source.seq]);
+    expect(preview.affected[0].restartFrom).toBeUndefined();
+    expect(preview.affected[0].recomputation.explanations).toEqual([
+      { nodeSeq: source.seq, causes: [{ changedSeq: source.seq, path: [source.seq] }] },
+    ]);
+    expect(runtime.get('a')?.status).toBe('completed');
+    expect(runtime.explainCausalRecovery([])).toEqual({ changed: [], affected: [], unaffected: ['a'], untracked: ['untracked'] });
+    expect(() => runtime.explainCausalRecovery([999999])).toThrow('absent');
+    expect(() => runtime.explainCausalRecovery([NaN])).toThrow('absent');
+  });
+
   it('selects the nearest unaffected tracked checkpoint and survives domain reopen', async () => {
     const changed = node();
     const stable = node();

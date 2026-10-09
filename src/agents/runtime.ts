@@ -1,5 +1,5 @@
 import type { ExecutionDomain } from '../domain.js';
-import { WorkspaceCausalGraph, type CausalView } from '../workspace/causal-graph.js';
+import { WorkspaceCausalGraph, type CausalView, type ExplainedRecomputationPlan } from '../workspace/causal-graph.js';
 import { isAgentCheckpoint, projectAgentEvent, readAgentCheckpoint } from './journal.js';
 import { AgentCommandGroup, type AgentCommandOptions, type AgentCommandResult, type AgentExecution } from './execution.js';
 import { ProcessSupervisor } from '../supervisor/supervisor.js';
@@ -48,6 +48,13 @@ export interface AgentCausalRecoveryPlan {
   unaffected: string[];
   /** Missing provenance is never classified as unaffected. */
   untracked: string[];
+}
+
+export interface ExplainedAgentCausalRecoveryPlan extends AgentCausalRecoveryPlan {
+  affected: (AgentCausalRecoveryPlan['affected'][number] & {
+    /** Checkpoint-scoped evidence and shortest paths from every relevant changed seed. */
+    recomputation: ExplainedRecomputationPlan;
+  })[];
 }
 
 export interface AgentState {
@@ -292,6 +299,20 @@ export class AgentRuntime {
       });
     }
     return plan;
+  }
+
+  /** Read-only recovery preview with evidence paths, frozen to each inspected checkpoint. */
+  explainCausalRecovery(changed: readonly number[]): ExplainedAgentCausalRecoveryPlan {
+    // Validate all seeds globally before filtering out changes outside each branch.
+    const plan = this.planCausalRecovery(changed);
+    const graph = new WorkspaceCausalGraph(this.domain);
+    return { ...plan, affected: plan.affected.map((impact) => {
+      const selected = new Set(impact.invalidatedNodes);
+      const seeds = plan.changed.filter((seq) => selected.has(seq));
+      return { ...impact, recomputation: graph.explainRecomputation(
+        seeds, impact.checkpoint.seq, impact.checkpoint.causalHeads!,
+      ) };
+    }) };
   }
 
   private normalizeCausalHeads(heads: number[] | null | undefined): number[] | null {
