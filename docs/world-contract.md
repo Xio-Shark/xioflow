@@ -138,3 +138,15 @@ prepared 仅表示声明和隔离产物已准备，不表示通过重放、业�
 内部 readWorldArtifacts 按 worldId/id/atSeq 读取准确的候选事件，重验正文哈希；证据缺失或损坏
 直接失败，不重跑模型，不推进 journal。关闭重开后仍可读；返回值与后续宿主修改相互隔离。
 这仅覆盖文本产物，尚无二进制正文或内容寻址去重；refresh、strict commit 和资源报告仍待接通。
+
+内部 `src/world/validation.ts` 的 `validateWorldCandidate` 已接入 refresh 的探测阶段，
+复用 validateWorkspaceCausalBranches，在当前目录的独立快照上重放候选固定截止点的祖先日志。
+它按 worldId/id/atSeq 读取原候选，不接受调用方覆盖 heads、coverage 或输出指纹；适配器
+id/version 须匹配。unknown 保留原原因并跳过重放；完整候选先验文本正文和输出树指纹，
+重放后再次验输出。成功哈希分歧为 changed，工具异常或输出损坏为 failed，异常不产生失效计划。
+WORLD_VALIDATION_STARTED/COMPLETED 保存原候选引用、验证报告序号、原因和固定因果路径；
+readWorldCandidateValidation 只读恢复准确历史报告，关闭重开后不调用工具或推进 journal。
+matched 仅说明此次探测匹配，changed 的计划仅从首个分歧扩展，不是完整变化清单；两者都不是
+刷新候选或提交许可。宿主仍须完整声明依赖和确定性工具语义，保持候选静止；未接通
+增量/全量重算、新版本候选、strict commit 和资源恢复状态机。验证正常结束沿用旧入口回收探测
+fork/快照；异常保留 started/事务证据，尚无自动恢复或统一资源报告。

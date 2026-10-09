@@ -592,3 +592,11 @@
 - 新增6项测试覆盖空正文/中文/工具结果、宿主修改、重开身份、错误历史引用、数据库正文损坏及缺失/无效正文。
 - M2尚缺refresh/explain/strict commit/close统一状态机、独立key与六场景完整验收；下一轮接入已有观测验证及持久刷新关系。
 - 验证：基线因缺gcc有3个原生套件失败；已修复工具链；针对性24项及typecheck通过，全量复验运行中。
+
+## 2026-10-09 — M2 候选观测验证收敛
+- 内部validateWorldCandidate复用既有隔离重放，读取固定候选证据，持久关联原候选、底层报告、未知原因及因果路径。
+- matched/changed/unknown/failed分流；unknown不重放，异常不算变化；正文和重放前后输出指纹核验阻止损坏成果复用。
+- readWorldCandidateValidation支持固定截止点的重开只读查询，不调用模型或推进journal；不新增公开入口。
+- 新增9项覆盖匹配/变化/异常、重开路径、伪造声明、输出篡改及null/[]；仍无新版本候选、完整refresh或发布许可。
+- M2后续先接修复准备，再收敛strict commit/key/explain/close与六场景完整验收；不扩成本策略。
+- 验证：基线859通过/7跳过，新增9项及pnpm typecheck通过；最终全量复验运行中，提交前回填。
