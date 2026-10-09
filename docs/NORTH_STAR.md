@@ -71,9 +71,55 @@ try {
 
 ## 5. 诚实审视现状：收敛能力，而非继续堆入口
 
-现有文档描述了从因果图、局部修复、共享恢复到成本预测的连续切片；需要明确保留、合并、延后与删除的对象。
+以下是后续收敛决策，本轮只改本文；路径均相对 `docs/`。合并保留场景和失败语义，删除样本须先由统一报告覆盖，原始实测仍可从 Git 历史追溯。
 
-当前最大的结构性问题是：正确性责任分散在宿主回调和大量组合入口之间，产品缺少一个可独立验收的闭环。
+| 文档 | 处置 | 理由与去向 |
+| --- | --- | --- |
+| `causal-graph.md` | 保留为内核 | 节点身份、显式依赖与失效闭包是复用和解释共同依赖的事实层。 |
+| `causal-explanations.md` | 保留为内核 | 变化源到成果的证据路径必须与执行使用同一图和历史截止点。 |
+| `causal-validation.md` | 合并 | 探测、直接重算和提交并入 `refresh/commit` 契约，消除多入口验证语义分叉；预测部分移插件。 |
+| `causal-repair.md` | 合并 | 单分支与共享修复归入同一刷新执行器，按节点身份去重并统一资源归属。 |
+| `causal-recovery-batches.md` | 合并 | refresh、resume、retry 归入持久状态机，保留逐项 checkpoint 校验与未决资源记录；成本策略移插件。 |
+| `causal-refresh-history-windows.md` | 降级为插件或示例 | 窗口选择只影响成本且有选择偏差，不应成为正确性或首次接入的前提。 |
+| `causal-repair-benchmark.md` | 合并 | 作为统一基准的局部变化场景，保留独立 oracle，统一计入验证与发布成本。 |
+| `causal-refresh-benchmark.md` | 合并 | 作为统一基准的主协议，用相同提交保证比较无变化、局部变化和全量变化。 |
+| `shared-repair-benchmark.md` | 合并 | 共享祖先变成场景参数，分发读写和独立事务验证必须进入总账。 |
+| `speculative-merge-benchmark.md` | 合并 | OCC 冲突变成场景参数，并继续计入失败投机的执行成本。 |
+| `causal-recovery-benchmark.md` | 合并 | 统一覆盖进程死亡、输入变化、输出损坏及 OCC 发布，避免只验证恢复到 checkpoint。 |
+| `causal-refresh-history-benchmark.md` | 降级为插件或示例 | 保留策略插件的冻结训练与独立评估协议，不把预测误差当作产品收益。 |
+| `causal-drift-benchmark.md` | 降级为插件或示例 | 漂移实验服务于成本策略，Brier 分数改善不构成内核发布门槛。 |
+| `checkpoint-forks.md` | 降级为插件或示例 | 历史重建属于调试工具，完整前缀与确定性要求不应扩张最小接入契约。 |
+| `checkpoint-comparison.md` | 合并 | 只读证据对照并入 `explain` 文档，需重建文件的对照归入历史调试插件。 |
+| `speculative-workspaces.md` | 降级为插件或示例 | 候选调度和胜者策略由宿主选择，首发内核只承诺每次提交的有效性。 |
+| `VISION.md` | 合并 | 产品定位和路线以本文为准，原页改作实现索引，避免两个愿景各自增长。 |
+
+样例也逐项收敛；下表的“合并”指迁入同一报告格式，保留配置、环境、原始样本与正确性结果。
+
+| 样例 | 处置 | 理由与去向 |
+| --- | --- | --- |
+| `benchmarks/causal-repair.sample.json` | 合并 | 保留局部失效与不校验复用的负对照。 |
+| `benchmarks/causal-refresh.sample.json` | 合并 | 保留生成次数下降但总成本上升的反例。 |
+| `benchmarks/causal-refresh-shared.sample.json` | 合并 | 保留共享祖先对端到端成本的影响。 |
+| `benchmarks/shared-repair.sample.json` | 合并 | 保留分发与额外事务抵消去重收益的样本。 |
+| `benchmarks/speculative-merge.sample.json` | 合并 | 保留真实冲突及失败投机成本。 |
+| `benchmarks/causal-recompute.sample.json` | 合并 | 保留跳过探测的完整重算对照。 |
+| `benchmarks/causal-probe-reuse.sample.json` | 删除 | 统一基准以缓存开关覆盖同基线探测复用后，不再维护独立报告。 |
+| `benchmarks/causal-refresh-adaptive.sample.json` | 降级为插件或示例 | 估算命中与失准属于策略评估。 |
+| `benchmarks/causal-refresh-policy.sample.json` | 降级为插件或示例 | 独立先验只用于比较选路成本。 |
+| `benchmarks/causal-refresh-history.sample.json` | 降级为插件或示例 | 保留历史预测的独立验证及训练开销。 |
+| `benchmarks/causal-drift.sample.json` | 降级为插件或示例 | 保留窗口漂移实验，限制在该负载解释收益。 |
+| `causal-recovery.sample.json` | 删除 | 统一故障场景覆盖后，删除止于绑定恢复、未走文件发布的独立验收样本。 |
+| `causal-recovery-occ.sample.json` | 合并 | 恢复成功必须落到实际文件发布与输出核对。 |
+| `causal-recovery-crash.sample.json` | 合并 | 保留真实进程死亡区别于回调抛错的故障边界。 |
+| `causal-recovery-validation-stable.sample.json` | 合并 | 保留输入稳定时经验证续跑的成本基线。 |
+| `causal-recovery-validation-changed.sample.json` | 合并 | 保留输入变化后拒绝旧成果并重算的对照。 |
+| `causal-recovery-output-tampered.sample.json` | 合并 | 保留输入未变但持久输出损坏时拒绝续跑的反例。 |
+| `causal-recovery-output-scale.sample.json` | 合并 | 保留不同输出规模下的验证、复制字节数与总耗时。 |
+
+**最大的两个结构性问题：**
+
+1. **正确性契约与资源归属没有收口。** 大量组合入口把探测、修复、绑定、OCC 和回收交给宿主拼接；文件提交与多个 checkpoint 绑定并非原子操作。必须收敛到持久状态机，分别记录准备、文件发布、逐项绑定和未知结果，不能以批次成功替代发布事实。
+2. **评测按能力切片组织，缺少真实 agent 任务的收益总账。** 现有刷新样本生成调用从 8 降至 2，总调用却从 16 增至 23，中位耗时约 188→296 ms（三轮本机小负载，见 `causal-refresh-benchmark.md`）；哈希任务及 `modelTokens: null` 不能证明模型任务节省。必须统一正确性、总耗时与真实 token 口径，再决定优化方向。
 
 ## 6. 通向 v0.1 的可验证里程碑
 
