@@ -40,4 +40,4 @@
 - matched刷新接prepareWorldStep：固定验证版本上完整重放/物化，映射节点、heads与已保存产物依赖，保存新候选及checkpoint，不调用模型。
 - WORLD_REUSE_PREPARED/FAILED保存引用和映射；原产物重验、重放首差/异常失败且不兜底重算，资源仍保留；strict commit尚未接入。
 - 本轮收尾7bfbb9c的matched复用WIP；补充重开后连续刷新、显式空依赖复用、首差/异常立即停止回归，仍不调用模型或发布主目录。
-- 验证：refresh/step/validation共61项及pnpm typecheck通过；全量待本轮最终回填，若未完成则下一轮先补跑。
+- 验证：refresh/step/validation共61项及pnpm typecheck通过；全量pnpm test通过：63文件/926项，跳过1文件/7项，232.50秒；下一轮无需全量基线。

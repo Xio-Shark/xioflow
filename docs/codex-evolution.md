@@ -679,5 +679,5 @@
 ## 2026-10-09 — M2 matched 刷新 WIP 收尾
 - 优先完成7bfbb9c未完成切片，保留固定验证版本、完整重放与候选/checkpoint准备路径。
 - 补充重开后连续复用产物及依赖映射、显式空依赖、首个分歧或异常后停止重放的回归。
-- refresh/step/validation共61项及pnpm typecheck通过；全量测试待最终回填。
+- refresh/step/validation共61项及pnpm typecheck通过；全量63文件/926项通过，跳过1文件/7项，耗时232.50秒。
 - M2仍未完成；下一轮将prepareWorldRepair接WorldAgent增量上下文及候选，统一句柄/strict commit/key/资源闭环仍缺。
