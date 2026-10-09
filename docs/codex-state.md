@@ -1,7 +1,6 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；受监督执行是底座。 WorkspaceTransactions：文件读写集与观测重放 OCC；同基线隔离投机执行。
-- WorkspaceCausalGraph：持久因果节点、上游查询、历史切片、失效闭包。 prepareWorkspaceRepair：拓扑重算失效节点、复用独立结果、记录替代关系；view(heads) 与新 heads 支持连续修复。
-- speculateWorkspace：OCC 冲突后最多一次 repair 与再提交。 commitPolicy first_valid / all_valid；后者依声明顺序合并 OCC 有效结果。
+- WorkspaceCausalGraph：持久因果节点、上游查询、历史切片、失效闭包。 prepareWorkspaceRepair：拓扑重算失效节点、复用独立结果、记录替代关系；view(heads) 与新 heads 支持连续修复。 speculateWorkspace：OCC 冲突后最多一次 repair 与再提交。 commitPolicy first_valid / all_valid；后者依声明顺序合并 OCC 有效结果。
 - AgentRuntime create / step 原子持久化 causalHeads 与 checkpoint。 heads 引用同 domain 已有节点；null 未跟踪，[] 空分支；checkpoint 历史可查，恢复不回退预算。
 - planCausalRecovery 查询跨 agent 失效；recoverCausalCheckpoint 校验版本、独占绑定宿主重建。 成功后 causal_repaired 原子保存上下文 / heads / workspace 并 paused。
 - recoverAgentCausalBatch：冻结影响计划，逐项报告 repaired / skipped / failed。 prepareWorkspaceBranchRepair：兼容多分支共享一个修复事务，按源 seq 去重。 recoverAgentSharedCausalBatch：一次共享重算，逐项绑定独立事务与上下文。 单事务单活跃 agent；bind 分发独立输出和重建上下文；拒绝绑定或回收共享事务。
@@ -57,4 +56,5 @@
 - benchmark:recovery schemaVersion=6：第八参数逗号分隔outputFileBytes，派生payload覆盖生成/重放/分发/最终OCC校验，checkpoint保留摘要；有payload时损坏最后一个文件。恢复分发字节/耗时包含失败尝试，不含fork/内核指纹；summary附验证与分发均值。
 - resumeAgentSharedCausalRefreshWithPolicy：完整pending批次成本选择validate/recompute；正常验证拒绝自动宿主重建，异常抛出。planAgentCausalResumePolicy纯查询，概率/有限成本/溢出检查，持平验证。
 - recompute逐项返回完整checkpoint/heads/独立workspace，沿用冻结版本核对、原preparation发布和重叠保护；保留已发布项及旧共享资源。SELECTED/COMPLETED/FAILED事件关联决策/拒绝证据/耗时；批次完成须核对outcomes，文件仍需OCC。 listAgentCausalResumeTelemetry按taskKey/runId/atSeq/重开查询；SELECTED携带forecastUnit(ms/host)，结果持久phases(验证+续跑/重算)、outcomes计数，显式ms才算预测误差；旧缺测量不补零、未决pending。
-- 下一步：用恢复遥测按pending数量/输出大小冻结训练窗口，多规模多轮独立验证forecast；区分失败和未决，不宣称生产/token收益。
+- estimateAgentCausalResumeHistory：taskKey+精确pending数量，冻结滑动窗口训练完整成功验证路径；失败/未决/缺测/直接重算分列。accepted含验证与分发，resume=0仅编码；heldOut阶段MAE/Brier，输出大小宿主taskKey分档，显式采用。
+- 下一步：接真实恢复基准做多规模独立训练/验证；检验拒绝后重算成本能否代表直接重算，避免选择偏差，不宣称生产/token收益。

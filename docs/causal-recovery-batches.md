@@ -505,3 +505,33 @@ for (const report of reports) {
 返回 `predictionErrorMs = durationMs - 选中策略的期望成本`（正值表示低估）；失败项数量仍需单独筛选。
 单次误差不是反事实收益；直接重算不产生验证拒绝标签。宿主须按可比负载分类、冻结训练窗口并独立评估，
 本接口不自动训练、切换策略或宣称 token 节省。
+
+### 从冻结历史估计恢复成本
+
+`estimateAgentCausalResumeHistory` 按 `taskKey` 和精确 `pendingAgents` 数量查询跨 Run 遥测，
+输出可交给恢复策略的毫秒 forecast。输出大小由宿主在 taskKey 中分档，不跨规模外推。
+
+```ts
+const estimate = estimateAgentCausalResumeHistory(domain, {
+  taskKey: 'recovery-16MiB', pendingAgents: 4,
+  trainingAfterSeq: oldWindowEnd, trainingAtSeq: frozenTrainingEnd, atSeq: evaluationEnd,
+});
+if (estimate.forecast) {
+  const result = await resumeAgentSharedCausalRefreshWithPolicy(runtime, supervisor, planSeq, {
+    forecast: estimate.forecast, forecastUnit: 'ms', taskKey: estimate.taskKey,
+    validation, bind, recompute: rebuildCheckpointAndWorkspace,
+  });
+  console.log(result.batch.outcomes);
+}
+console.log(estimate.training, estimate.heldOut, estimate.evaluation);
+```
+
+训练窗口按决策序号左开右闭，且结果必须在训练截止点之前落盘。迟到结果仍计 missing，
+不会泄漏进训练或后续验证集。后续决策构成 heldOut；固定 atSeq 的结果重开可复现，查询不写 journal。
+仅全批 repaired 的验证路径参与拟合；failed（含 skipped/部分失败）、missing、unmeasured
+和直接 recompute 单列。两种验证结果均有样本才生成 forecast；直接重算不产生拒绝标签。
+成功验证阶段已含分发，因此 validationAccepted 保存该合计，resume=0 只是编码方式。
+recompute 来自验证拒绝后的重建阶段；估计直接重建时沿用此成本是假设，可能存在选择偏差。
+heldOut 报告阶段合计成本 MAE、实际拒绝比例及 Brier 分数；不包含阶段间调度、结果落盘和后续 OCC。
+原预测即使使用 host 单位，也不妨碍使用实测毫秒阶段训练；不会拿 host 数值当成毫秒。
+估计需宿主显式采用；它不证明复用有效，也不自动探索、切换策略或宣称实际收益。
