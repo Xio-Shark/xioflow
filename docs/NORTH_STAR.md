@@ -13,6 +13,8 @@ Agent 的推理和工具调用依赖一个会变化的世界；保存对话、�
 
 **首发 TypeScript 库**，嵌入现有 agent 宿主：模型、工具与上下文已经由宿主管理，同进程接入最容易明确证据和资源的责任归属，也便于逐步替换现有组合入口。
 
+首批只承诺单机、单个 Git 工作区内的文件世界：覆盖清单、版本、工具读写及验收由适配器显式声明。未覆盖文件、网络读取和不可逆外部写入不能获得自动复用或重放保证；覆盖不足必须返回 `unknown`。
+
 CLI 随库提供可复现演示和历史解释，复用同一契约；守护进程延后，直到跨进程共享世界的需求足以承担认证、租约和远程故障语义的成本。
 
 ### 最小接入契约
@@ -26,7 +28,7 @@ import { fileAdapter, agent } from './host.js';
 const world = await openWorld({ root: './repo', adapter: fileAdapter });
 try {
   const step = await world.runAgentStep(agent, { task: '按 pricing.json 生成 quote.md' });
-  await writeFile('./repo/pricing.json', '{"unitPrice":120}\n');
+  await writeFile('./repo/pricing.json', '{"unitPrice":120}\n'); // perturb：外部改价
   const refreshed = await world.refresh(step, { onUnknown: 'recompute' });
   console.log(await world.explain(refreshed));
   const result = await world.commit(refreshed, { validation: 'strict', key: refreshed.id });
@@ -37,6 +39,8 @@ try {
 `runAgentStep` 在隔离分支记录观测、上下文依赖与输出；外部写入制造真实扰动。`refresh` 只准备候选，不发布；`explain` 返回变化源、依赖路径、复用与重算节点。
 
 `commit` 重验当前证据、输出和宿主验收，并以 OCC 发布；刷新后再次变化必须冲突。证据未知时可完整重算，仍无法建立覆盖则拒绝提交；同一 key 重试返回同一发布结果。
+
+稳定入口收敛为 `openWorld` 与上述句柄方法；探测、共享修复、checkpoint 绑定和重试由内部状态机组合。宿主仍定义工具语义与业务验收，内核统一核验契约、推进状态和记录失败；成本预测只能选路径，不能放宽提交条件。
 
 世界句柄持有临时事务与快照，`close` 清理已确定终态的资源；提交结果未知时保留恢复证据并返回可查询身份，不把清理成功当作提交成功。
 
