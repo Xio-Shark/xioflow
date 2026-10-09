@@ -12,6 +12,7 @@ type WorldState = Awaited<ReturnType<typeof openWorldState>>;
 export interface WorldCandidateValidation {
   ref: WorldRef;
   previous: WorldRef;
+  scope: 'prefix' | 'selected_nodes';
   status: 'matched' | 'changed' | 'unknown' | 'failed';
   reasons: string[];
   validationSeq: number | null;
@@ -20,9 +21,11 @@ export interface WorldCandidateValidation {
 
 /** Internal refresh probe, not a refreshed candidate or permission to publish. */
 export async function validateWorldCandidate(world: WorldState, ref: WorldRef,
-  adapter: Pick<FileWorldAdapter, 'id' | 'version' | 'replay'>): Promise<WorldCandidateValidation> {
+  adapter: Pick<FileWorldAdapter, 'id' | 'version' | 'replay'>,
+  scope: WorldCandidateValidation['scope'] = 'prefix'): Promise<WorldCandidateValidation> {
   const { domain, state } = world;
   if (domain.isClosed()) throw new Error('World is closed');
+  if (scope !== 'prefix' && scope !== 'selected_nodes') throw new Error('Invalid validation scope');
   if (adapter.id !== state.adapter.id || adapter.version !== state.adapter.version) {
     throw new Error('World adapter mismatch');
   }
@@ -41,7 +44,7 @@ export async function validateWorldCandidate(world: WorldState, ref: WorldRef,
     domainId: domain.domainId, runId: candidate.id, type,
     payload: { worldId: state.worldId, id, previous, ...payload }, timestamp: new Date().toISOString(),
   });
-  append('WORLD_VALIDATION_STARTED', {});
+  append('WORLD_VALIDATION_STARTED', { scope });
   let status: WorldCandidateValidation['status'] = 'failed';
   let reasons: string[] = [];
   let validationSeq: number | null = null;
@@ -68,18 +71,26 @@ export async function validateWorldCandidate(world: WorldState, ref: WorldRef,
         if (actual !== candidate.outputFingerprint) throw new Error('Candidate output changed');
       };
       await checkOutput();
+      const graph = new WorkspaceCausalGraph(domain);
+      // A joined branch stops at its first mismatch. Check every node's complete
+      // declared ancestry on isolated forks of ONE baseline so an independent
+      // later mismatch or exception cannot hide behind an earlier divergence.
+      const nodes = scope === 'selected_nodes' ? graph.view(candidate.heads, ref.atSeq).nodes : [];
+      const branches = nodes.length
+        ? nodes.map(node => ({ id: `${candidate.id}:${node.seq}`, heads: [node.seq] }))
+        : [{ id: candidate.id, heads: [...candidate.heads] }];
       const validation = await validateWorkspaceCausalBranches(new ProcessSupervisor(domain), {
         txId: id, runId: candidate.id, root: state.root,
         forkPath: path.join(domain.domainPath, 'forks', id), atSeq: ref.atSeq,
-        branches: [{ id: candidate.id, heads: [...candidate.heads] }],
+        branches,
         closedWorld: true, replayPolicy: 'deterministic', replay: (entry, root) => adapter.replay(entry, root),
       });
       validationSeq = validation.seq;
       await checkOutput();
-      const branch = validation.branches[0];
-      status = branch.status;
-      if (branch.status === 'failed') reasons = [branch.error];
-      else plan = new WorkspaceCausalGraph(domain).explainRecomputation(
+      const failures = validation.branches.filter(branch => branch.status === 'failed');
+      status = failures.length ? 'failed' : validation.changed.length ? 'changed' : 'matched';
+      if (failures.length) reasons = failures.map(branch => branch.error);
+      else plan = graph.explainRecomputation(
         validation.changed, ref.atSeq, candidate.heads);
     }
   } catch (error) {
@@ -88,8 +99,8 @@ export async function validateWorldCandidate(world: WorldState, ref: WorldRef,
     plan = null;
   }
   reasons = [...new Set(reasons)];
-  const atSeq = append('WORLD_VALIDATION_COMPLETED', { status, reasons, validationSeq, plan });
-  return { ref: { worldId: state.worldId, id, atSeq }, previous, status, reasons, validationSeq, plan };
+  const atSeq = append('WORLD_VALIDATION_COMPLETED', { scope, status, reasons, validationSeq, plan });
+  return { ref: { worldId: state.worldId, id, atSeq }, previous, scope, status, reasons, validationSeq, plan };
 }
 
 /** Exact historical report; does not probe files, call tools or advance the journal. */
@@ -100,6 +111,6 @@ export function readWorldCandidateValidation(world: WorldState, ref: WorldRef): 
       || event.payload.worldId !== ref.worldId || event.payload.id !== ref.id) {
     throw new Error('Validation history reference mismatch');
   }
-  const { previous, status, reasons, validationSeq, plan } = event.payload;
-  return structuredClone({ ref, previous, status, reasons, validationSeq, plan }) as WorldCandidateValidation;
+  const { previous, status, reasons, validationSeq, plan, scope = 'prefix' } = event.payload;
+  return structuredClone({ ref, previous, scope, status, reasons, validationSeq, plan }) as WorldCandidateValidation;
 }

@@ -117,3 +117,46 @@ it.each([null, []] as (number[] | null)[])('distinguishes untracked and empty he
   if (heads === null) expect(result.reasons).toContain('untracked_dependencies');
   else expect(result.plan).toMatchObject({ invalidated: [], unaffected: [] });
 });
+
+it.each(['stable', 'changed', 'failed'] as const)('checks independent evidence beyond the first difference: %s', async later => {
+  const sources: number[] = [];
+  const prepared = await prepareWorldStep(world, { execute: async ({ record, version }) => {
+    for (const tool of ['first', 'second', 'third']) {
+      sources.push(await record({ kind: 'observe', call: { tool, args: {} }, resultHash: 'original' }, []));
+    }
+    const join = await record({ kind: 'observe', call: { tool: 'join', args: {} }, resultHash: 'original' }, sources);
+    return { coverage: { status: 'complete', manifestHash: version.manifestHash }, heads: [join], artifacts: [] };
+  } }, { task: 'independent inputs' });
+  if (prepared.status !== 'prepared') throw new Error('Preparation failed');
+  const roots: string[] = [];
+  const result = await validateWorldCandidate(world, prepared.candidate, { ...adapter, replay: async (entry, root) => {
+    roots.push(root);
+    if (entry.call.tool === 'first') {
+      // A divergent replay must never contaminate the independent branch's fork.
+      await fs.writeFile(path.join(root, 'output'), 'probe only');
+      return 'changed';
+    }
+    await expect(fs.stat(path.join(root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
+    if (entry.call.tool === 'second') {
+      if (later === 'failed') throw new Error('independent tool unavailable');
+      if (later === 'changed') return 'also changed';
+    }
+    return 'original';
+  } }, 'selected_nodes');
+  expect(result.scope).toBe('selected_nodes');
+  expect(new Set(roots).size).toBe(4);
+  if (later === 'failed') {
+    expect(result).toMatchObject({ status: 'failed', plan: null, reasons: ['independent tool unavailable'] });
+  } else {
+    expect(result.status).toBe('changed');
+    expect(result.plan?.unaffected.map(node => node.seq)).toEqual(later === 'changed' ? [sources[2]] : sources.slice(1));
+    expect(result.plan?.invalidated).toHaveLength(later === 'changed' ? 3 : 2);
+  }
+  await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
+  const events = world.domain.getStore().getJournalEvents('world');
+  const root = world.state.root;
+  world.close();
+  world = await openWorldState({ root, statePath: path.join(temp, 'state'), adapter });
+  expect(readWorldCandidateValidation(world, result.ref)).toEqual(result);
+  expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
+});

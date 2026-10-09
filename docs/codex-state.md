@@ -1,7 +1,7 @@
 # xioflow 交接摘要
 - 定位：AI agent 的因果可验证世界状态与执行操作系统；docs/NORTH_STAR.md 最高优先，按 M1→M2→M3→M4 推进。
 - 当前里程碑：M2（单世界正确性闭环）未完成；M1 契约设计齐备，统一公开入口仍未实现；M3/M4未完成。
-- 下一轮最小切片：为changed增量refresh补齐首差之外的复用证据校验，再接既有修复准备；保持异常阻断，不扩大公开入口。
+- 下一轮最小切片：将selected_nodes验证接到既有修复准备，固定实际修复基线并重验复用节点/物化产物；保持异常阻断，不扩大公开入口。
 - M2 完成标准仍缺：统一句柄、增量refresh、explain/strict commit、独立key、close资源记录；六类场景各10次、独立oracle、全部不变式及重开解释/提交身份验收。
 - M1：docs/world-contract.md 冻结六入口状态表、适配器覆盖和六类失败/重试/资源归属；src/world/contract.ts 共享非公开契约，spec重导出，types测试随typecheck检查。
 - 基础能力：WorkspaceTransactions读写集、观测重放OCC、同基线隔离投机；snapshot/fork/rollback、追加journal。
@@ -44,4 +44,7 @@
 - 新候选重开后可重验，再次改输入检出changed；尚无自动策略、重算幂等、断点续跑或统一资源清理，不新增公开入口。
 - 本轮内部refreshWorldCandidate组合validate/recompute：matched复用原身份，unknown拒绝或重算，changed保守全量；工具/产物异常不触发重算。
 - refresh保存原候选、验证引用、路径和结果；readWorldRefresh重开只读查询。仍无增量复用、新matched版本、公开句柄或中断自动续跑。
-- 本轮验证：基线875通过/7跳过；新增9项及pnpm typecheck通过；最终全量复验待完成。
+- 本轮selected_nodes验证按持久候选各节点祖先建分支，同一当前快照隔离重放；独立变化汇入闭包，独立异常阻断且plan=null。
+- refresh使用selected_nodes；默认prefix保留，报告持久scope且旧报告按prefix读。计划仅属于探测基线，changed仍全量重算；无增量收益承诺。
+- 本轮新增4项验证多源变化/首差后异常/隔离/重开及refresh阻断；typecheck与相关22项通过，全量结果提交前回填。
+- 本轮环境初始缺cc，基线796通过/7跳过、2套件加载失败；已安装gcc/libc6-dev，全量复验中。

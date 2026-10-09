@@ -122,3 +122,21 @@ it('rejects foreign references and adapter identity before recording a refresh',
   expect(world.domain.getStore().getJournalEvents('world')).toEqual(events);
   expect(calls).toBe(1);
 });
+
+it('blocks recomputation when an independent tool fails after a changed observation', async () => {
+  const prepared = await prepareWorldStep(world, { execute: async ({ record, version }) => {
+    const a = await record({ kind: 'observe', call: { tool: 'a', args: {} }, resultHash: 'old' }, []);
+    const b = await record({ kind: 'observe', call: { tool: 'b', args: {} }, resultHash: 'old' }, []);
+    const join = await record({ kind: 'observe', call: { tool: 'join', args: {} }, resultHash: 'old' }, [a, b]);
+    return { coverage: { status: 'complete', manifestHash: version.manifestHash }, heads: [join], artifacts: [] };
+  } }, { task: 'copy' });
+  if (prepared.status !== 'prepared') throw new Error('Preparation failed');
+  const report = await refreshWorldCandidate(world, prepared.candidate, { ...adapter, replay: async entry => {
+    if (entry.call.tool === 'b') throw new Error('later tool failed');
+    return 'changed';
+  } }, agent, { onUnknown: 'recompute' });
+  expect(report).toMatchObject({ strategy: 'failed', result: { status: 'failed', reason: 'later tool failed' } });
+  expect(calls).toBe(0);
+  expect(readWorldRefresh(world, report.ref)).toEqual(report);
+  await expect(fs.stat(path.join(world.state.root, 'output'))).rejects.toMatchObject({ code: 'ENOENT' });
+});

@@ -44,7 +44,7 @@ export async function refreshWorldCandidate(world: WorldState, ref: WorldRef,
   let strategy: WorldRefreshReport['strategy'] = 'failed';
   let result: PreparationResult;
   try {
-    const probe = await validateWorldCandidate(world, previous, adapter);
+    const probe = await validateWorldCandidate(world, previous, adapter, 'selected_nodes');
     validation = probe.ref;
     if (probe.status === 'failed') throw new Error(probe.reasons.join('; ') || 'Validation failed');
     if (probe.status === 'matched') {
@@ -54,8 +54,8 @@ export async function refreshWorldCandidate(world: WorldState, ref: WorldRef,
       strategy = 'reject';
       result = { status: 'unknown', candidate, reasons: probe.reasons };
     } else {
-      // A first-divergence probe does not prove the validity of the remaining nodes.
-      // Until incremental reuse has complete evidence, regenerate the entire task.
+      // Evidence is complete for the probed baseline, not a later repair baseline.
+      // Until repair preparation revalidates reuse, regenerate the entire task.
       strategy = 'full';
       append('WORLD_REFRESH_RECOMPUTING', { validation, cause: probe.status });
       result = await recomputeWorldCandidate(world, previous, agent);
