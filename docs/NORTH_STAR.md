@@ -1,7 +1,7 @@
 # xioflow 北极星：让 agent 的成果跟得上变化的世界
 
 > 本文定义目标形态与产品取舍，不是现有 API 承诺。
-> 判断仅依据 `docs/VISION.md`、`docs/codex-state.md`、`ls src` 与最近 60 条提交；未审阅源码、未运行测试。
+> 本轮依据目录、最近 80 条提交及愿景、因果、基准文档作判断；未审阅源码、未运行测试。下列 API 与指标是设计和验收目标，不代表已实现或已达标。
 
 ## 1. 第一性原理：缺少的是成果有效性的执行契约
 
@@ -11,11 +11,34 @@ Agent 的推理和工具调用依赖一个会变化的世界；保存对话、�
 
 ## 2. 理想形态：可嵌入的执行内核
 
-以版本化工作区、因果证据与提交协议为中心；先交付 TypeScript 库和演示 CLI，再按真实需求扩展部署形态。
+**首发 TypeScript 库**，嵌入现有 agent 宿主：模型、工具与上下文已经由宿主管理，同进程接入最容易明确证据和资源的责任归属，也便于逐步替换现有组合入口。
+
+CLI 随库提供可复现演示和历史解释，复用同一契约；守护进程延后，直到跨进程共享世界的需求足以承担认证、租约和远程故障语义的成本。
 
 ### 最小接入契约
 
-API 应围绕打开世界、执行、刷新、解释、提交形成一个闭环；示例与集成方式在此收敛。
+以下是拟议 API；`fileAdapter` 提供文件覆盖、观测与验收契约，`agent` 接入宿主模型与工具，示例仓库已有报价输入。
+
+```ts
+import { openWorld } from '@xioflow/kernel';
+import { writeFile } from 'node:fs/promises';
+import { fileAdapter, agent } from './host.js';
+const world = await openWorld({ root: './repo', adapter: fileAdapter });
+try {
+  const step = await world.runAgentStep(agent, { task: '按 pricing.json 生成 quote.md' });
+  await writeFile('./repo/pricing.json', '{"unitPrice":120}\n');
+  const refreshed = await world.refresh(step, { onUnknown: 'recompute' });
+  console.log(await world.explain(refreshed));
+  const result = await world.commit(refreshed, { validation: 'strict', key: refreshed.id });
+  if (result.status !== 'committed') throw new Error(result.reason);
+} finally { await world.close(); }
+```
+
+`runAgentStep` 在隔离分支记录观测、上下文依赖与输出；外部写入制造真实扰动。`refresh` 只准备候选，不发布；`explain` 返回变化源、依赖路径、复用与重算节点。
+
+`commit` 重验当前证据、输出和宿主验收，并以 OCC 发布；刷新后再次变化必须冲突。证据未知时可完整重算，仍无法建立覆盖则拒绝提交；同一 key 重试返回同一发布结果。
+
+世界句柄持有临时事务与快照，`close` 清理已确定终态的资源；提交结果未知时保留恢复证据并返回可查询身份，不把清理成功当作提交成功。
 
 ## 3. 核心抽象与不可破坏的不变式
 
