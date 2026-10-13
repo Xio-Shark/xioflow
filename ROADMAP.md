@@ -1,5 +1,7 @@
 # xioflow 路线图与优化流程
 
+> **2026-10-13 方向裁决（晚，优先于当日早间条目）**：①Rust 核心、语言绑定与 daemon/多客户端（原 P2、P4，及 P1 中的 Rust 夹具）**放弃**，归档理由与复活条件见[附录 A](#附录-a已放弃方向2026-10-13)；②P1 拆分：**P1a（协议 JSON Schema、schema v1 迁移、黑盒 conformance、TS stdio 适配器、英文规范补齐）解冻进主线**——契约是语言无关性的期权，砍实现不砍可移植契约；P1b（Rust 版 xf-fixture）删除，夹具沿用现有 TS 实现（`audit/fixture/xf-fixture.mjs`）；③AgentRuntime 以「调度 vs 策略」线为边界（ARCHITECTURE 裁决 6 修订）生长为轻量调度框架：准入/预算/取消/生命周期/checkpoint/证据门控可长，模型协议/提示词/任务分解/验收/业务编排永不进入内核；④仲裁范围如实收窄为单宿主进程（ARCHITECTURE 裁决 3 修订）：跨进程接入同一工作区显式失败（`DomainLockedError`），worktree 分域是参考模式。
+
 > **2026-10-13 主线调整：执行内核作为共同基石。** 用户要求以创新与实用价值为目标，优先建立多个上层产品可以共同依赖的内核。评价依据是契约正确性、隔离、故障恢复、可嵌入性和长期可维护性。下面保留的历史冻结、采用门和实验安排，不覆盖本条方向。
 
 ## 当前主线与出口条件
@@ -10,11 +12,11 @@
 | 可移植契约 | 执行、停止、恢复、资源、证据的版本化边界；完整结果判别类型与输入校验；平台驱动遵守同一组行为契约 | 黑盒夹具可以检验不同实现，类型完整表达 indeterminate，能力差异可观测，旧库和旧证据迁移有明确结果；冻结只发生在实际验证之后 |
 | 资源生命周期 | 有界排队与内存、journal 保留和压缩、产物回收、完整 shutdown | 持续负载和故障下所有工作均有归属；回收不破坏恢复证据；测量宿主响应性和资源增长，保留失败样本 |
 | 可验证恢复 | 在变化的工作区中检验依赖、选择有效恢复边界、重建上下文与文件状态 | 正确结果与其他参与者的改动均保留；不完整或非确定性证据不能放行；与完整重跑和普通检查点恢复作正确性对照 |
-| 多宿主接入 | daemon 与语言绑定消费已验证的契约 | 独立宿主接入无需复制监督、持久化和隔离实现；跨客户端失联、取消和恢复仍符合相同契约 |
+| 多宿主接入（嵌入式） | 独立宿主以 Node.js 嵌入包消费已验证的契约 | 独立宿主接入无需复制监督、持久化和隔离实现；同进程多入口共享仲裁（契约 #64/#65）；跨进程接入同一工作区显式失败（裁决 3） |
 
-本轮加固复用现有 TypeScript 内核、SQLite journal 和平台驱动。创新集中于可验证的执行与恢复机制；模型协议、提示词、业务工具和界面由上层产品提供。Rust、daemon 和更多绑定按契约与验证的成熟度推进，不以新增模块数量作为进展。
+本轮加固复用现有 TypeScript 内核、SQLite journal 和平台驱动。创新集中于可验证的执行与恢复机制；模型协议、提示词、业务工具和界面由上层产品提供。Rust、daemon 和更多绑定已随 2026-10-13 方向裁决放弃（附录 A）；不以新增模块数量作为进展。
 
-> **当前接入入口**：[当前实现契约](spec/current-contract.md) 区分已实现保证、实验性 AgentRuntime 和未来目标。下面带日期的路线裁决是历史记录，不代表对应功能均已发布。
+> **当前接入入口**：[当前实现契约](spec/current-contract.md) 区分已实现保证、实验性 AgentRuntime 和已放弃的 Rust/daemon 方向。下面带日期的路线裁决是历史记录，不代表对应功能均已发布。
 
 > **2026-10-05 作用域与资源边界**：`parentId` 定义 fail-fast 任务树，父任务通过 `waiting` 等待子任务；Run 共享 step/agent 预算持久化，命令在分配排队对象前限流。可选 `workspaceVersion` 拦截校验期间变化的依据，不承诺执行期间的文件系统隔离。`scripts/agent-soak.mjs` 提供取消、排队、写盘故障与 SIGKILL 的持续负载，报告内存、journal 和事件循环延迟。全天稳定性、journal 压缩、token/费用核算尚无完成声明。
 
@@ -24,7 +26,7 @@
 
 > **2026-10-01 主线明确**：目标是由内核持有 agent 生命周期、任务归属和工具执行权的多 agent 运行方式。创新假设收紧为「工作区变化后的观测有效性驱动调度与局部恢复」，不将通用调度、checkpoint 或 Linux 式命名当作创新。先复用现有事务观测重放做可复现的前缀恢复实验，再接入一个现有 agent runner；不先扩展完整框架。[已有方案、实验与边界](audit/observation/RECOVERY.md)。此条优先于下面保留的历史方向说明。
 
-> 产品目标与协议以 [`ARCHITECTURE.md`](./ARCHITECTURE.md) 为准（§0.0 产品目标、§0.2 五项架构裁决、§7 契约清单）。本文件是**执行计划与「规范 ↔ 当前实现」差异的唯一来源**。
+> 产品目标与协议以 [`ARCHITECTURE.md`](./ARCHITECTURE.md) 为准（§0.0 产品目标、§0.2 九项架构裁决、§7 契约清单）。本文件是**执行计划与「规范 ↔ 当前实现」差异的唯一来源**。
 > 不设日期，按出口条件推进；每个阶段的出口条件满足之前，不启动依赖它的阶段。
 >
 > **2026-09-30 方向调整**：项目目标从「外部采用」改为「创新优先」，产出单位是可复现的结果（一个数字、一张表、一组复现脚本），不是功能或版本号。当前主线是四件事：对现有 agent harness 的执行层做故障注入审计、工具结果未知时的模型行为实验、观测级校验的工作区事务、观测依赖的证据新鲜度。主线结束或另行决定之前，P1（协议 JSON Schema、schema v1 迁移、conformance 套件迁移、Rust 版 `xf-fixture`）、P2（Rust 核心、Python 绑定、Windows 驱动）与 P4（daemon 与多客户端）冻结，§7 的采用门不再决定先做什么。以下各节保持原样，作为冻结前的计划记录。
@@ -43,22 +45,27 @@
 
 ## 1. 阶段总览
 
+> **2026-10-13 方向裁决后的状态**：下表为 2026-09-30 冻结前的历史计划记录。P1 拆分为 P1a（解冻进主线，见 §3）与 P1b（删除）；P2/P4 归档（附录 A）；P3 主体已由 TS 实现吸收（0.3.0–0.7.0），剩余出口（覆盖矩阵、契约提升）并入当前主线。现行主线以上方「当前主线与出口条件」表为准。
+
 | 阶段 | 目标 | 关键产出 | 出口条件 | 依赖 |
 |---|---|---|---|---|
 | **P0 止血** | 修掉 0.1.x 上已被证实的诚实性与挂起缺陷，保护 xiocode 现网用户 | Trusted Publishing 跑通；`0.1.5`；`0.2.0` | §2.4 | — |
 | **0.3.0 幂等执行** | opId 域内唯一、幂等重放与审计事件（契约 #45–#49） | `quickRun`、durable 引擎重放套件（Temporal/LangGraph）、设计伙伴切入 | 0.3.0 发布与采用门判定 | P0 出口（0.2.0 发布） |
 | **service 监督** | 长驻子进程（如 MCP stdio server）生命周期受管与重启（契约 #50–#52） | `kind: 'service'`、stdio stream 模式、readiness 探测、声明式重启 | 通过契约 #50–#52 | P0 出口（0.2.0 发布） |
-| **P1 协议与契约冻结 v1** | 把 ABI 从 TypeScript 代码里剥离成语言无关的规范 | JSON Schema、schema v1 与迁移、黑盒 conformance、`xf-fixture` | §3.3 | P0 + 采用门放行（§7，D11） |
-| **P2 Rust 核心 MVP（嵌入模式）** | 规范实现落地，三平台可用 | Rust crates、Node / Python 绑定、`@xioflow/kernel` 1.0 | §4.4 | P1 |
-| **P3 快照回滚与写入限制** | 兑现“进程 + 文件系统变更”的管辖范围 | `git-shadow` 快照驱动、materialize 分叉、capability、写入限制驱动 | §5.3 | P2（TS 实现先行，D21） |
-| **P4 daemon 与多客户端** | 兑现“一个工作区一个仲裁者” | `xioflowd`、客户端模式绑定、service client_lost | §6.3 | P2（与 P3 可并行） |
+| **P1a 协议与契约冻结 v1（解冻）** | 把契约从 TypeScript 代码里剥离成语言无关的规范 | JSON Schema、schema v1 与迁移、黑盒 conformance（TS 夹具）、TS stdio 适配器、英文规范补齐 | §3.3 | 基础加固出口 |
+| **P1b Rust 版 xf-fixture** | —— | **已删除（2026-10-13）**，随 P2 归档（附录 A） | — | — |
+| **P2 Rust 核心 MVP（嵌入模式）** | —— | **已放弃（2026-10-13）**，见附录 A | — | — |
+| **P3 快照回滚与写入限制**（主体已随 0.3.0–0.7.0 在 TS 实现） | 兑现“进程 + 文件系统变更”的管辖范围 | `git-shadow` 快照驱动、materialize 分叉、capability、写入限制驱动 | §5.3 | — |
+| **P4 daemon 与多客户端** | —— | **已放弃（2026-10-13）**，见附录 A | — | — |
 | **P5 生态与采用** | 让第三方框架真正接入 | 设计伙伴、集成指南、英文规范 | §7 | 从 P0 出口起并行（采用门在 P1 之前判定） |
 
-关键路径与并行：产品侧关键路径为 **P0 → 观察期（≥5工作日） → 2.0-cut**；内核仓推进 **P0 → 采用门 → P1 → P2 → P3 / P4**。P0 出口（0.2.0 发布并在 xiocode 完成适配）后，产品侧启动 5 工作日真实观察期；内核仓在同一窗口做 0.3.0 接入体验并外联设计伙伴，观察期结束时按 §7 判定采用门，放行才启动 P1。P3 / P4 的阶段依赖将随 D21（新原语先在 TS 落地）在下一次规范修订中调整。
+关键路径与并行（历史记录，2026-09-30）：产品侧关键路径为 **P0 → 观察期（≥5工作日） → 2.0-cut**；内核仓推进 **P0 → 采用门 → P1 → P2 → P3 / P4**。2026-10-13 方向裁决后，P2/P4 出局，现行主线以「当前主线与出口条件」表为准。
 
 ---
 
 ## 2. P0 — 0.1.x 止血
+
+> **状态（2026-10-13 核对）**：本阶段已完成——0.1.5 之后经 tag 触发的 `release.yml` 连续发布（机制为 Trusted Publishing，见 CHANGELOG 发布说明），npm `dist-tags.latest` 已到 0.7.0（与 xiocode 锁定版本一致）。2026-10-13 复查备注：`npm audit signatures` 显示 0.7.0 带 registry 签名，但本地 truststore 缺对应公钥、无法本地完成验证；provenance 与「要求 2FA、禁止 token 发布」的包设置需在 npmjs 侧确认（见任务清单 P0-4）。以下正文保留为历史记录。
 
 xiocode 默认走内核路径，下列缺陷此刻就在用户机器上发生。P0 只在 TypeScript 实现上修，不引入新架构。
 
@@ -120,21 +127,23 @@ xiocode 侧待办（已关闭，2026-09-29）：`kernel-adapter.ts` 已由 `kern
 
 ---
 
-## 3. P1 — 协议与契约冻结 v1
+## 3. P1a — 协议与契约冻结 v1（2026-10-13 解冻，脱离 Rust 方向）
+
+> 原第 3 节的「协议 JSON Schema、schema v1 迁移、黑盒 conformance、TS stdio 适配器、英文规范」保留为 P1a 主线；原「Rust 版 xf-fixture」行删除（P1b，附录 A）。
 
 ### 3.1 产出
 | 产出 | 位置 | 说明 |
 |---|---|---|
 | 协议 JSON Schema | `spec/protocol/v1/` | §2 / §4 / §5 全部消息形状的机器可读定义；ARCHITECTURE 保持为叙述性规范 |
 | 数据库 schema v1 | `spec/schema/` | `domain.db` DDL、`user_version = 1`、从 0.1.x（`user_version = 0`）的迁移；含 `snapshots` 与裁决记录表 |
-| 夹具程序 `xf-fixture` | `conformance/fixture/`（Rust） | `spawn-tree`、`escape-setsid`、`flood-output`、`hold-pipe-after-exit`、`ignore-signals`、`write-files`；它也是第一个 Rust 产物，用来提前打通 Rust 工具链与三平台构建 |
-| 黑盒 conformance 套件 | `conformance/harness/` | 经 stdio 上的 §5 协议驱动被测实现；迁移现有 18 项 + 仓内僵尸用例 + P0 新增条目；能力门控条目报告 `unsupported` |
+| 夹具程序 `xf-fixture` | 现有 TS 实现（`audit/fixture/xf-fixture.mjs`）提升为 conformance 夹具 | `spawn-tree`、`escape-setsid`、`flood-output`、`hold-pipe-after-exit`、`ignore-signals`、`write-files`；Rust 版夹具随 P1b 删除 |
+| 黑盒 conformance 套件 | `conformance/harness/` | 经 stdio 上的 §5 协议驱动被测实现；迁移现有共享套件条目 + 仓内僵尸用例；能力门控条目报告 `unsupported` |
 | TypeScript stdio 适配器 | `adapters/ts-stdio/` | 让 0.x 参考实现以协议形式接受 conformance 测试 |
 | 停止结果三态 | TypeScript 实现 | `StopProcessResult.stopped` 从布尔改为三态，与 §4.1 对齐（已在 0.2.0 B4 提前落地收口，包含 `confirmed_stopped` \| `not_stopped` \| `cannot_determine`） |
 | 英文规范 | `ARCHITECTURE.en.md`（至少 §0、§3、§5、§7） | 框架作者以英文读者为主 |
 
 ### 3.2 规则
-- 协议在 P1 结束时标记为 `protocol v1.0.0-rc`，P2 出口时转为 `v1.0.0` 正式版；此后破坏性变更只能进入 v2。
+- 协议在 P1a 出口时标记为 `protocol v1.0.0-rc`；正式版转正条件以 0.x→1.0 出口判据为准（判据另行成文；原「P2 出口时转正」随 P2 归档作废）。
 - 共享套件原编号（S1–S18）在迁移后作废，统一使用 §7.2 编号。
 
 ### 3.3 出口条件
@@ -144,7 +153,9 @@ xiocode 侧待办（已关闭，2026-09-29）：`kernel-adapter.ts` 已由 `kern
 
 ---
 
-## 4. P2 — Rust 核心 MVP（嵌入模式）
+## 4. P2 — Rust 核心 MVP（已放弃，见附录 A）
+
+> **2026-10-13 方向裁决归档**：单实现聚焦，TypeScript 嵌入式核心已兑现全部已验证契约，跨语言需求无真实信号；复活条件见[附录 A](#附录-a已放弃方向2026-10-13)。以下保留为历史计划记录。
 
 ### 4.1 Crate 划分
 | Crate / 包 | 职责 |
@@ -190,7 +201,9 @@ xiocode 侧待办（已关闭，2026-09-29）：`kernel-adapter.ts` 已由 `kern
 
 ---
 
-## 6. P4 — daemon 与多客户端
+## 6. P4 — daemon 与多客户端（已放弃，见附录 A）
+
+> **2026-10-13 方向裁决归档**：跨进程仲裁以 `DomainLockedError` 显式失败 + worktree 分域模式替代（ARCHITECTURE 裁决 3 修订）；契约 #33–#36 状态改为「已归档」。以下保留为历史计划记录。
 
 ### 6.1 产出
 - `xioflowd`：Unix domain socket / named pipe、JSON-RPC 2.0、握手协商、对端凭据校验、Observer 只读连接、`client_lost` 处理、启动时自动恢复。service 的 `client_lost` 停止流水线在 daemon 模式补齐。
@@ -214,13 +227,15 @@ xiocode 侧待办（已关闭，2026-09-29）：`kernel-adapter.ts` 已由 `kern
 - **反馈闭环**：设计伙伴报告的每个 bug 先落成 §7.2 契约条目。
 - **观测指标**：进行中 / 已合并的外部集成数；通过 conformance 的实现数；来自外部的 issue 数。
 - **低成本接入面（2026-09-29 落地）**：`xioflow mcp` 让任何 MCP 客户端零集成代码使用内核（`run_command` / 事务 / 快照等 8 个工具，官方 SDK 互通测试），`xioflow otel-export` 把 journal 接入既有可观测性栈。二者降低的是「试用」门槛，不替代采用门：对方仓库里的分支或 PR 仍是唯一判据。
-- **止损线（采用门，D11：前移到 P1 之前）**：观察期结束时判定。至少 1 个外部项目进入实际集成（对方仓库里有分支或 PR）⇒ 放行 P1。否则收缩为“xiocode 专用底座”：暂停 P1、Rust、Python 绑定与 daemon；只按 xiocode 的真实需求做功能（TS 版 `git-shadow` 检查点、service 监督）。
+- **止损线（采用门，D11：前移到 P1 之前）（历史记录）**：观察期结束时判定。至少 1 个外部项目进入实际集成（对方仓库里有分支或 PR）⇒ 放行 P1。否则收缩为“xiocode 专用底座”。（2026-10-13 注：Rust、Python 绑定与 daemon 已放弃（附录 A），止损动作相应简化为「暂停 P1a 与生态投入」。）
 
 ---
 
 ## 8. 横切事项
 
 ### 8.1 分发渠道（D1：registry 只经 Trusted Publishing 发布，不使用任何长期 token）
+
+> 表中「P2 起」的行（Rust 二进制、Python 绑定、Rust crate）已随 2026-10-13 方向裁决放弃（附录 A），保留为历史分发计划。
 
 - **库**走各自语言的 registry，且只允许 CI 通过 OIDC Trusted Publishing 发布，本地不保留发包 token；
 - **可执行程序**走 GitHub Release + curl 安装脚本 + Homebrew tap。brew / curl 只适合可执行程序，不能替代库的安装方式；
@@ -250,11 +265,11 @@ xiocode 侧待办（已关闭，2026-09-29）：`kernel-adapter.ts` 已由 `kern
 |---|---|---|---|
 | D1 | 分发渠道 | **已决定**：库经 npm / PyPI Trusted Publishing 发布，不用长期 token；可执行程序走 GitHub Release + curl + Homebrew tap（§8.1） | 已定 |
 | D2 | 是否接受 `0.2.0` 的行为变更（取消抛错、`releaseResources` 下线、能力字段改名） | **已接受** | 已定 |
-| D3 | conformance 套件的实现语言 | 套件先用 TypeScript（复用现有 18 项），夹具用 Rust | P1 开始前 |
-| D4 | 协议编码 | JSON-RPC 2.0（零依赖、各语言易接入） | P1 |
-| D5 | 是否先占位 PyPI 包名与 crate 名（npm 已有） | 建议尽早占位 | P1 |
-| D6 | Windows 是否在 P2 即支持 | 是；缺 Windows 会直接阻碍框架作者采用 | P2 |
-| D7 | TypeScript 实现的生命周期 | P2 出口后冻结，一个发行周期后弃用 | P2 |
+| D3 | conformance 套件的实现语言 | **已定（2026-10-13 修订）**：套件与夹具均用 TypeScript（Rust 夹具随 P1b 删除） | 已定 |
+| D4 | 协议编码 | JSON-RPC 2.0（零依赖、各语言易接入） | P1a |
+| D5 | 是否先占位 PyPI 包名与 crate 名（npm 已有） | **已放弃（2026-10-13，附录 A）**：绑定随 P2 归档 | 已定 |
+| D6 | Windows 是否在 P2 即支持 | **已放弃（2026-10-13，附录 A）**：Job Object 驱动依赖 Rust 核心路线；WSL2 定位待实测（见任务清单 P2-1） | 已定 |
+| D7 | TypeScript 实现的生命周期 | **作废（2026-10-13）**：TS 是唯一实现，生命周期问题随 P2 放弃消失 | 已定 |
 | D8 | 设计伙伴名单 | 由你决定 | P1 |
 | D9 | Trusted Publishing 跑通后，是否在 npm 包设置中开启“要求 2FA 并禁止 token 发布” | 开启；彻底关闭 token 发包路径 | P0（0.1.5 发布成功后） |
 | D11 | 采用门的位置 | **已决定**：P1 之前（§7） | 已定 |
@@ -266,7 +281,7 @@ xiocode 侧待办（已关闭，2026-09-29）：`kernel-adapter.ts` 已由 `kern
 | D18 | capability 是否签名 | **已决定**：嵌入模式只做结构校验、不签名；daemon 模式再议 | 已定（同上） |
 | D19 | service 重启策略归属 | **已决定**：内核提供最小声明式规格 `never \| on-failure(maxRestarts, backoffMs)` | 已定（同上） |
 | D20 | 门控后续任务是否提前建立 | **已决定**：提前建为 `todo`，门控条件随任务记录 | 已定 |
-| D21 | 新原语的实现语言 | **已决定**：先在 TS 参考实现落地；Rust 仍由 Windows / Python / 亚秒级身份需求驱动 | 已定（§1 阶段依赖随下一次修订调整） |
+| D21 | 新原语的实现语言 | **已修订（2026-10-13）**：新原语一律先在 TS 落地；原「Rust 由 Windows / Python / 亚秒级身份需求驱动」随 P2 放弃（附录 A） | 已定 |
 | D22 | 发行版取消 Run 的公开出口 | **已决定**：0.2.0 新增 `reportRunCancelled(runId, reason)`（§3.3） | 已定 |
 | D23 | `indeterminate` 的用户出口形式（xiocode） | **已决定**：CLI 子命令 `xio kernel adjudicate <opId>` | 已定 |
 
@@ -274,36 +289,81 @@ xiocode 侧待办（已关闭，2026-09-29）：`kernel-adapter.ts` 已由 `kern
 
 ## 10. 实现状态对照（ARCHITECTURE → 0.1.x 现状 → 落地阶段）
 
+> **历史对照快照**：「现状」列为 0.1.x 时期的记录，现行状态以 `CHANGELOG.md` 与 ARCHITECTURE §7.2 状态列为准；「落地阶段」列中引用 P2/P4 的条目已随 2026-10-13 方向裁决归档（附录 A）。
+
 | 规范条目 | 0.1.x 现状 | 落地阶段 |
 |---|---|---|
-| §0.2 裁决 1 所有权锁：OS 排他锁 | `O_EXCL` 建文件 + PID 存活判断 + owners 表租约 | P0（修判定）/ P2（`flock`） |
+| §0.2 裁决 1 所有权锁：OS 排他锁 | `O_EXCL` 建文件 + PID 存活判断 + owners 表租约 | P0（修判定）已完成；`flock` 随 P2 放弃 |
 | §0.2 裁决 1 epoch 栅栏 | 已实现：`BEGIN IMMEDIATE` 事务内读后比对 | — |
-| §0.2 裁决 1 只读 Observer | 未实现 | P2（嵌入只读 API）/ P4（Observer 连接） |
-| §0.2 裁决 3 双部署形态 | 仅嵌入 | P2 / P4 |
-| §0.2 裁决 4 回滚诚实性 | 未实现 | P3 |
-| §0.2 裁决 5 ABI（协议 / schema / 契约） | 仅 TypeScript API | P1 |
-| §1.2 schema 版本与迁移 | 无 `user_version` | P1 |
-| §3.1 两段式受控启动 | 已实现（POSIX 门管道跳板 `gatedSpawn: true`） | 0.2.0（B4）/ P2（Rust pre_exec） |
+| §0.2 裁决 1 只读 Observer | 未实现 | 嵌入只读 API：未排期；daemon Observer 连接已放弃 |
+| §0.2 裁决 3 部署形态（已修订） | 嵌入式单实现即产品 | —（daemon 已放弃，见附录 A） |
+| §0.2 裁决 4 回滚诚实性 | 未实现 | 已由 TS 实现吸收（0.5.x–0.6.x，原 P3） |
+| §0.2 裁决 5 ABI（协议 / schema / 契约） | 仅 TypeScript API | P1a |
+| §1.2 schema 版本与迁移 | 无 `user_version` | P1a（现状见 §7.2 状态列） |
+| §3.1 两段式受控启动 | 已实现（POSIX 门管道跳板 `gatedSpawn: true`） | 0.2.0（B4） |
 | §3.2 第 5 步 Run 状态收敛 | 已实现 | 0.2.0（B2） |
-| §3.4 后置条件恢复 | 未实现，`inputFingerprint` 未被使用 | P3（经快照指纹） |
-| §3.5 快照与回滚 | 未实现 | P3 |
+| §3.4 后置条件恢复 | 未实现，`inputFingerprint` 未被使用 | 已由 TS 实现吸收（观测重放/读集证据，原 P3） |
+| §3.5 快照与回滚 | 未实现 | 已由 TS 实现吸收（0.3.x–0.6.x，原 P3） |
 | §0.2 裁决 4 / §3.5 被忽略文件的覆盖声明（`non_ignored`、清单、`coverageBasis`） | 已实现（契约 #56 收紧、#57 新增） | 0.5.x（见 CHANGELOG） |
 | §3.6 人工裁决 | 已实现（`adjudicate` 唯一审计出口） | 0.2.0（B2） |
 | §4.1 `StopProcessResult` 三态 | 已实现（`confirmed_stopped \| not_stopped \| cannot_determine`） | 0.2.0（B4） |
-| §4.1.1 身份核验 | 已实现（OS 启动时间 + bootId） | 0.2.0（B4）/ P2 |
+| §4.1.1 身份核验 | 已实现（OS 启动时间 + bootId） | 0.2.0（B4） |
 | §4.2 第 5 条 有界等待 | 已实现（超时等待 `onRootExit` 有界排空） | 0.2.0（B1） |
 | §4.2 第 6 条 停止请求必须有对象 | 已实现（抛 `OperationNotActiveError`） | 0.2.0（B1） |
 | §4.3 Head + Tail | 已实现（Head 75% + Tail 25% 字符安全截断） | 0.2.0（B3） |
 | §4.3 转储失败可见 | 已实现（`spillError` + 失败不返引用） | 0.2.0（B3） |
 | §4.3 产物回收 `pruneArtifacts` | 已实现（自动清理未截断转储 + 域级 prune） | 0.2.0（B3） |
 | §4.4.3 计数口径 / FIFO / 预算持久化 | 已实现（独立并发计数 + FIFO 严格排队） | 0.2.0（B2） |
-| §4.4.3 域级内存 / 输出总额度 | 未实现 | P2（H 等级） |
+| §4.4.3 域级内存 / 输出总额度 | 未实现 | 主线「资源生命周期」（P2 H 等级已放弃） |
 | §4.4.4 Linux cgroup v2 | 已实现（TS：`CgroupPlatformDriver`，契约 #37、#38；CPU 硬限未实现） | 0.7.0 |
-| §4.4.4 Windows Job Object | 不支持 | P2 |
+| §4.4.4 Windows Job Object | 不支持 | 已放弃（附录 A） |
 | §4.4.5 第 4 条 不阻塞宿主 | 已实现（全域异步采样器，热路径零同步子进程） | 0.2.0（B4） |
-| §5 协议 | 无 | P1（协议 + stdio 适配器）/ P4（daemon） |
-| §7 conformance | 27 项 TypeScript 共享套件（已包含 P0/N 项提升） | 0.2.0 / P1 迁移 |
-| §0.2 裁决 6 / §3.7 op 幂等重放 | 0.2.0 显式拒绝（#40） | 0.3.0（TS 实现）/ P2（Rust） |
-| §0.2 裁决 7 / §3.8 service 监督 | 未实现 | 0.2.0 之后独立批次（TS 实现）/ P2 |
-| §0.2 裁决 8 / §3.5 快照 seq 与分叉 | 未实现 | P3（TS 实现先行） |
-| §0.2 裁决 9 capability 结构校验 | 未实现 | P3（TS 实现先行） |
+| §5 协议 | 无 | P1a（协议 + stdio 适配器）；daemon 部分已放弃 |
+| §7 conformance | 27 项 TypeScript 共享套件（已包含 P0/N 项提升；现行数量见 §7.2） | 0.2.0 / P1a 迁移 |
+| §0.2 裁决 6 / §3.7 op 幂等重放 | 0.2.0 显式拒绝（#40） | 0.3.0（TS 实现） |
+| §0.2 裁决 7 / §3.8 service 监督 | 已实现（S50–S52） | 0.3.x–0.4.x（TS） |
+| §0.2 裁决 8 / §3.5 快照 seq 与分叉 | 主体已实现（TS；契约 #53–#54 提升见 §7.2 状态列） | 0.4.x–0.5.x（TS） |
+| §0.2 裁决 9 capability 结构校验 | 主体已实现（TS `src/capability`；契约 #55 提升见 §7.2 状态列） | 0.5.x（TS） |
+
+---
+
+## 11. ABI v1（1.0）冻结判据
+
+0.x 是「已验证契约的演进期」；1.0 是「ABI 冻结承诺」：此后破坏性变更只能进入 v2。为防止 pre-1.0 无限期化，出口条件如下（每条可判真假；状态行为 2026-10-13 核对，随发布更新）：
+
+| # | 判据 | 当前状态 |
+|---|---|---|
+| 1 | 连续 ≥3 个 minor 无契约语义变更（允许新增契约；不允许修改或删除既有契约的语义） | 未满足（自 0.3.0 幂等重放起契约持续新增，无既有契约语义变更记录，连续计数从下一个 minor 起算） |
+| 2 | ≥2 个独立宿主（xiocode 之外 ≥1）通过 L1+L2 conformance（`core` 级），且其声明在案 | 未满足（xiocode 为唯一在案宿主；plain-node 运行入口已就绪，见 spec/conformance.md） |
+| 3 | schema `user_version` 迁移演练过至少 1 次跨版本升级（含崩溃现场接管） | 未满足（契约 #27 状态为「计划」） |
+| 4 | ABI 三件文档齐备且同步：协议消息形状（ARCHITECTURE §2/§4/§5）、`domain.db` schema、契约清单（§7.2）；EN 规范与中文规范结构同步（P2-3 守护） | 部分满足（契约清单与协议形状已成文；schema v1 属 P1a；双语守护待建） |
+| 5 | 版本策略成文：minor 新增契约的兼容规则、`experimental` 级（AgentRuntime）可随 minor 变更的边界、弃用法从发布到移除的最短窗口 | 未满足（随本文档首次成文，待评审） |
+
+判据 1–4 全部满足即启动 1.0 发布流程；判据 5 不阻塞发布但阻塞「冻结」宣称。任何一条被破坏性变更清零时，在 CHANGELOG 如实记录并重新起算。
+
+---
+
+## 12. 资源生命周期阶段出口判据（稳定性与 journal）
+
+ROADMAP 2026-10-05 注记自认「全天稳定性、journal 压缩、token/费用核算尚无完成声明」。本节把该阶段收敛为可判定真的出口条件。
+
+| # | 判据 | 度量方式 | 当前状态 |
+|---|---|---|---|
+| 1 | 24h soak 无残留：RSS 增长、journal 尺寸增长、事件循环延迟 p99 均不超过阈值 | `XIOFLOW_SOAK_SECONDS=86400 node scripts/agent-soak.mjs`（脚本自带断言：每轮残余进程为 0、逃逸副作用不存在、租约释放、journal 故障注入下幂等；报告输出 `peakRss`、`journalEvents`、`databaseBytes`、`eventLoopP99Ms` 及 20 轮采样） | 进行中：2026-10-13 在 WSL2 Ubuntu-22.04（node driver；cgroup 未委派不可用，如实记录）启动一轮 24h 基线，数据收齐后回填阈值与结论到 audit/results/ 并在本行更新 |
+| 2 | journal 压缩落地且压缩后恢复证据可用：恢复能读旧格式与混合 journal，checkpoint 历史逐条比对通过 | E9（compact v2）：payload 7,579,626 vs 完整态对照 25,457,438 字节（-70.2%），61 个 checkpoint 边界全部恢复验证通过；测试覆盖 legacy 引用、链式恢复、坏事件后重读 | 已满足（E9 数据见 audit/observation/JOURNAL.md；注意完整 checkpoint 仍含历史前缀，长轨迹存储仍可二次增长，通用 delta codec 不在出口内） |
+| 3 | 产物回收在故障下不破坏恢复证据：被未终结 / 未裁决 op 引用的产物不得被 prune | 契约 #44（S27）+ soak 级时长验证（判据 1 同轮覆盖） | 契约已实现；soak 时长验证随判据 1 收齐 |
+| 4 | token/费用核算**不在内核出口内**：按裁决 6「调度 vs 策略」线，计费属宿主职责；内核只提供 usage 计数事实（`getRunUsage`） | — | 已决（2026-10-13）：从出口条件移除，本文档为记录 |
+
+---
+
+## 附录 A：已放弃方向（2026-10-13）
+
+| 方向 | 原计划 | 放弃理由 | 复活条件 |
+|---|---|---|---|
+| P2：Rust 核心 + Node/Python 绑定（§4、ARCHITECTURE §5） | 规范实现落地、三平台、`@xioflow/kernel` 1.0 | 单实现聚焦：solo 维护带宽有限；TS 嵌入式核心已兑现全部已验证契约；跨语言需求无真实信号 | 出现 ≥1 个愿意共同投入的跨语言宿主，或契约冻结后第三方实现自发出现 |
+| P1b：Rust 版 xf-fixture（原 §3.1 一行） | 提前打通 Rust 工具链 | 随 P2 放弃；TS 夹具已存在（`audit/fixture/xf-fixture.mjs`） | 随 P2 |
+| P4：daemon 与多客户端（§6、契约 #33–#36、ARCHITECTURE §5 daemon 语义） | 跨进程兑现「一个工作区一个仲裁者」 | 同 P2；跨进程仲裁以 `DomainLockedError` 显式失败 + worktree 分域模式替代（ARCHITECTURE 裁决 3 修订） | 同 P2，且多框架同工作区并发成为被证实的真实负载 |
+| Windows 原生驱动（Job Object，§4.4.4 / D6） | `CREATE_SUSPENDED` + Job Object | 依赖 Rust 核心路线；无 Windows 宿主需求信号 | 出现真实 Windows 原生宿主需求（WSL2 路径待实测，见任务清单 P2-1） |
+| PyPI / crates.io 占位（D5） | 提前占位包名 | 绑定随 P2 放弃 | 随 P2 |
+
+**放弃 ≠ 删除设计**：ARCHITECTURE §5（协议消息形状与 daemon 语义）与 §4.4.4 的 Windows 材料保留为历史设计记录；契约 #33–#36 状态改为「已归档」。恢复任何一个方向前，先按 §0.5 重扫 open 任务与跨仓事实，并修订 ARCHITECTURE 对应裁决。
