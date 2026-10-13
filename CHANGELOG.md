@@ -4,7 +4,7 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 > Release note: 0.1.0 – 0.1.4 were uploaded from a local npm bypass-2FA token. From the next tag-based release on, `.github/workflows/release.yml` publishes through npm Trusted Publishing (OIDC) with a provenance attestation, so the published artifact is verifiable back to this repository.
 
-## [Unreleased]
+## [0.8.0] - 2026-10-13
 
 ### Fixed
 - Execution, in-flight joins, recorded replay and `quickRun` now expose `ProcessExecutionResult`, including genuine `IndeterminateResult`, without casting unknown outcomes into determinate process results. TypeScript consumers must narrow before reading exit/output fields. Public execution inputs are validated before admission; legal zero limits and opaque IDs remain supported.
