@@ -5,6 +5,15 @@ checkpoints and step budgets inside an `ExecutionDomain`. A distribution supplie
 one cooperative `step` adapter; the kernel does not implement provider protocols,
 prompts or file tools. The E6 adapter reuses xiocode's existing agent loop.
 
+Growth boundary (2026-10-13, ARCHITECTURE §0.2 Decision 6): the kernel owns
+**when and whether** work executes — admission, budgets, cancellation,
+lifecycle, checkpoints, evidence gates and task-tree joins — and may grow into
+a lightweight scheduler on those primitives. **What** the work is and **what
+counts as success** — model protocols, prompts, task decomposition, acceptance
+policy, business orchestration and token/cost accounting — stays with the host
+forever. The runtime remains usable independently of the supervisor's other
+entry points.
+
 An agent can bind an open workspace transaction through `workspace: { txId,
 forkRoot }`. The transaction must belong to its Run, and another nonterminal
 agent cannot share that binding. The binding and checkpoint are persisted in
