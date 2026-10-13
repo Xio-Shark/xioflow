@@ -9,13 +9,23 @@ See `CHANGELOG.md` for the boundary between releases and unreleased local change
 | Execution core | Embedded TypeScript/Node.js, SQLite journal, domain ownership/epoch fencing, intent-first operations, idempotent operation IDs, supervised stop/recovery | Unknown outcomes retain leases and require adjudication; no automatic side-effect replay |
 | Platform drivers | Node process groups; native reaper; Linux delegated cgroup v2 | Capabilities differ by driver; only claim containment/limits the selected driver proves |
 | Workspace transactions | Git-backed forks, read/write conflict detection, optional observation replay and reconstruction | External writers and unobserved reads limit guarantees; transactions are not a universal filesystem lock |
-| Experimental AgentRuntime | Cooperative quanta, task-tree cancellation and joins, persistent checkpoints, shared Run budgets, bounded outstanding managed commands, shutdown barrier | No forced JavaScript preemption, provider/token/cost implementation, detached-work ownership or cross-host scheduling |
+| Experimental AgentRuntime | Cooperative quanta, task-tree cancellation and joins, persistent checkpoints, shared Run budgets, bounded outstanding managed commands, shutdown barrier | No forced JavaScript preemption, provider/token/cost implementation, detached-work ownership or cross-host scheduling; scheduling-versus-policy line (2026-10-13, Decision 6): the kernel owns when/whether execution happens, never what the work is or what counts as acceptance |
 | Evidence-gated dispatch | Optional validator; optional host revision sampled around validation and journaled with dispatch | The host supplies a trustworthy revision and isolation; a dispatch check does not cover subsequent awaits or command resource queues |
 | Distribution | Models, prompts, tools, authorization policy, task decomposition and acceptance | Host adapters consume kernel facts and decide business success |
 
 `AgentRuntime` and the supervisor can be used independently. A host that bypasses
 the managed Agent command context also bypasses its scope and Run admission limits.
 Configure domain concurrency and process resource budgets for those paths.
+
+## Domain ownership across processes
+
+Arbitration is bounded by the host process. One acquired `ExecutionDomain`
+arbitrates all supervisor entry points in that process; a second, separate
+process acquiring the same workspace domain fails with `DomainLockedError`.
+Cross-process arbitration is not provided: the daemon direction was abandoned
+on 2026-10-13 (revival conditions in the roadmap appendix). Hosts that need
+concurrent agents on one repository should split domains per worktree
+(xiocode's worktree isolation is the reference pattern) or serialize access.
 
 `executeProcess` and `quickRun` return `ProcessExecutionResult`, the union of a
 determinate process result and `IndeterminateResult`. TypeScript callers must
@@ -170,13 +180,41 @@ including a completed file side effect).
 
 See [Agent runtime](agent-runtime.md) for API semantics, migration notes and tests.
 
-## Planned, not implemented
+## Abandoned direction, not implemented
 
-The architecture documents retain design material for a Rust core, Python bindings,
-daemon/multi-client mode, a frozen language-neutral protocol and Windows support.
-Those sections do not describe the current package. Linux is an analogy for the
-kernel/distribution boundary, not an equivalence claim about capabilities.
+The architecture documents retain design material for a Rust core, Python
+bindings, daemon/multi-client mode and a frozen language-neutral protocol.
+That direction was **abandoned on 2026-10-13** (single-implementation focus;
+revival conditions in the roadmap appendix); the material remains as a
+historical design record and does not describe the current package. Windows
+support remains unimplemented and is reported honestly (`processGroupKill:
+false`, `descendantEnumeration: 'none'`). Language-neutral contract artifacts
+(JSON Schema, black-box conformance) remain mainline work (P1a). Linux is an
+analogy for the kernel/distribution boundary, not an equivalence claim about
+capabilities.
 
 No journal compaction or domain-wide lifetime memory bound is implemented.
 The [soak harness](../scripts/agent-soak.mjs) measures growth and fault behavior;
-its finite-duration runs are not evidence of indefinite stability.
+its finite-duration runs are not evidence of indefinite stability. (Journal
+compaction v2 landed after this note's original scope: see the E9 measurement
+in `audit/observation/JOURNAL.md`; the soak exit criteria are in ROADMAP §12.)
+
+## Verifying an implementation
+
+The contract suite is framework-agnostic. Under vitest it resolves its API
+from globals; with no test framework at all, the plain-node runner
+(`@xioflow/kernel/testing/plain`) executes the same suite and prints a
+machine-readable JSON report. Run instructions and the compliance tiers
+(`core` / `workspace` / `experimental`) are in [spec/conformance.md](conformance.md).
+A green run names the driver and platform: capability-gated entries (cgroup v2
+hard limits) report `unsupported` rather than passing when the platform does
+not provide them.
+
+## Platform evidence
+
+| Platform | Status | Evidence |
+|---|---|---|
+| Linux (Ubuntu, GitHub CI) | Full contract suite green; cgroup v2 jobs run in a delegated systemd scope and in a container with a private cgroup namespace | `ci.yml` (verify / cgroup jobs) |
+| macOS (GitHub CI) | Full contract suite green; reaper driver builds for darwin | `ci.yml`, `native.yml` |
+| WSL2 (Ubuntu-22.04) | Full contract suite green on the node driver (704 passed / 8 skipped, all cgroup-gated, 2026-10-13, Node 22.23.3); cgroup v2 is mounted but not delegated to the invoking user, so `CgroupPlatformDriver` reports `CgroupUnavailableError` instead of degrading | local run, 2026-10-13 |
+| Windows | Not supported; capabilities reported honestly | driver capability flags |
