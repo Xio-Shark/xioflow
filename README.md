@@ -15,22 +15,41 @@ workspace transactions and recoverable evidence. Models, prompts, application to
 and authorization policy belong to the host. Evaluation focuses on correctness under
 failure, isolation between tasks and reproducible recovery.
 
-For integration, start with the [current implementation contract](spec/current-contract.md).
-It separates implemented guarantees, experimental APIs and planned Rust/daemon work.
+Agent runtimes usually call `spawn()` (or `exec()`) and hope for the best. When the host crashes mid-tool-call, or a cancel cannot be confirmed, they are left with **orphan processes**, **double-applied side effects**, and **no honest record of what actually happened**. This kernel makes those states first-class instead of silent: an operation whose outcome cannot be determined is `indeterminate` and keeps its leases; a stop the driver cannot confirm is never a fake success.
 
-Agent runtimes usually call `spawn()` (or `exec()`) and hope for the best. When the host crashes mid-tool-call, or a cancel cannot be confirmed, they are left with orphan processes, double-applied side effects, and no honest record of what actually happened. This kernel makes those states first-class instead of silent.
-
-[xiocode](https://github.com/Xio-Shark/xiocode), the reference distribution, runs its supervised commands on this kernel by default — the equivalence suite below is what made that switch safe to make.
+[xiocode](https://github.com/Xio-Shark/xiocode), the reference distribution, runs its supervised commands on this kernel by default — the conformance suite below is what made that switch safe to make.
 
 Besides one-shot commands, the kernel supervises long-running services (MCP stdio servers, dev servers), makes operations idempotent by `opId` for durable engines (Temporal, LangGraph), and snapshots, rolls back and forks the workspace so an agent's file changes can be undone per step.
 
 The package also includes an **experimental `AgentRuntime`**: kernel-owned agent lifecycle, cooperative scheduling, evidence-gated dispatch and persistent checkpoint/step budgets. Adapters can submit commands through a per-step context; the kernel tracks their ownership and waits for the batch before checkpointing. It accepts existing runner adapters rather than replacing their models or tools. See the [runtime contract](spec/agent-runtime.md) and [recovery experiments](audit/observation/RECOVERY.md). It is experimental: its API may change in any release.
 
-`parentId` defines a fail-fast task scope. Parent completion waits for children without occupying a dispatch slot. `await agents.interrupt(id)` cancels and joins the member's whole root task, including managed commands and reconstruction. It preserves completed checkpoints and spent budgets. Adapter cancellation is cooperative; an adapter that ignores the signal keeps the call pending. See [task scopes](spec/agent-runtime.md#task-scopes).
+## 5-minute path
 
-`runBudget` limits shared steps, lifetime agent creation and outstanding commands. Defaults are 10,000 / 1,024 / 64; limits and spent steps persist across reopening. `getRunUsage(runId)` reports usage. Optional `workspaceVersion(agent)` binds validation to a host-supplied revision at dispatch, but does not lock the workspace during subsequent execution. See [Run budgets](spec/agent-runtime.md#shared-run-admission-budgets) and [version checks](spec/agent-runtime.md#validation-and-workspace-versions).
+```bash
+npm install @xioflow/kernel
+```
 
-For host shutdown, use `await agents.shutdown()` before closing the domain. It rejects new work immediately, pauses queued agents, interrupts active quanta, and waits for their commands and active workspace reconstruction before releasing runtime ownership. It does not close the domain or force a non-cooperative adapter to stop. See the [shutdown contract](spec/agent-runtime.md#shutdown-contract).
+Then supervise your first command — one line, no domain bookkeeping:
+
+```js
+import { quickRun } from '@xioflow/kernel';
+
+const result = await quickRun({ execPath: 'npm', args: ['test'], cwd: '/path/to/workspace' });
+console.log(result.status, result.exitCode, result.stdout);
+```
+
+Then pick the integration that matches what you are building:
+
+[`examples/`](./examples/README.md) holds four runnable integrations. Each links the kernel via `file:../../`, so it tests the checked-out source rather than the npm release:
+
+| Example | You are building | Demonstrates |
+|---|---|---|
+| [`replace-subprocess-wrapper`](./examples/replace-subprocess-wrapper) | A coding agent replacing its `child_process.spawn` wrapper | Why naive `spawn + timeout` leaks orphans and loses output tails — measured against `quickRun` |
+| [`temporal-activity`](./examples/temporal-activity) | A Temporal worker with OS side-effecting activities | At-most-once activities across worker crash and retry |
+| [`langgraph-node`](./examples/langgraph-node) | A LangGraph.js graph whose nodes run commands | Checkpoint resume without re-executing a command node |
+| [`mcp-stdio-transport`](./examples/mcp-stdio-transport) | An MCP client supervising stdio servers | `startService` with a `Transport` implementation over the kernel |
+
+Prerequisites: Node.js >= 22.13 and a built kernel checkout (`pnpm install && pnpm build` at the repository root). All four were verified passing on Linux on 2026-10-13 (Node 22.23.3, kernel 0.7.0); the recorded onboarding path — install plus first run — takes minutes, inside the one-day target. See [examples/README.md](./examples/README.md) for per-example contract mappings and the verification record.
 
 ## Guarantees
 
@@ -62,12 +81,8 @@ See [recovery boundaries and migration](spec/current-contract.md#crash-recovery-
 - Linux and macOS. The default driver enumerates descendants with `ps(1)` and terminates POSIX process groups; the optional native reaper holds the whole tree instead, and on Linux the cgroup v2 driver contains it and enforces hard memory and process limits (see [Holding the process tree](#holding-the-process-tree)).
 - Snapshots need `git` on `PATH` and a git working tree. Confinement is optional and uses `sandbox-exec` (macOS), `bubblewrap` (Linux) or `srt` when available.
 - Windows is not supported. There the driver reports `processGroupKill: false` and `descendantEnumeration: 'none'` rather than pretending it can contain processes.
-
-## Install
-
-```bash
-npm install @xioflow/kernel
-```
+- One process arbitrates one workspace domain. A second process opening the same domain fails with `DomainLockedError`; cross-process arbitration is not provided (the daemon direction was abandoned on 2026-10-13). Run concurrent agents on separate worktrees with separate domains — xiocode's worktree isolation is the reference pattern — or serialize access.
+- WSL2: the full contract suite passes on WSL2 Ubuntu (704 passed / 8 cgroup-gated skipped, 2026-10-13, Node 22.23.3). The default `NodePlatformDriver` and the native reaper work there; the cgroup v2 driver requires `/sys/fs/cgroup` delegated to the invoking user (WSL2 does not delegate it by default), and reports `CgroupUnavailableError` instead of degrading — run the host under `systemd-run --user --scope -p Delegate=yes` or in a container with a private cgroup namespace to use it.
 
 ## Quickstart
 
@@ -423,7 +438,7 @@ defineContractTestSuite('My Agent Runtime', async () => ({
 }));
 ```
 
-`vitest` is an optional peer dependency, and the subpath is only loaded if you import it.
+The suite is framework-agnostic: under vitest it resolves its API from globals, and third parties can run the same suite with **no test framework at all** through the dependency-free plain-node runner (`@xioflow/kernel/testing/plain`), which prints a machine-readable JSON report. The [conformance entry](spec/conformance.md) documents both paths and the compliance tiers (`core` / `workspace` / `experimental`).
 
 Beyond the contracts, the repository kills its own supervisor at every durable step (before and after each store commit, and while the process runs), recovers in a fresh process and checks the invariants again (`tests/fault/crash-matrix.test.ts`), and model-checks the same invariants for every interleaving of launch, stop, crash and recovery with TLA+ (`spec/tla/`, `pnpm check:tla`).
 
@@ -433,11 +448,22 @@ Beyond the contracts, the repository kills its own supervisor at every durable s
 - A spawn failure is reported both as `status: 'failed'`/`exitCode: 127` and as `spawnFailure` with the underlying error message, so embedders can tell "the binary could not start" apart from "the child exited 127".
 - `onStreamChunk(stream, chunk)` forwards raw stdout/stderr chunks while the process runs, so a caller can render live output. A throwing callback never aborts the drain; the first error is recorded as `streamCallbackError`.
 - Hard resource requests (`maxMemoryBytes`, `maxPids`, `maxCpuTimeMs` with `enforcement: 'hard'`) are rejected at admission with `UnsupportedCapabilityError` on platforms that cannot enforce them, instead of degrading silently. The remaining capability flags are reported truthfully for callers to inspect, but are not enforced by admission yet.
-- Protocol specification: [`ARCHITECTURE.md`](./ARCHITECTURE.md) (Chinese, complete) and [`ARCHITECTURE.en.md`](./ARCHITECTURE.en.md) (English, §0, §3 and §7). They describe the target design; the phased plan and the spec-vs-implementation gap table live in [`ROADMAP.md`](./ROADMAP.md).
+- Protocol specification: [`ARCHITECTURE.md`](./ARCHITECTURE.md) (Chinese, authoritative) and [`ARCHITECTURE.en.md`](./ARCHITECTURE.en.md) (English, full mirror). They describe the target design; the phased plan and the spec-vs-implementation gap table live in [`ROADMAP.md`](./ROADMAP.md).
+
+## Go deeper
+
+Reading order after the 5-minute path:
+
+1. [Current implementation contract](spec/current-contract.md) — what is guaranteed *today*, what is experimental, and the recovery boundaries; start here for integration decisions.
+2. [Conformance entry](spec/conformance.md) — run the contract suite against your own runtime (no vitest needed) and read the compliance tiers.
+3. [ARCHITECTURE.md](./ARCHITECTURE.md) / [ARCHITECTURE.en.md](./ARCHITECTURE.en.md) — the full protocol: domain model, run/operation lifecycles, drivers, stop pipeline, transactions, ABI and the 67 numbered contracts.
+4. [ROADMAP.md](./ROADMAP.md) — phase plan, decision log, implementation-status table, the abandoned directions (appendix A) and the 1.0 ABI freeze criteria.
+5. [`spec/`](./spec/) — the experimental runtime contract, and the current-contract annexes.
+6. [`audit/`](./audit/README.md) — the fault-injection bench: how the execution layer is audited, and the [recovery comparison report](audit/reports/recovery-comparison.md) (E4–E9 deterministic results plus the labelled real-model pilot).
 
 ## Status
 
-0.7.0 on npm (Linux cgroup v2 driver with hard memory and process limits, tree settlement after root exit, native tree-holding reaper, workspace transactions validated by file sets or replayed observations, read evidence for results, honest rollback coverage for ignored files, experimental AgentRuntime, MCP server, OpenTelemetry export, crash-point matrix and TLA+ model; see [`CHANGELOG.md`](./CHANGELOG.md)), pre-1.0: the API may change. Not implemented yet: hard CPU limits, enforced domain-wide memory budgets, artifact retrieval helpers, daemon mode and non-TypeScript bindings. Remaining gaps are tracked in [`ROADMAP.md`](./ROADMAP.md).
+0.7.0 on npm (Linux cgroup v2 driver with hard memory and process limits, tree settlement after root exit, native tree-holding reaper, workspace transactions validated by file sets or replayed observations, read evidence for results, honest rollback coverage for ignored files, experimental AgentRuntime, MCP server, OpenTelemetry export, crash-point matrix and TLA+ model; see [`CHANGELOG.md`](./CHANGELOG.md)), pre-1.0: the API may change until the [ABI v1 freeze criteria](./ROADMAP.md#11-abi-v10-冻结判据) are met. Not implemented yet: hard CPU limits, enforced domain-wide memory budgets, artifact retrieval helpers, and schema migration (contract #27). The daemon mode and non-TypeScript bindings are **abandoned directions** (2026-10-13 ruling, appendix A of the roadmap), not pending work. Remaining gaps are tracked in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Releasing
 
