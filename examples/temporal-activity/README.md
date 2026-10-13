@@ -2,6 +2,12 @@
 
 This example demonstrates how to integrate `@xioflow/kernel` with the **Temporal TypeScript SDK** to make activities with real-world OS side-effects (e.g., executing shell scripts, updating package locks, or writing to filesystem logs) safe against duplicate execution when workers crash midway.
 
+## Prerequisites
+
+- Node.js >= 22.13 and a built kernel checkout (`pnpm install && pnpm build` at the repository root).
+- `pnpm install` in this directory (pulls the `@temporalio/*` packages and links the kernel via `file:../../`).
+- Last verified 2026-10-13 on Linux, Node 22.23.3, kernel 0.7.0.
+
 ## The Problem in Temporal Activities
 
 Temporal provides **at-least-once** execution semantics for activities. When a worker process crashes (`kill -9`, SIGSEGV, OOM, or network disconnection) while executing an activity:
@@ -34,12 +40,21 @@ When Temporal retries the activity:
 - If the first attempt completed and registered its result in the kernel domain: the retry immediately returns the recorded result (`replayed: true`), and the subprocess is **never run again**.
 - If the first attempt was midway during execution when the worker crashed: upon domain recovery (`recover()`), if the process cannot be confirmed stopped, it is marked `indeterminate` rather than silently re-run.
 
+## What this demonstrates (kernel contracts)
+
+ARCHITECTURE §7.2 contracts **#45–#49**: same `opId` + fingerprint replays the recorded result (`replayed: true`, no second process), a different fingerprint throws `OperationIdConflictError`, and an `indeterminate` outcome is returned as-is — never re-executed.
+
 ## Running the Drill
 
 ```bash
 cd examples/temporal-activity
 bash kill-worker-midway.sh
 ```
+
+The drill runs `simulate-activity-retry.mjs`: it simulates the worker crash and
+Temporal's retry of the same activity, and needs **no Temporal cluster**.
+`worker.mjs`, `client.mjs`, `activities.mjs` and `workflows.mjs` show the same
+pattern against the real SDK shape.
 
 ### Expected Output (Succeeded Replay)
 

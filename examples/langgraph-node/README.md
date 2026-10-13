@@ -2,6 +2,12 @@
 
 This example demonstrates how to integrate `@xioflow/kernel` with **LangGraph.js** to guarantee that tool-use nodes executing command-line processes (e.g. running unit tests, executing git commands, modifying files) never duplicate their side effects when resuming from a checkpoint.
 
+## Prerequisites
+
+- Node.js >= 22.13 and a built kernel checkout (`pnpm install && pnpm build` at the repository root).
+- `pnpm install` in this directory (pulls `@langchain/langgraph` and links the kernel via `file:../../`).
+- Last verified 2026-10-13 on Linux, Node 22.23.3, kernel 0.7.0.
+
 ## The Problem in LangGraph Nodes
 
 LangGraph persists state transitions across steps into checkpointers (e.g., `MemorySaver`, `SqliteSaver`, Postgres, Redis). When an error, crash, or human-in-the-loop interruption occurs midway through a graph execution:
@@ -31,6 +37,10 @@ async function executeCommandNode(state, config) {
 When LangGraph resumes from a checkpoint:
 - If the command succeeded during the earlier attempt, `quickRun` immediately returns the recorded result (`replayed: true`), skipping subprocess execution entirely.
 - The command side effect occurs **exactly once**.
+
+## What this demonstrates (kernel contracts)
+
+ARCHITECTURE §7.2 contracts **#45** (same `opId` + fingerprint returns the recorded result, `replayed: true`, no new process) and **#47** (a replay that hits an in-flight operation joins the same result — exactly one process is spawned).
 
 ## Running the Example
 
