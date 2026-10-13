@@ -9,6 +9,12 @@
 
 A supervised execution kernel for AI agent runtimes. Zero runtime dependencies. (See [Architecture & Protocol Specification (EN)](./ARCHITECTURE.en.md) / [中文规范](./ARCHITECTURE.md)).
 
+The kernel provides a common execution foundation for independently built agent products:
+domain ownership, operation identity, resource arbitration, process lifecycle,
+workspace transactions and recoverable evidence. Models, prompts, application tools
+and authorization policy belong to the host. Evaluation focuses on correctness under
+failure, isolation between tasks and reproducible recovery.
+
 For integration, start with the [current implementation contract](spec/current-contract.md).
 It separates implemented guarantees, experimental APIs and planned Rust/daemon work.
 
@@ -33,12 +39,15 @@ For host shutdown, use `await agents.shutdown()` before closing the domain. It r
 | No fake running | Admission check, then the operation intent is persisted to SQLite, then the process is spawned. A spawn that fails is recorded as `failed` (exit code 127); it never appears as `running`. |
 | No blind replay | An operation whose outcome cannot be determined is recorded as `indeterminate`, keeps its exclusive leases, and is never auto-retried on restart. |
 | No premature release | Exclusive resource leases are released only after the platform driver confirms the process is gone. An unconfirmed stop keeps the lease and escalates to `indeterminate`. |
-| No silent output loss | In-memory output is capped by `maxOutputBytes` (default 10 MiB); each stream is spilled to `<domain>/artifacts/<opId>-stdout.log` / `-stderr.log`, `fsync`ed, and hashed. Truncation is reported per stream (`stdoutTruncated` / `stderrTruncated`) with `stdoutRef` / `stderrRef`, `stdoutBytes` / `stderrBytes` and `stdoutHash` / `stderrHash`; `isTruncated` / `outputRef` / `outputHash` remain as aggregate compatibility fields. |
+| No silent output loss | In-memory output is capped by `maxOutputBytes` (default 10 MiB); each stream is spilled under `<domain>/artifacts/`, `fsync`ed, and hashed. IDs are opaque keys: ordinary IDs keep readable filenames; other IDs are encoded into a safe basename. Truncation is reported per stream with references, byte counts and hashes; a collision or storage failure is reported as `spillError`. |
 | No implicit environment | `envWhiteList` is exact: whatever you pass is what the child gets, with no injected `PATH`. Without a whitelist the child inherits `process.env`, unless you pass `inheritEnv: false` to get an empty environment. |
 | No orphan leak | Termination escalates SIGINT to SIGTERM to SIGKILL across the process group, then re-enumerates descendants. Escaped (`setsid`) survivors are reported honestly as `{ stopped: 'cannot_determine', residualPids: [...] }` instead of a fake success. If the group is confirmed empty but the output pipes are still held by a process the driver never saw, the operation is `indeterminate`, not `succeeded`. Drained pipes are not taken as an empty tree either: after the root exits, survivors the driver knows about (including daemonized ones with closed stdio) are reaped, and `treeSettlement` says whether emptiness was proven (`empty`), enforced (`reaped`) or is beyond what the driver can see (`unverified`). |
 | No blind retry | Resubmitting an `opId` with the same input fingerprint joins the in-flight execution or replays the recorded result (`replayed: true`); an `indeterminate` result is returned as-is and never re-executed. A different fingerprint throws `OperationIdConflictError`. |
 | No out-of-scope rollback | A rollback only rewrites and deletes files inside the snapshot's declared roots, never touches ignored files unless they were captured, and is verified by fingerprint. `coverage: 'complete'` is claimed only when every operation since the snapshot ran under a confinement driver and ignored files are accounted for: they were in the snapshot, or a manifest proves they are unchanged. Otherwise the result says `non_ignored` or `declared_roots`, with the reasons in `coverageBasis`. |
 | No split brain | A domain has one active owner, held by an exclusive lock file plus a heartbeat lease. Stale owners are fenced by an epoch counter; their writes are rejected. |
+| One arbiter per domain | Multiple supervisor entry points share in-flight operations, read tracking, service ownership and the workspace commit queue. Same-ID calls join the original execution, and cancellation uses its original driver. |
+| No guessed artifact ownership | Existing files are never overwritten during artifact creation. Immediate cleanup checks the created file's identity; garbage collection requires a journaled ownership record and retains unknown files. |
+| No invented process or resource facts | Failed process observation does not become an empty tree or a confirmed stop. Failed metric sampling is reported as `resourceSamplingError`, and unknown peaks are omitted. Soft measured limits fail closed when their observation is lost; observe-only failures remain visible without stopping the command. |
 
 Recovery needs durable launch evidence: a missing process identity proves the
 command was not released only when its `intent_registered` record includes
@@ -348,6 +357,7 @@ if (res.status === 'conflict') {
 - **Validation**: a commit fails with `write_write` if a transaction committed since this one began wrote the same file, and with `read_write` if it changed something this one read. A listed directory only conflicts when entries were added to it or removed from it. A write that bypassed transactions and went straight to the workspace fails with `external_write`.
 - **Apply**: only a validated transaction is applied to the workspace. `TX_COMMITTING` is journaled first, so a commit interrupted by a crash finishes when it is called again after restart.
 - **Evidence**: a committed result says what "no conflict" rests on: `validation: 'files'` (read and write sets), `'write_only'` (reads could not be observed) or `'observations'` (below).
+- **Path dependencies**: `pathDependencies` lists symbolic-link paths seen in the fork separately from actual reads. Link changes conservatively conflict even when the target file did not change. A `null` value means this evidence is unavailable, including older transactions; it does not mean no path dependencies existed.
 
 ### Fewer false conflicts: validating what the agent saw
 
@@ -398,7 +408,7 @@ supervisor.evidenceStatus('verify-1');
 
 ### Verify your own runtime
 
-The package ships the same 53-item contract suite that the kernel itself is tested against, so an embedding runtime can prove its consumer honors these guarantees:
+The package ships the shared contract suite that the kernel itself is tested against, including artifact ownership and coordination across supervisor entry points, so an embedding runtime can verify these guarantees:
 
 ```js
 import { defineContractTestSuite } from '@xioflow/kernel/testing';

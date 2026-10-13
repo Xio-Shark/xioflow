@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { ExecutionDomain, DomainLockedError, ResourceConflictError } from '../../src/domain.js';
 import { SqliteStore } from '../../src/store/sqlite.js';
 import { Task, Run, Operation } from '../../src/types.js';
@@ -56,6 +57,84 @@ describe('Task 01: ExecutionDomain & SQLite Transactional Store', () => {
     expect(events.length).toBe(0);
 
     store.close();
+  });
+
+  it('BEGIN 遇到写锁失败后，同一 store 仍能回滚和提交后续事务', () => {
+    const dbPath = path.join(tempDir, 'domain.db');
+    const store = new SqliteStore(dbPath);
+    const lockHolder = new DatabaseSync(dbPath);
+    let callbackRan = false;
+
+    try {
+      lockHolder.exec('BEGIN IMMEDIATE');
+      try {
+        expect(() => store.transaction(() => { callbackRan = true; })).toThrow(/database is locked/);
+        expect(callbackRan).toBe(false);
+      } finally {
+        lockHolder.exec('ROLLBACK');
+      }
+
+      const task: Task = {
+        id: 'after-lock',
+        domainId: 'test-domain',
+        name: 'After lock',
+        createdAt: new Date().toISOString(),
+      };
+      const failure = new Error('Abort after lock release');
+      expect(() => store.transaction(() => {
+        store.saveTask(task);
+        throw failure;
+      })).toThrow(failure);
+      expect(store.getTask(task.id)).toBeNull();
+
+      store.transaction(() => store.saveTask(task));
+      expect(store.getTask(task.id)).toEqual(task);
+    } finally {
+      lockHolder.close();
+      store.close();
+    }
+  });
+
+  it('ROLLBACK 失败保留原始写入错误，且不污染后续事务状态', () => {
+    const dbPath = path.join(tempDir, 'domain.db');
+    const store = new SqliteStore(dbPath);
+    const setup = new DatabaseSync(dbPath);
+    const task: Task = {
+      id: 'before-trigger',
+      domainId: 'test-domain',
+      name: 'Rollback test',
+      createdAt: new Date().toISOString(),
+    };
+
+    try {
+      // SQLite 自己回滚事务后，store 的显式 ROLLBACK 会失败。
+      setup.exec(`CREATE TRIGGER abort_task BEFORE INSERT ON tasks
+        WHEN NEW.id = 'abort-trigger'
+        BEGIN SELECT RAISE(ROLLBACK, 'Forced write failure'); END;`);
+      let error: unknown;
+      try {
+        store.transaction(() => {
+          store.saveTask(task);
+          store.saveTask({ ...task, id: 'abort-trigger' });
+        });
+      } catch (err) {
+        error = err;
+      }
+
+      expect(error).toBeInstanceOf(AggregateError);
+      const failure = error as AggregateError;
+      expect(failure.errors).toHaveLength(2);
+      expect(failure.errors[0].message).toContain('Forced write failure');
+      expect(failure.errors[1].message).toContain('no transaction is active');
+      expect(failure.cause).toBe(failure.errors[0]);
+      expect(store.getTask(task.id)).toBeNull();
+
+      store.transaction(() => store.saveTask(task));
+      expect(store.getTask(task.id)).toEqual(task);
+    } finally {
+      setup.close();
+      store.close();
+    }
   });
 
   it('3. 序号严格连续单调自增', () => {

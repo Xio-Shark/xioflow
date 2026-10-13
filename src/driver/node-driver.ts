@@ -11,6 +11,7 @@ import {
 import { IdentityVerificationResult } from '../types.js';
 import { readBootId, readStartTime, getGroupMembers } from './process-facts.js';
 import { ProcessSampler } from './sampler.js';
+import { ProcessObservationError } from './observation.js';
 import { detectAvailableConfinementDrivers } from '../confinement/detector.js';
 import { computeCommandFingerprint, resolveExecutable } from './spawn-support.js';
 
@@ -249,8 +250,8 @@ export class NodePlatformDriver implements PlatformDriver {
   }
 
   public async verifyIdentity(identity: ProcessIdentity): Promise<IdentityVerificationResult> {
-    // 1. 检查操作系统中该 PID 是否存活或为僵尸
-    if (!this.isPidAlive(identity.pid) || (await this.sampler.isZombie(identity.pid))) {
+    // In-process ownership remains usable even when OS-wide observation is denied.
+    if (!this.isPidAlive(identity.pid)) {
       return 'not_original_process';
     }
 
@@ -272,6 +273,13 @@ export class NodePlatformDriver implements PlatformDriver {
       return 'cannot_determine';
     }
 
+    try {
+      if (await this.sampler.isZombie(identity.pid)) return 'not_original_process';
+    } catch (error) {
+      if (error instanceof ProcessObservationError) return 'cannot_determine';
+      throw error;
+    }
+
     // 4. 跨崩溃/重启核验（§4.1.1）：唯一可信证据是 spawn 时登记的 OS 创建时间。
     //    宿主记录的 spawnTime 与「命令行包含 execPath」都不是身份证据；commandFingerprint
     //    也不参与判定——shebang 脚本（npm、pnpm、python 脚本）与改写 argv 的程序会让 OS 可见命令行
@@ -284,8 +292,13 @@ export class NodePlatformDriver implements PlatformDriver {
     if (actualStartMs === null) {
       // 读不到创建时间最常见的原因是进程恰好在核验途中退出并被回收（步骤 1 与此处之间的竞争）。
       // 先复核存活：进程已不存在就是"不是原进程在运行"，交给恢复的进程组证据核验；仍存活才是真的无法判定。
-      if (!this.isPidAlive(identity.pid) || (await this.sampler.isZombie(identity.pid))) {
+      if (!this.isPidAlive(identity.pid)) {
         return 'not_original_process';
+      }
+      try {
+        if (await this.sampler.isZombie(identity.pid)) return 'not_original_process';
+      } catch (error) {
+        if (!(error instanceof ProcessObservationError)) throw error;
       }
       return 'cannot_determine';
     }
@@ -297,6 +310,19 @@ export class NodePlatformDriver implements PlatformDriver {
     identity: ProcessIdentity,
     graceMs: number = 2000
   ): Promise<StopProcessResult> {
+    try {
+      return await this.terminateWithEvidence(identity, graceMs);
+    } catch (error) {
+      if (!(error instanceof ProcessObservationError)) throw error;
+      // Missing OS evidence does not authorize signalling a potentially reused PID.
+      return {
+        stopped: 'cannot_determine', scope: 'unknown',
+        errorDetails: error.message,
+      };
+    }
+  }
+
+  private async terminateWithEvidence(identity: ProcessIdentity, graceMs: number): Promise<StopProcessResult> {
     const pid = identity.pid;
     const cumSet = this.cumulativeDescendantsMap.get(pid);
 
@@ -378,13 +404,27 @@ export class NodePlatformDriver implements PlatformDriver {
     const deadline = Date.now() + waitMs;
     for (;;) {
       this.sampler.clearCache();
-      if (!(await this.sampler.isGroupAlive(pgid))) return 'unknown';
+      try {
+        if (!(await this.sampler.isGroupAlive(pgid))) return 'unknown';
+      } catch (error) {
+        if (error instanceof ProcessObservationError) return 'unknown';
+        throw error;
+      }
       if (Date.now() >= deadline) return 'residual';
       await new Promise((r) => setTimeout(r, 25));
     }
   }
 
   public async terminateGroup(pgid: number, graceMs: number = 2000): Promise<StopProcessResult> {
+    try {
+      return await this.terminateGroupWithEvidence(pgid, graceMs);
+    } catch (error) {
+      if (!(error instanceof ProcessObservationError)) throw error;
+      return { stopped: 'cannot_determine', scope: 'unknown', errorDetails: error.message };
+    }
+  }
+
+  private async terminateGroupWithEvidence(pgid: number, graceMs: number): Promise<StopProcessResult> {
     if (!this.capabilities.processGroupKill) {
       return {
         stopped: 'not_stopped',
@@ -423,16 +463,12 @@ export class NodePlatformDriver implements PlatformDriver {
   public async sampleMetrics(
     identity: ProcessIdentity
   ): Promise<{ rssBytes: number; pidsCount: number; cpuTimeMs: number }> {
-    try {
-      const tree = await this.sampler.getProcessTree(identity.pid);
-      const targetPids = [identity.pid, ...tree.allDescendants].filter((p) => this.isPidAlive(p));
-      if (targetPids.length === 0) {
-        return { rssBytes: 0, pidsCount: 0, cpuTimeMs: 0 };
-      }
-      return this.sampler.sampleMetrics(targetPids);
-    } catch {
+    const tree = await this.sampler.getProcessTree(identity.pid);
+    const targetPids = [identity.pid, ...tree.allDescendants].filter((p) => this.isPidAlive(p));
+    if (targetPids.length === 0) {
       return { rssBytes: 0, pidsCount: 0, cpuTimeMs: 0 };
     }
+    return this.sampler.sampleMetrics(targetPids);
   }
 
   private isPidAlive(pid: number): boolean {

@@ -1,6 +1,6 @@
 import { ExecutionDomain } from '../domain.js';
 import { ManagedProcessHandle, PlatformDriver, StopProcessResult, StructuredCommand } from '../driver/types.js';
-import { Operation, ProcessOperationResult, TerminationReason } from '../types.js';
+import { Operation, ProcessExecutionResult, ProcessOperationResult, TerminationReason } from '../types.js';
 import { CapabilityAdmission, recordCapabilityUsed } from './admission.js';
 import { computeInputFingerprint } from './fingerprint.js';
 import { finalizeOperation, indeterminateResult } from './finalize.js';
@@ -33,7 +33,7 @@ export interface ProcessRunPlan {
  * 启动协议：资源仲裁 -> 先持久化意图 -> 请求驱动启动 -> 登记身份并转 active -> 监督运行 -> 记录结果。
  * 任何出口都会结清 stopResolve 并把操作移出在飞表。
  */
-export async function runProcess(ctx: ProcessRunContext, plan: ProcessRunPlan): Promise<ProcessOperationResult> {
+export async function runProcess(ctx: ProcessRunContext, plan: ProcessRunPlan): Promise<ProcessExecutionResult> {
   const { options, opState } = plan;
   const cleanups: Array<() => void> = [];
   try {

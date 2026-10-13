@@ -13,9 +13,11 @@ pnpm test
 pnpm verify:package   # packs, installs into a clean project, runs the embedder checks
 ```
 
-- Node.js >= 22.5 (the store uses `node:sqlite`). CI runs Node 24.
-- Linux and macOS. Windows is not supported in 0.1; the driver reports that honestly instead of pretending.
+- Node.js >= 22.13 (the store uses `node:sqlite` without a flag). CI covers Node 22.13 and 24.
+- Linux and macOS. Windows is not supported; the driver reports that honestly instead of pretending.
 - `pnpm verify:package` is the gate that matters for consumers: it proves the packed tarball works when installed, not just from source.
+- `XIOFLOW_SMOKE_DRIVER=reaper pnpm verify:package` runs the same installed-package checks with the native driver. Node-driver OS observation tests require a host that permits `ps`; macOS confinement tests additionally require permission to apply `sandbox-exec` profiles. Report restricted-host failures explicitly rather than counting them as passes.
+- `XIOFLOW_SOAK_DRIVER=reaper XIOFLOW_SOAK_SECONDS=30 node scripts/agent-soak.mjs` exercises cancellation, queue limits and journal faults with the native driver. The default driver is Node; delegated Linux hosts can select `cgroup`. Finite runs do not establish indefinite stability.
 
 ## What a change has to satisfy
 

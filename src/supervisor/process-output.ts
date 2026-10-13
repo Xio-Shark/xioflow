@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { artifactPath, assertArtifactDirectory, recordArtifactCreated } from '../artifacts.js';
 import { ManagedProcessHandle } from '../driver/types.js';
 import { ProcessOperationResult } from '../types.js';
 import { setupStreamDrainer, StreamDrainer } from './drainer.js';
@@ -20,12 +21,11 @@ export function openOutputCapture(ctx: ProcessRunContext, plan: ProcessRunPlan, 
   const { options, opState } = plan;
   const artifactsDir = options.artifactsDir || path.join(ctx.domain.domainPath, 'artifacts');
   let artifactsDirError: string | undefined;
-  if (!fs.existsSync(artifactsDir)) {
-    try {
-      fs.mkdirSync(artifactsDir, { recursive: true });
-    } catch (dirErr: any) {
-      artifactsDirError = dirErr.message || String(dirErr);
-    }
+  try {
+    fs.mkdirSync(artifactsDir, { recursive: true });
+    assertArtifactDirectory(artifactsDir);
+  } catch (dirErr: any) {
+    artifactsDirError = dirErr.message || String(dirErr);
   }
 
   let totalOutputBytes = 0;
@@ -59,10 +59,11 @@ export function openOutputCapture(ctx: ProcessRunContext, plan: ProcessRunPlan, 
     setupStreamDrainer(
       handle[stream],
       maxBytes,
-      path.join(artifactsDir, `${options.opId}-${stream}.log`),
+      artifactPath(artifactsDir, options.opId, `-${stream}.log`),
       onChunk,
       forwardChunk(stream),
-      artifactsDirError
+      artifactsDirError,
+      (artifact) => recordArtifactCreated(ctx.domain, options.opId, artifact)
     );
   return {
     stdout: drainer('stdout'),
@@ -80,7 +81,8 @@ export function buildProcessResult(
     exit: ExitFacts;
     residualProcessesReaped: boolean;
     treeSettlement?: ProcessOperationResult['treeSettlement'];
-    peaks: { peakMemoryBytes: number; peakCpuTimeMs: number };
+    peaks: { peakMemoryBytes?: number; peakCpuTimeMs?: number };
+    resourceSamplingError?: string;
     identityVerification: ProcessOperationResult['identityVerification'];
   }
 ): ProcessOperationResult {
@@ -95,7 +97,8 @@ export function buildProcessResult(
     opState.terminationReason === 'memory_exceeded' ||
     opState.terminationReason === 'cpu_exceeded' ||
     opState.terminationReason === 'pids_exceeded' ||
-    opState.terminationReason === 'output_exceeded';
+    opState.terminationReason === 'output_exceeded' ||
+    opState.terminationReason === 'observation_failed';
   const finalStatus = isResourceOrTimeoutStopped
     ? 'failed'
     : opState.cancelRequested
@@ -134,6 +137,7 @@ export function buildProcessResult(
     terminationReason: opState.terminationReason || (finalStatus === 'succeeded' ? 'completed' : undefined),
     peakMemoryBytes: facts.peaks.peakMemoryBytes,
     cpuTimeMs: facts.peaks.peakCpuTimeMs,
+    ...(facts.resourceSamplingError ? { resourceSamplingError: facts.resourceSamplingError } : {}),
     identityVerification: facts.identityVerification,
     durationMs: Date.now() - opState.startTime,
     completedAt: new Date().toISOString(),

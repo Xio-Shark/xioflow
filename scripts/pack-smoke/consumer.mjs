@@ -31,7 +31,10 @@ const domainPath = path.join(workspace, '.xioflow');
 console.log(`  workspace: ${workspace}`);
 
 const domain = ExecutionDomain.acquire(domainPath, 'embed-check');
-const driver = new NodePlatformDriver();
+const smokeDriver = process.env.XIOFLOW_SMOKE_DRIVER ?? 'node';
+if (!['node', 'reaper'].includes(smokeDriver)) throw new Error(`Unknown smoke driver: ${smokeDriver}`);
+const driver = smokeDriver === 'reaper' ? new ReaperPlatformDriver() : new NodePlatformDriver();
+console.log(`  driver: ${driver.name}`);
 const supervisor = new ProcessSupervisor(domain, driver);
 const store = domain.getStore();
 
@@ -195,6 +198,29 @@ try {
   assert.equal(crypto.createHash('sha256').update(spilled).digest('hex'), big.outputHash);
   ok('bounded drain + spill + hash', `memory=${Buffer.byteLength(big.stdout)}B spill=${spilled.length}B`);
 
+  // 63. Opaque IDs and artifact collection cannot damage host-owned files.
+  ensureRun('run-artifact-boundary');
+  const artifacts = path.join(domain.domainPath, 'artifacts');
+  const outsideFile = path.join(domain.domainPath, 'opaque-victim-stdout.log');
+  const occupiedFile = path.join(artifacts, 'occupied-artifact-stdout.log');
+  const userFile = path.join(artifacts, 'user-notes.txt');
+  for (const file of [outsideFile, occupiedFile, userFile]) fs.writeFileSync(file, 'user data');
+  const artifactCommand = (opId, output) => supervisor.executeProcess({
+    runId: 'run-artifact-boundary', opId, name: 'artifact-boundary', maxOutputBytes: 100,
+    command: { execPath: process.execPath, args: ['-e', `process.stdout.write(${JSON.stringify(output)})`], cwd: workspace },
+  });
+  const opaque = await artifactCommand('../opaque-victim', 'output'.repeat(100));
+  assert.equal(opaque.status, 'succeeded');
+  assert.equal(path.dirname(opaque.stdoutRef), artifacts);
+  assert.equal(fs.readFileSync(opaque.stdoutRef, 'utf8'), 'output'.repeat(100));
+  const occupied = await artifactCommand('occupied-artifact', 'short output');
+  assert.equal(occupied.stdout, 'short output');
+  assert.match(occupied.stdoutSpillError, /EEXIST/);
+  const pruned = supervisor.pruneArtifacts();
+  for (const file of [outsideFile, occupiedFile, userFile]) assert.equal(fs.readFileSync(file, 'utf8'), 'user data');
+  assert.ok(pruned.retained.includes(occupiedFile) && pruned.retained.includes(userFile));
+  ok('artifact ownership boundary', 'opaque IDs stay inside artifacts; collisions and GC preserve user files');
+
   // 2b. Environment policy is explicit: a whitelist means exactly that, and
   //     inheritEnv:false yields an empty environment.
   ensureRun('run-env');
@@ -229,6 +255,23 @@ try {
   });
   assert.equal(emptyEnv.stdout, 'unset');
   ok('env policy is explicit', 'whitelist exact, inheritEnv:false empty');
+
+  // Failed observation is an explicit fact, never a fabricated zero measurement.
+  ensureRun('run-observation');
+  const originalMetrics = driver.sampleMetrics;
+  driver.sampleMetrics = async () => { throw new Error('embed observer unavailable'); };
+  try {
+    const observation = await supervisor.executeProcess({
+      runId: 'run-observation', opId: 'op-observation', name: 'observe metrics', timeoutMs: 2000,
+      command: { execPath: process.execPath, args: ['-e', 'setTimeout(() => console.log("complete"), 250)'], cwd: workspace },
+      resourceBudget: { enforcement: 'observe' },
+    });
+    assert.equal(observation.status, 'succeeded');
+    assert.match(observation.resourceSamplingError, /embed observer unavailable/);
+    assert.equal(observation.peakMemoryBytes, undefined);
+    assert.equal(observation.cpuTimeMs, undefined);
+  } finally { driver.sampleMetrics = originalMetrics; }
+  ok('resource observation honesty', 'failed measurements are reported and remain unknown');
 
   // 2c. One-shot stdin: the payload is written and the pipe is closed, so a
   //     child that reads until EOF still produces its output.
@@ -302,6 +345,43 @@ try {
   assert.equal(seenStdout.join(''), 'live-a\nlive-b\n');
   assert.equal(projected.streamCallbackError, undefined);
   ok('live stream projection', `chunks=${seenStdout.length}`);
+
+  // 64. Facades over one domain share execution, leases and the original stop driver.
+  ensureRun('run-shared-facade');
+  let peerStops = 0;
+  const peerDriver = {
+    name: 'peer-driver', capabilities: driver.capabilities,
+    spawn: driver.spawn.bind(driver), verifyIdentity: driver.verifyIdentity.bind(driver),
+    terminate: async (identity, graceMs) => { peerStops += 1; return driver.terminate(identity, graceMs); },
+  };
+  const peer = new ProcessSupervisor(domain, peerDriver);
+  const sharedEffects = path.join(workspace, 'shared-effects.txt');
+  let signalReady;
+  const sharedReady = new Promise((resolve) => { signalReady = resolve; });
+  const sharedRequest = {
+    runId: 'run-shared-facade', opId: 'shared-facade', name: 'shared-facade', requiredResources: ['embed:shared'],
+    command: {
+      execPath: process.execPath,
+      args: ['-e', "require('fs').appendFileSync(process.argv[1], 'hit\\n'); console.log('ready'); setTimeout(() => {}, 5000)", sharedEffects],
+      cwd: workspace,
+    },
+    onStreamChunk: () => signalReady(),
+  };
+  const sharedPending = Promise.allSettled([supervisor.executeProcess(sharedRequest), peer.executeProcess(sharedRequest)]);
+  await sharedReady;
+  const sharedOwner = domain.getResourceOwner('embed:shared');
+  const sharedStop = await peer.cancelOperation(sharedRequest.opId, 100).catch((error) => error);
+  if (sharedStop instanceof Error) await supervisor.cancelOperation(sharedRequest.opId, 100);
+  const sharedResults = await sharedPending;
+  assert.equal(sharedOwner, sharedRequest.opId);
+  assert.equal(sharedStop.stopped, 'confirmed_stopped');
+  assert.equal(peerStops, 0);
+  assert.deepEqual(sharedResults.map((result) => result.status), ['fulfilled', 'fulfilled']);
+  assert.equal(sharedResults[0].value.status, 'cancelled');
+  assert.equal(sharedResults[1].value.replayed, true);
+  assert.equal(fs.readFileSync(sharedEffects, 'utf8'), 'hit\n');
+  assert.equal(domain.isResourceLocked('embed:shared'), false);
+  ok('shared domain facades', 'one execution, retained lease and cancellation through the original driver');
 
   // 3. Stop pipeline: lease is released only after the stop is confirmed.
   ensureRun('run-cancel');

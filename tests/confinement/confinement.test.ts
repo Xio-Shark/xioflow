@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -141,6 +142,7 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
         cwd: allowedDir,
       },
     });
+    assert(failOp.kind === 'process');
 
     expect(failOp.status).toBe('failed');
     expect(failOp.confined).toBe(true);
@@ -168,6 +170,7 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
         cwd: allowedDir,
       },
     });
+    assert(successOp.kind === 'process');
 
     expect(successOp.status).toBe('succeeded');
     expect(successOp.confined).toBe(true);
@@ -211,6 +214,7 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
     await supervisor.cancelOperation('op-cancel-confined');
 
     const result = await execPromise;
+    assert(result.kind === 'process');
     expect(result.status).toBe('cancelled');
     expect(result.confined).toBe(true);
   });
@@ -260,6 +264,7 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
         cwd: repoDir,
       },
     });
+    assert(op1.kind === 'process');
     expect(op1.status).toBe('succeeded');
     expect(op1.confined).toBe(true);
 
@@ -277,6 +282,7 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
         cwd: repoDir,
       },
     });
+    assert(op2.kind === 'process');
     expect(op2.status).toBe('succeeded');
     expect(op2.confined).toBe(true);
 
@@ -314,6 +320,7 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
         cwd: repoDir,
       },
     });
+    assert(opUnconfined.kind === 'process');
     expect(opUnconfined.status).toBe('succeeded');
     expect(opUnconfined.confined).toBeFalsy();
 
@@ -365,6 +372,7 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
       confinementDriver: mockDriver,
       command: { execPath: process.execPath, args: ['-e', '0'], cwd: repoDir },
     });
+    assert(confined.kind === 'process');
     expect(confined.confined).toBe(true);
 
     const rollback = await supervisor.rollback({
@@ -409,6 +417,7 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
       confinementDriver: mockDriver,
       command: { execPath: '/bin/sh', args: ['-c', script], cwd: repoDir },
     });
+    assert(op.kind === 'process');
     expect(op.status).toBe('succeeded');
     expect(op.confined).toBe(true);
     const rollback = await supervisor.rollback({ runId, opId: `rb-${name}`, snapshotId: `snap-${name}`, capabilityId: cap.id });
@@ -511,7 +520,9 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
     expect((captured?.payload as any).ignoredManifest).toEqual({ digest: snap.snapshot?.ignoredManifestDigest, entries: 2 });
 
     // 读被忽略文件、改未被忽略文件：清单不受影响
-    expect((await confined('op-man-same', 'cat .env build/out.js > /dev/null; echo changed > README.md')).confined).toBe(true);
+    const edit = await confined('op-man-same', 'cat .env build/out.js > /dev/null; echo changed > README.md');
+    assert(edit.kind === 'process');
+    expect(edit.confined).toBe(true);
     const rollback = await supervisor.rollback({ runId, opId: 'rb-man-same', snapshotId: 'snap-man-same', capabilityId: cap.id });
     expect(rollback.status).toBe('restored');
     expect(rollback.coverage).toBe('complete');

@@ -1,6 +1,5 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
+import { artifactPath, recordArtifactCreated } from '../artifacts.js';
 import { PassThrough } from 'node:stream';
 import { ExecutionDomain } from '../domain.js';
 import { PlatformDriver, ManagedProcessHandle, StopProcessResult } from '../driver/types.js';
@@ -11,11 +10,17 @@ import {
   Operation,
   ProcessOperationResult,
   IndeterminateResult,
+  OperationIdConflictError,
 } from '../types.js';
 import { ProcessSupervisor } from './supervisor.js';
 import { setupStreamDrainer, StreamDrainer } from './drainer.js';
+import { computeInputFingerprint } from './fingerprint.js';
+import { settleProcessTree } from '../driver/tree-settlement.js';
 
 interface ServiceRuntimeState {
+  owner: ServiceSupervisor;
+  inputFingerprint: string;
+  intentRegistered: boolean;
   serviceId: string;
   runId: string;
   spec: ServiceSpec;
@@ -31,10 +36,13 @@ interface ServiceRuntimeState {
   readyReject: (err: any) => void;
   readyPromise: Promise<ReadyFact>;
   stopResolve: () => void;
+  stopReject: (error: unknown) => void;
   stopPromise: Promise<void>;
   stopRequested: boolean;
   restartTimer: NodeJS.Timeout | null;
   instanceExitResolve?: (val: { exitCode: number | null; signal: NodeJS.Signals | null }) => void;
+  instanceExitReject?: (error: unknown) => void;
+  clearReadiness?: () => void;
   onInstanceExit: Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>;
   handle: ServiceHandle;
   instanceStartedAt: number;                        // 当前实例启动时刻（用于真实 durationMs）
@@ -42,19 +50,29 @@ interface ServiceRuntimeState {
   failureReason?: string;                           // 例如 readiness_timeout：停止后终态记为 failed
 }
 
+const servicesByDomain = new WeakMap<ExecutionDomain, Map<string, ServiceRuntimeState>>();
+
 export class ServiceSupervisor {
-  private activeServices = new Map<string, ServiceRuntimeState>();
+  private readonly activeServices: Map<string, ServiceRuntimeState>;
 
   constructor(
     private domain: ExecutionDomain,
     private driver: PlatformDriver,
     private supervisor: ProcessSupervisor
-  ) {}
+  ) {
+    let services = servicesByDomain.get(domain);
+    if (!services) servicesByDomain.set(domain, services = new Map());
+    this.activeServices = services;
+  }
 
   public async startService(spec: ServiceSpec): Promise<ServiceHandle> {
+    const inputFingerprint = this.computeServiceFingerprint(spec);
     const existing = this.activeServices.get(spec.serviceId);
     if (existing) {
       if (existing.status === 'starting' || existing.status === 'running') {
+        if (existing.inputFingerprint !== inputFingerprint) {
+          throw new OperationIdConflictError(spec.serviceId, existing.inputFingerprint, inputFingerprint, existing.status, existing.runId);
+        }
         return existing.handle;
       }
       throw new Error(`Service "${spec.serviceId}" is already finalized with status "${existing.status}"`);
@@ -80,6 +98,7 @@ export class ServiceSupervisor {
     // 申请 service 级独占资源租约 (重启间隙保持租约不被其他 op 抢占，ARCHITECTURE §3.8 / 裁决 7)
     const serviceLeaseHolder = `service:${spec.serviceId}`;
     if (spec.requiredResources && spec.requiredResources.length > 0) {
+      this.domain.assertOperationIdAvailable(serviceLeaseHolder);
       this.domain.allocateResources(serviceLeaseHolder, spec.requiredResources, 0);
     }
 
@@ -92,18 +111,30 @@ export class ServiceSupervisor {
       readyResolve = resolve;
       readyReject = reject;
     });
+    // A startup failure can precede delivery of the handle. Keep the original
+    // rejection observable to later subscribers without an unhandled rejection.
+    void readyPromise.catch(() => {});
 
     let stopResolve!: () => void;
-    const stopPromise = new Promise<void>((resolve) => {
+    let stopReject!: (error: unknown) => void;
+    const stopPromise = new Promise<void>((resolve, reject) => {
       stopResolve = resolve;
+      stopReject = reject;
     });
+    void stopPromise.catch(() => {});
 
     let instanceExitResolve!: (val: { exitCode: number | null; signal: NodeJS.Signals | null }) => void;
-    const onInstanceExit = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    let instanceExitReject!: (error: unknown) => void;
+    const onInstanceExit = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
       instanceExitResolve = resolve;
+      instanceExitReject = reject;
     });
+    void onInstanceExit.catch(() => {});
 
     const state: ServiceRuntimeState = {
+      owner: this,
+      inputFingerprint,
+      intentRegistered: false,
       serviceId: spec.serviceId,
       runId: spec.runId,
       spec,
@@ -118,10 +149,12 @@ export class ServiceSupervisor {
       readyReject,
       readyPromise,
       stopResolve,
+      stopReject,
       stopPromise,
       stopRequested: false,
       restartTimer: null,
       instanceExitResolve,
+      instanceExitReject,
       onInstanceExit,
       handle: null as any,
       instanceStartedAt: Date.now(),
@@ -147,12 +180,7 @@ export class ServiceSupervisor {
     try {
       await this.spawnInstance(state, 1);
     } catch (err) {
-      state.status = 'failed';
-      if (spec.requiredResources && spec.requiredResources.length > 0) {
-        this.domain.internalReleaseResources(serviceLeaseHolder, spec.requiredResources);
-      }
-      this.activeServices.delete(spec.serviceId);
-      throw err;
+      throw await this.settleStartupFailure(state, err);
     }
 
     return state.handle;
@@ -163,11 +191,18 @@ export class ServiceSupervisor {
     state.currentOpId = `${state.serviceId}#${instanceIndex}`;
     state.instanceStartedAt = Date.now();
     state.pendingInstanceResult = undefined;
+    state.intentRegistered = false;
 
     // 更新 onInstanceExit 为当前实例的 promise
-    state.onInstanceExit = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-      state.instanceExitResolve = resolve;
-    });
+    // The first promise may already have subscribers from a joining entry point.
+    if (instanceIndex > 1) {
+      state.currentProcessHandle = null;
+      state.onInstanceExit = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+        state.instanceExitResolve = resolve;
+        state.instanceExitReject = reject;
+      });
+      void state.onInstanceExit.catch(() => {});
+    }
 
     const store = this.domain.getStore();
     const inputFingerprint = this.computeServiceFingerprint(state.spec);
@@ -183,7 +218,9 @@ export class ServiceSupervisor {
       spawnGated: this.driver.capabilities.gatedSpawn === true,
       status: 'intent_registered',
     };
+    this.supervisor.assertOperationIdAvailable(op.id);
     store.registerOperationIntent(op, this.domain.domainId);
+    state.intentRegistered = true;
 
     // 2. 写入 journal 事件
     if (instanceIndex === 1) {
@@ -235,15 +272,16 @@ export class ServiceSupervisor {
     const maxStderrBytes = state.spec.maxStderrBytes ?? 10 * 1024 * 1024;
     let stderrSpillPath: string | undefined;
     if (state.spec.artifactsDir) {
-      try {
-        fs.mkdirSync(state.spec.artifactsDir, { recursive: true });
-      } catch {}
-      stderrSpillPath = path.join(state.spec.artifactsDir, `${state.currentOpId}.stderr.log`);
+      stderrSpillPath = artifactPath(state.spec.artifactsDir, state.currentOpId, '.stderr.log');
     }
     const stderrDrainer = setupStreamDrainer(
       processHandle.stderr,
       maxStderrBytes,
-      stderrSpillPath
+      stderrSpillPath,
+      undefined,
+      undefined,
+      undefined,
+      (artifact) => recordArtifactCreated(this.domain, state.currentOpId, artifact)
     );
     state.currentStderrDrainer = stderrDrainer;
 
@@ -255,8 +293,77 @@ export class ServiceSupervisor {
     // 9. 监听退出事件
     const exitPromise = processHandle.onRootExit ?? processHandle.onExit;
     exitPromise.then((exitResult) => {
-      this.handleInstanceExit(state, instanceIndex, exitResult).catch(() => {});
-    });
+      this.handleInstanceExit(state, instanceIndex, exitResult).catch((error) => this.rejectLifecycle(state, error));
+    }, (error) => this.rejectLifecycle(state, error));
+  }
+
+  /** Failed launches keep their error, and release leases only after confirmed cleanup. */
+  private async settleStartupFailure(state: ServiceRuntimeState, error: unknown): Promise<unknown> {
+    state.stopRequested = true;
+    state.clearReadiness?.();
+    const errors: unknown[] = [error];
+    const handle = state.currentProcessHandle;
+    let confirmed = !handle;
+    let exit: { exitCode: number | null; signal: NodeJS.Signals | null } | undefined;
+    if (handle) {
+      try {
+        handle.destroyGate?.();
+        const stopped = await this.driver.terminate(handle.identity, state.spec.graceMs ?? 1000);
+        let timer: NodeJS.Timeout | undefined;
+        try {
+          exit = await Promise.race([
+            handle.onRootExit ?? handle.onExit,
+            new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 1000); }),
+          ]);
+        } finally { if (timer) clearTimeout(timer); }
+        confirmed = stopped.stopped === 'confirmed_stopped' && exit !== undefined;
+        if (!confirmed) errors.push(new Error(`Service startup cleanup was not confirmed: ${stopped.errorDetails ?? stopped.stopped}`));
+      } catch (cleanupError) { errors.push(cleanupError); }
+    }
+    try {
+      const store = this.domain.getStore();
+      const op = store.getOperation(state.currentOpId);
+      if (state.intentRegistered && op && op.status !== 'done') {
+        const message = errors.map(String).join('; ');
+        const result: ProcessOperationResult | IndeterminateResult = confirmed ? {
+          kind: 'process', status: 'failed', exitCode: handle ? exit!.exitCode : 127,
+          signal: exit?.signal ?? null, stdout: '', stderr: message, spawnFailure: message,
+          isTruncated: false, identityVerification: 'cannot_determine',
+          durationMs: Date.now() - state.instanceStartedAt, completedAt: new Date().toISOString(),
+        } : {
+          kind: 'indeterminate', status: 'indeterminate', reason: message,
+          recoveryGuidance: 'Inspect the service process and adjudicate its operation before releasing leases.',
+          durationMs: Date.now() - state.instanceStartedAt, completedAt: new Date().toISOString(),
+        };
+        store.recordOperationResult(state.currentOpId, result, confirmed);
+      }
+      if (confirmed) this.domain.internalReleaseResources(`service:${state.serviceId}`, state.spec.requiredResources);
+    } catch (recordError) { errors.push(recordError); confirmed = false; }
+    state.status = 'failed';
+    if (handle?.stdin) state.stdinStream.unpipe(handle.stdin as any);
+    handle?.stdout.unpipe(state.stdoutStream);
+    // An unconfirmed survivor must not keep writing into an ended public stream.
+    // Drain its output while its durable indeterminate record retains the lease.
+    (handle?.stdout as any)?.resume?.();
+    state.currentStderrDrainer?.forceFinalize();
+    state.stdinStream.end();
+    state.stdoutStream.end();
+    const failure = errors.length === 1 ? error : new AggregateError(errors, errors.map(String).join('; '), { cause: error });
+    state.readyReject(failure);
+    if (exit) state.instanceExitResolve?.(exit);
+    else state.instanceExitReject?.(failure);
+    if (confirmed) state.stopResolve();
+    else state.stopReject(failure);
+    return failure;
+  }
+
+  private rejectLifecycle(state: ServiceRuntimeState, error: unknown): void {
+    // Durable facts and leases remain available for recovery when journal writes fail.
+    state.status = 'failed';
+    state.clearReadiness?.();
+    state.readyReject(error);
+    state.instanceExitReject?.(error);
+    state.stopReject(error);
   }
 
   private setupReadiness(state: ServiceRuntimeState, processHandle: ManagedProcessHandle): void {
@@ -345,6 +452,10 @@ export class ServiceSupervisor {
           this.stopService(state.serviceId, 500).catch(() => {});
         }
       }, timeoutMs);
+      state.clearReadiness = () => {
+        clearTimeout(timer);
+        processHandle.stdout.off('data', onData);
+      };
     }
   }
 
@@ -354,6 +465,8 @@ export class ServiceSupervisor {
     exitResult: { exitCode: number | null; signal: NodeJS.Signals | null }
   ): Promise<void> {
     const exitedIdentity = state.currentProcessHandle?.identity;
+    state.clearReadiness?.();
+    state.readyReject(new Error(`Service "${state.serviceId}" exited before readiness`));
 
     // 释放管道连接
     if (state.currentProcessHandle?.stdin) {
@@ -407,6 +520,26 @@ export class ServiceSupervisor {
         identityVerification,
         ...(stderrData?.spillError ? { spillError: stderrData.spillError, stderrSpillError: stderrData.spillError } : {}),
       };
+      if (!state.stopRequested && exitedIdentity) {
+        const settlement = await settleProcessTree(this.driver, exitedIdentity, 0, state.spec.graceMs ?? 1000);
+        if (!state.stopRequested) {
+          if (settlement.status === 'unconfirmed') {
+            store.recordOperationResult(state.currentOpId, {
+              kind: 'indeterminate', status: 'indeterminate',
+              reason: `Service root exited but its descendants could not be confirmed stopped: ${settlement.stop.errorDetails ?? settlement.stop.stopped}`,
+              recoveryGuidance: 'Inspect the service process tree and adjudicate its operation before releasing leases.',
+              durationMs: result.durationMs, completedAt: new Date().toISOString(),
+            }, false);
+            state.status = 'failed';
+            state.instanceExitResolve?.(exitResult);
+            state.stdoutStream.end();
+            state.stopResolve();
+            return;
+          }
+          result.treeSettlement = settlement.treeSettlement;
+          if (settlement.residualProcessesReaped) result.residualProcessesReaped = true;
+        }
+      }
       if (state.stopRequested) {
         // 显式停止：根进程退出不等于整组已停，结果交给 stopService 在拿到驱动停止结论后落盘
         state.pendingInstanceResult = result;
@@ -428,6 +561,7 @@ export class ServiceSupervisor {
       if (state.spec.requiredResources && state.spec.requiredResources.length > 0) {
         this.domain.internalReleaseResources(serviceLeaseHolder, state.spec.requiredResources);
       }
+      state.stopResolve();
       return;
     }
 
@@ -446,6 +580,7 @@ export class ServiceSupervisor {
         this.domain.internalReleaseResources(serviceLeaseHolder, state.spec.requiredResources);
       }
       state.stdoutStream.end();
+      state.stopResolve();
       return;
     }
 
@@ -480,10 +615,10 @@ export class ServiceSupervisor {
       });
 
       // 重启间隙租约保持在 service 名下，不释放
-      state.restartTimer = setTimeout(async () => {
+      state.restartTimer = setTimeout(() => {
         state.restartTimer = null;
         if (state.stopRequested || this.domain.isClosed()) return;
-        await this.spawnInstance(state, newInstanceIndex);
+        this.spawnInstance(state, newInstanceIndex).catch((error) => this.settleStartupFailure(state, error));
       }, restart.backoffMs);
     } else {
       // 超过重启上限或 restart: never
@@ -506,12 +641,15 @@ export class ServiceSupervisor {
         this.domain.internalReleaseResources(serviceLeaseHolder, state.spec.requiredResources);
       }
       state.stdoutStream.end();
+      state.stopResolve();
     }
   }
 
   public async stopService(serviceId: string, graceMs: number = 2000): Promise<void> {
     const state = this.activeServices.get(serviceId);
     if (!state) return;
+    // A second entry point must use the driver that owns the running instance.
+    if (state.owner !== this) return state.owner.stopService(serviceId, graceMs);
     if (state.status === 'stopped' || state.status === 'failed') return state.stopPromise;
     // 停止流水线已在进行（例如 readiness 超时触发的停止）：加入同一个结果，避免重复终态写入
     if (state.status === 'stopping') return state.stopPromise;
@@ -652,10 +790,19 @@ export class ServiceSupervisor {
     const canonical = {
       serviceId: spec.serviceId,
       runId: spec.runId,
-      execPath: spec.command.execPath,
-      args: spec.command.args,
-      cwd: spec.command.cwd,
-      requiredResources: [...(spec.requiredResources || [])].sort(),
+      command: computeInputFingerprint({
+        opId: spec.serviceId, runId: spec.runId, name: spec.serviceId,
+        command: spec.command, requiredResources: spec.requiredResources,
+      }),
+      readiness: typeof spec.readiness === 'object'
+        ? { source: spec.readiness.stdoutLine.source, flags: spec.readiness.stdoutLine.flags, timeoutMs: spec.readiness.timeoutMs ?? null }
+        : spec.readiness ?? 'spawned',
+      restart: typeof spec.restart === 'object'
+        ? { policy: spec.restart.policy, maxRestarts: spec.restart.maxRestarts, backoffMs: spec.restart.backoffMs }
+        : spec.restart ?? 'never',
+      maxStderrBytes: spec.maxStderrBytes ?? null,
+      artifactsDir: spec.artifactsDir ?? null,
+      graceMs: spec.graceMs ?? null,
     };
     return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
   }

@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import assert from 'node:assert/strict';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -6,6 +7,7 @@ import path from 'node:path';
 
 import { ExecutionDomain } from '../../src/domain.js';
 import { ProcessSupervisor } from '../../src/supervisor/supervisor.js';
+import * as readTracking from '../../src/workspace/read-tracking.js';
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -50,6 +52,7 @@ describe('workspace transactions (optimistic parallel agents)', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     domain.close();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
@@ -96,6 +99,7 @@ describe('workspace transactions (optimistic parallel agents)', () => {
       command: { execPath: process.execPath, args: ['-e', script], cwd },
       requiredResources: [`workspace:write:${cwd}`],
     });
+    assert(res.kind === 'process');
     expect(res.status, res.stderr).toBe('succeeded');
     return res;
   }
@@ -181,6 +185,77 @@ describe('workspace transactions (optimistic parallel agents)', () => {
     expect(fs.existsSync(path.join(repoDir, 'src/server.ts'))).toBe(false);
   });
 
+  it.each(['file', 'directory', 'dangling'] as const)('rejects a changed %s symlink dependency without claiming to have observed the link', async (kind) => {
+    fs.mkdirSync(path.join(repoDir, 'first'));
+    fs.mkdirSync(path.join(repoDir, 'second'));
+    fs.writeFileSync(path.join(repoDir, 'first/value.txt'), 'A');
+    fs.writeFileSync(path.join(repoDir, 'second/value.txt'), 'B');
+    const initial = kind === 'file' ? 'first/value.txt' : kind === 'directory' ? 'first' : 'missing';
+    const next = kind === 'directory' ? 'second' : 'second/value.txt';
+    fs.symlinkSync(initial, path.join(repoDir, 'input'));
+    const a = await begin('tx-a', 'run-a');
+    const b = await begin('tx-b', 'run-b');
+    const input = path.join(a.forkRoot, kind === 'directory' ? 'input/value.txt' : 'input');
+    fs.writeFileSync(path.join(a.forkRoot, 'answer.txt'), fs.existsSync(input) ? fs.readFileSync(input) : 'missing');
+    fs.unlinkSync(path.join(b.forkRoot, 'input'));
+    fs.symlinkSync(next, path.join(b.forkRoot, 'input'));
+    expect((await supervisor.commitWorkspaceTransaction('tx-b')).status).toBe('committed');
+
+    const result = await supervisor.commitWorkspaceTransaction('tx-a');
+    expect(result.status).toBe('conflict');
+    expect(result.pathDependencies).toContain('input');
+    expect(result.readSet ?? []).not.toContain('input');
+    if (result.status === 'conflict') {
+      expect(result.conflicts).toContainEqual({ path: 'input', kind: 'read_write', otherTxId: 'tx-b' });
+    }
+    expect(fs.existsSync(path.join(repoDir, 'answer.txt'))).toBe(false);
+  });
+
+  it('retains conservative link dependencies without filesystem atime support', async () => {
+    vi.spyOn(readTracking, 'probeReadTracking').mockReturnValue('unobserved');
+    fs.symlinkSync('shared.txt', path.join(repoDir, 'input'));
+    const tx = await supervisor.beginWorkspaceTransaction({
+      txId: 'no-atime', runId: 'run-a', root: repoDir, forkPath: path.join(tempDir, 'fork-no-atime'),
+    });
+    fs.writeFileSync(path.join(tx.forkRoot, 'answer.txt'), fs.readFileSync(path.join(tx.forkRoot, 'input')));
+    fs.unlinkSync(path.join(repoDir, 'input'));
+    fs.symlinkSync('config.json', path.join(repoDir, 'input'));
+    const result = await supervisor.commitWorkspaceTransaction(tx.txId);
+    expect(result).toMatchObject({ status: 'conflict', readTracking: 'unobserved', readSet: null, pathDependencies: ['input'] });
+  });
+
+  it('keeps inspected link dependencies after a domain restart', async () => {
+    const tx = await begin('tx-a', 'run-a');
+    fs.symlinkSync('shared.txt', path.join(tx.forkRoot, 'input'));
+    fs.writeFileSync(path.join(tx.forkRoot, 'answer.txt'), fs.readFileSync(path.join(tx.forkRoot, 'input')));
+    expect((await supervisor.inspectWorkspaceTransaction(tx.txId)).pathDependencies).toEqual(['input']);
+    fs.unlinkSync(path.join(tx.forkRoot, 'input'));
+    fs.symlinkSync('config.json', path.join(repoDir, 'input'));
+    domain.close();
+    domain = ExecutionDomain.acquire(path.join(tempDir, 'domain'), 'tx-domain');
+    supervisor = new ProcessSupervisor(domain);
+    const result = await supervisor.commitWorkspaceTransaction(tx.txId);
+    expect(result).toMatchObject({ status: 'conflict', pathDependencies: ['input'] });
+  });
+
+  it('treats a recovered legacy transaction without link evidence as unknown, not dependency-free', async () => {
+    const tx = await begin('tx-a', 'run-a');
+    fs.writeFileSync(path.join(tx.forkRoot, 'answer.txt'), 'answer');
+    fs.writeFileSync(path.join(repoDir, 'shared.txt'), 'external change');
+    domain.close();
+    domain = ExecutionDomain.acquire(path.join(tempDir, 'domain'), 'tx-domain');
+    supervisor = new ProcessSupervisor(domain);
+    const store = domain.getStore();
+    const getJournalEvents = store.getJournalEvents.bind(store);
+    vi.spyOn(store, 'getJournalEvents').mockImplementation((...args) => getJournalEvents(...args).map((event) => {
+      if (event.type !== 'TX_BEGUN') return event;
+      const { pathDependencies: _paths, ...payload } = event.payload;
+      return { ...event, payload };
+    }));
+    const result = await supervisor.commitWorkspaceTransaction(tx.txId);
+    expect(result).toMatchObject({ status: 'conflict', pathDependencies: null });
+  });
+
   it('treats a directory listing as a read of its entries, not of their contents', async () => {
     const a = await begin('tx-a', 'run-a');
     const b = await begin('tx-b', 'run-b');
@@ -243,7 +318,7 @@ describe('workspace transactions (optimistic parallel agents)', () => {
       domainId: domain.domainId,
       runId: 'run-a',
       type: 'TX_COMMITTING',
-      payload: { txId: 'tx-a', effects },
+      payload: { txId: 'tx-a', effects, isolationVersion: 1 },
       timestamp: new Date().toISOString(),
     });
     domain.close();

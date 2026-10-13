@@ -17,6 +17,113 @@ See `CHANGELOG.md` for the boundary between releases and unreleased local change
 the managed Agent command context also bypasses its scope and Run admission limits.
 Configure domain concurrency and process resource budgets for those paths.
 
+`executeProcess` and `quickRun` return `ProcessExecutionResult`, the union of a
+determinate process result and `IndeterminateResult`. TypeScript callers must
+narrow `kind` or `status` before reading exit codes or output; unknown outcomes
+have a reason and recovery guidance, without invented output or exit facts.
+Execution input validation precedes admission and durable effects. Timer delays
+must be finite and within Node's supported range; legitimate zero limits and
+opaque operation IDs remain supported.
+
+MCP tool arguments are checked against their advertised input schemas before
+creating request Runs or binding operations. Invalid types, bounds, array items
+and unknown fields return JSON-RPC `-32602` with `tool`, `path` and `keyword`.
+Arguments are not coerced. Execution and operation-status replies preserve the
+kernel's identity, evidence, truncation, spill and measurement facts; `mcpOutput`
+describes the separate character limit applied by the transport. Indeterminate
+execution and replay keep request Runs indeterminate instead of reporting success.
+
+Operation IDs are domain-wide identities across operation kinds. Queued operations
+and active internal allocations reserve their IDs. Conflicting registrations are
+rejected before effects; failure cleanup cannot record a result for an intent it
+did not register. Low-level hosts should submit fresh intents through the domain
+rather than preallocating a duplicate operation identity.
+
+## Domain coordination and artifact ownership
+
+An acquired `ExecutionDomain` is the unit of in-process arbitration. Supervisors
+on that domain share the in-flight operation table, read-tracking exclusions,
+service registry and workspace transaction manager. A second entry point joins
+an identical operation rather than allocating its resources again. Each running
+operation and service keeps its original driver for cancellation. `quickRun`
+with an existing domain inherits the domain's driver unless explicitly configured.
+
+The transaction manager binds its snapshot driver on first use. Another entry
+point with a different explicit snapshot driver is rejected. This serializes
+transaction commits in the domain; it does not lock out unmanaged filesystem writers.
+Commit and abort share a queue. Commit holds the declared source and target write
+keys during file validation and application; inspection also holds its source key.
+Observation replay releases temporary leases for snapshot capture, then protects
+its redo source and rechecks the target revision before application. These are
+locks for identical declared resource keys, not hierarchical directory locks.
+
+`TX_COMMITTING` records `isolationVersion: 1`. After that fact, partial application
+or result-recording failure retains source and target isolation. Domain startup
+rebuilds these barriers from unfinished transaction journal facts before accepting
+new execution. A durable `TX_COMMITTED` closes the transaction even if later lease
+release or cleanup fails, so retry cannot apply its files again. Legacy unfinished
+commits lack continuous-isolation evidence: they remain isolated and automatic
+replay is refused, requiring manual examination and resolution. Completed legacy
+transactions are unchanged; no historical isolation guarantee is inferred.
+
+Worktree removal takes its own write lease before awaiting the driver, rejects
+active foreign owners even with `force`, and releases only its own resources.
+An internal materialization lease is handed back using a creation record consumed
+once, not an operation-name prefix. Partial lease release keeps the owner identity
+and budget reserved while other resources remain held.
+
+These objects are shared by domain object identity, not by directory name. Reopening
+a domain after shutdown creates a new coordinator and rebuilds durable facts.
+
+Service instances use the same tree-settlement mechanism as one-shot processes.
+Natural root exit reaps known descendants before release; an unconfirmed stop
+records `indeterminate` and retains service leases. Startup failure rejects joined
+observers, and natural exit or exhausted restarts settle the service's stop waiter.
+
+Operation IDs are opaque keys. Unsafe or long filename components are encoded;
+ordinary IDs retain their existing readable artifact names. Artifact creation
+uses exclusive, no-follow opens and never replaces a pre-existing object. Cleanup
+checks file identity, and `pruneArtifacts` removes only unreferenced files whose
+creation was journaled for a settled operation. Unknown files and legacy orphan
+files without ownership records are retained. Snapshot manifests are protected
+during capture and owned by the persisted snapshot after commit.
+
+Symbolic links are conservative `pathDependencies`, separate from observed
+`readSet` entries. Changing a link invalidates a transaction's path assumptions;
+command evidence answers `unknown` for changed links even with stat caches ruled
+out. Old transactions or evidence without this field make no completeness claim.
+Safe, digest-verified legacy manifest basenames remain readable; escaped legacy
+evidence paths are rejected rather than followed.
+
+Regressions and shared consumer contracts: `tests/supervisor/artifact-safety.test.ts`,
+`tests/store/sqlite.test.ts`, `tests/supervisor/domain-coordination.test.ts`,
+`tests/supervisor/service-coordination.test.ts`, `tests/workspace/domain-coordination.test.ts`,
+and contracts 63–67 in `src/testing/contract-suite.ts`.
+
+Process-table query failure is unavailable evidence, not an empty tree or a stale
+snapshot. The Node driver returns `cannot_determine` for a stop it cannot verify;
+it does not substitute a blind group or single-PID signal when the driver cannot
+establish evidence. Recovery and adjudication retain isolation when group evidence
+is unavailable. Hosts requiring containment should use an available holding driver
+and its declared scope.
+
+Missing resource measurements are not zero usage. Results report
+`resourceSamplingError` and omit unknown memory/CPU peaks. A soft measured limit
+requires an observer at admission; losing its measurements requests termination
+with `observation_failed`. A confirmed stop releases leases; an unconfirmed stop
+remains `indeterminate`. Observe-only failure keeps the command running and records
+the missing evidence. In-flight sampling is joined before recording the result.
+Contract 66 and `tests/driver/observation-failure.test.ts` /
+`tests/supervisor/budget-observation.test.ts` cover these cases.
+
+Completed reaper sessions release their helper/stream objects. A weak,
+identity-bound terminal fact remains usable while the caller retains that original
+identity; it cannot authorize a newer session that reused the same PID. Timed-out
+tree waiters detach rather than accumulating in a live session. The retention
+regression uses real cancelled processes and garbage collection, not a simulated
+successful stop. This removes one lifetime retention source; journal and agent
+history still require the planned lifetime bounds below.
+
 ## Crash recovery and launch evidence
 
 Process and service supervisors persist `Operation.spawnGated` with the intent,

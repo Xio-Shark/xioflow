@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -98,6 +99,7 @@ describe('ReaperPlatformDriver', () => {
         requiredResources: ['res:escape'],
         drainTimeoutMs: 300,
       });
+      assert(result.kind === 'process');
       const escapee = await readPid(pidFile);
       strays.push(escapee);
 

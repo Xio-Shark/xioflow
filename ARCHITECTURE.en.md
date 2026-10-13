@@ -2,6 +2,8 @@
 
 > **Start here for integration:** [Current implementation contract](spec/current-contract.md) separates the embedded TypeScript execution core, experimental AgentRuntime, and unimplemented Rust/daemon/Python/ABI plans. `CHANGELOG.md` distinguishes released behavior from worktree changes.
 
+> **Kernel foundation (2026-10-13, unreleased):** An acquired domain coordinates all supervisor entry points, including in-flight execution, service ownership, read tracking and transaction commits. Artifact creation and reclamation require explicit ownership evidence. Symbolic-link assumptions remain conservative path dependencies. Contracts 63–65 cover these boundaries; the [current contract](spec/current-contract.md#domain-coordination-and-artifact-ownership) defines compatibility and limits.
+
 > **Experimental extension (2026-10-01, shipped in 0.7.0):** [AgentRuntime](spec/agent-runtime.md) adds kernel-owned agent lifecycle, cooperative dispatch, evidence gates and persisted checkpoints/step budgets. Existing model/tool adapters remain in distributions. The extension supersedes the execution-primitives-only positioning below for this experimental scope; it is not a complete multi-agent runtime.
 
 The [interruption contract](spec/agent-runtime.md#interruption-contract) distinguishes requesting cancellation from settlement: record intent, notify the adapter, cancel managed commands, then await the batch without changing its checkpoint or spent budget. It does not force-kill JavaScript adapters or turn unconfirmed process stops into success.
@@ -385,3 +387,8 @@ Status column: `S<n>` indicates implementation as test #n in the shared conforma
 | 60 | L3 | A transaction in whose fork a process ran does not use observation validation: the file-level conflict stands and `TX_VALIDATION_DOWNGRADED` is journaled. | S60 |
 | 61 | L3 | Read evidence never answers `fresh` after a dependency changed: a changed file the command read gives `stale` and names it; a change only outside the read set without stat caches ruled out, or unobserved reads, gives `unknown`. | S61 |
 | 62 | L1 | Root exit with drained pipes is not an empty tree: a detached descendant with closed stdio is reaped (`treeSettlement: 'reaped'`) or the result says `unverified`, never `empty`; drivers declaring `cgroup` / `subreaper` enumeration must reap it. | S62 |
+| 63 | L1 | Operation IDs are opaque keys: artifact creation, cleanup and reclamation stay within the artifact namespace and preserve pre-existing user files. Unknown ownership is retained. | S63 |
+| 64 | L1 | Supervisor entry points on one domain share in-flight execution and leases. Same-ID joins execute once; conflicts preserve the original operation, and cancellation uses its originating driver. | S64 |
+| 65 | L3 | Supervisor entry points on one domain share workspace commit coordination: concurrent conflicting transactions cannot both commit. | S65 |
+| 66 | L1 | Failed process/resource observation is neither an empty tree nor zero usage. Losing observation required by a soft limit requests stop; unconfirmed stops retain leases, and observe-only failures remain explicit. | S66 |
+| 67 | L1 | Cross-kind operation ID conflicts are rejected before effects. Failure cleanup preserves existing operations and leases; queued operations and internal allocations reserve their identities. | S67 |

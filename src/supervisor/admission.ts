@@ -68,8 +68,11 @@ export function resolveConfinementDriver(
   return supervisorDefault;
 }
 
-/** 准入期强校验：hard 预算要求驱动真的具备对应能力，否则显式拒绝而不是静默降级。 */
-export function assertHardBudgetSupported(driver: PlatformDriver, budget: ResourceBudget | undefined): void {
+/** Budget admission requires the observation or enforcement mechanism it depends on. */
+export function assertBudgetSupported(driver: PlatformDriver, budget: ResourceBudget | undefined): void {
+  if (budget?.enforcement === 'soft' && (budget.maxMemoryBytes || budget.maxCpuTimeMs || budget.maxPids) && !driver.sampleMetrics) {
+    throw new UnsupportedCapabilityError('resourceMetrics', driver.name, 'soft');
+  }
   if (budget?.enforcement !== 'hard') return;
   if (budget.maxMemoryBytes && !driver.capabilities.memoryHardLimit) {
     throw new UnsupportedCapabilityError('memoryHardLimit', driver.name, 'hard');

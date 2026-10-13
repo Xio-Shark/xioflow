@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { collectReadSet, normalizeAccessTimes, probeReadTracking } from '../../src/workspace/read-tracking.js';
+import { collectReadSet, collectReadTracking, normalizeAccessTimes, probeReadTracking } from '../../src/workspace/read-tracking.js';
 
 describe('access-time read tracking', () => {
   let root: string;
@@ -44,6 +44,25 @@ describe('access-time read tracking', () => {
     normalizeAccessTimes(root);
     expect(fs.statSync(path.join(root, '.git/index'), { bigint: true }).atimeNs).toBe(before.atimeNs);
     expect(collectReadSet(root)).toEqual([]);
+  });
+
+  it('keeps symlink paths separate from observed reads without following directory, dangling or external links', () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'xio-atime-outside-'));
+    try {
+      fs.writeFileSync(path.join(outside, 'external.txt'), 'outside');
+      fs.symlinkSync(outside, path.join(root, 'external'));
+      fs.symlinkSync('dir', path.join(root, 'directory'));
+      fs.symlinkSync('missing', path.join(root, 'dangling'));
+      fs.symlinkSync('read.txt', path.join(root, 'file'));
+      const before = fs.statSync(path.join(outside, 'external.txt'), { bigint: true });
+      expect(() => normalizeAccessTimes(path.join(root, 'external'))).toThrow('not a real directory');
+      expect(normalizeAccessTimes(root)).toEqual(['dangling', 'directory', 'external', 'file']);
+      expect(collectReadTracking(root)).toEqual({ readSet: [], pathDependencies: ['dangling', 'directory', 'external', 'file'] });
+      const after = fs.statSync(path.join(outside, 'external.txt'), { bigint: true });
+      expect([after.atimeNs, after.mtimeNs, after.ctimeNs]).toEqual([before.atimeNs, before.mtimeNs, before.ctimeNs]);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it.each(['equal', 'unchanged'] as const)('probes actual atime advancement when the read timestamp is %s', (mode) => {

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { artifactPath, OwnedArtifact, readOwnedArtifact, writeArtifact } from '../artifacts.js';
 import { IgnoredChanges } from '../types.js';
 
 /**
@@ -33,7 +34,7 @@ export const IGNORED_CHANGES_LIMIT = 50;
 export type IgnoredManifestVerdict = 'unchanged' | 'changed' | 'inconclusive';
 
 export function ignoredManifestPath(domainPath: string, snapshotId: string): string {
-  return path.join(domainPath, 'artifacts', `${snapshotId}-ignored.manifest`);
+  return artifactPath(path.join(domainPath, 'artifacts'), snapshotId, '-ignored.manifest');
 }
 
 /** 逐项 lstat。列举与 lstat 之间消失的文件直接略过：它不在这一刻的清单里，比较时自然表现为增 / 删。 */
@@ -60,33 +61,48 @@ export function collectIgnoredEntries(paths: string[]): IgnoredManifestEntry[] {
 }
 
 /** 写清单并 fsync，返回内容的 sha256。清单含路径名（可能敏感），权限收紧到属主。 */
-export function writeIgnoredManifest(file: string, entries: IgnoredManifestEntry[]): string {
+export function writeIgnoredManifest(file: string, entries: IgnoredManifestEntry[]): { digest: string; artifact: OwnedArtifact } {
   const body = JSON.stringify({
     version: 1,
     entries: entries.map((e) => [e.path, e.size, e.mtimeNs, e.ctimeNs, e.mode]),
   });
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const fd = fs.openSync(file, 'w', 0o600);
-  try {
-    fs.writeSync(fd, body);
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-  return crypto.createHash('sha256').update(body).digest('hex');
+  const artifact = writeArtifact(file, body);
+  return { digest: crypto.createHash('sha256').update(body).digest('hex'), artifact };
 }
 
-/** 读回清单；文件不在或内容与登记的摘要不符时返回 null（调用方据此不给出「未变」的结论）。 */
-export function readIgnoredManifest(file: string, digest: string): IgnoredManifestEntry[] | null {
-  let body: string;
-  try {
-    body = fs.readFileSync(file, 'utf8');
-  } catch (err: any) {
-    if (err?.code === 'ENOENT') return null;
-    throw err;
+export function resolveIgnoredManifest(domainPath: string, snapshotId: string, digest: string):
+  | { state: 'found'; body: string; artifact: OwnedArtifact }
+  | { state: 'missing' | 'mismatch' } {
+  const current = ignoredManifestPath(domainPath, snapshotId);
+  const candidates = new Set([current]);
+  const legacyName = `${snapshotId}-ignored.manifest`;
+  // 仅兼容旧的单文件名；从不解析旧路径，也不把保留命名空间误认作另一快照的旧文件。
+  if (!/[\\/\0]/.test(snapshotId) && !snapshotId.startsWith('~xio-id-') && Buffer.byteLength(legacyName) <= 255) {
+    candidates.add(path.join(domainPath, 'artifacts', legacyName));
   }
-  if (crypto.createHash('sha256').update(body).digest('hex') !== digest) return null;
-  const parsed = JSON.parse(body) as { entries: Array<[string, string, string, string, number]> };
+  let state: 'missing' | 'mismatch' = 'missing';
+  for (const file of candidates) {
+    let loaded: ReturnType<typeof readOwnedArtifact>;
+    try {
+      loaded = readOwnedArtifact(file);
+    } catch (err: any) {
+      if (err?.code === 'ENOENT') continue;
+      throw err;
+    }
+    if (crypto.createHash('sha256').update(loaded.data).digest('hex') !== digest) {
+      state = 'mismatch';
+      continue;
+    }
+    return { state: 'found', body: loaded.data.toString('utf8'), artifact: loaded.artifact };
+  }
+  return { state };
+}
+
+/** 缺失或摘要不符时不能声称忽略文件未变；合法旧文件名仍按持久化摘要验证。 */
+export function readIgnoredManifest(domainPath: string, snapshotId: string, digest: string): IgnoredManifestEntry[] | null {
+  const resolved = resolveIgnoredManifest(domainPath, snapshotId, digest);
+  if (resolved.state !== 'found') return null;
+  const parsed = JSON.parse(resolved.body) as { entries: Array<[string, string, string, string, number]> };
   return parsed.entries.map(([p, size, mtimeNs, ctimeNs, mode]) => ({ path: p, size, mtimeNs, ctimeNs, mode }));
 }
 

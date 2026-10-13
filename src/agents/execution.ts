@@ -1,8 +1,8 @@
 import type { ExecuteProcessOptions } from '../supervisor/types.js';
-import type { IndeterminateResult, ProcessOperationResult } from '../types.js';
+import type { ProcessExecutionResult } from '../types.js';
 
 export type AgentCommandOptions = Omit<ExecuteProcessOptions, 'runId'>;
-export type AgentCommandResult = ProcessOperationResult | IndeterminateResult;
+export type AgentCommandResult = ProcessExecutionResult;
 
 export interface AgentExecution {
   /** Cooperative cancellation for provider calls and other adapter-owned work. */

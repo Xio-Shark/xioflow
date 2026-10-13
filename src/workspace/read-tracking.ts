@@ -12,6 +12,7 @@ import path from 'node:path';
  * 局限（如实声明而不是假装知道）：
  * - 文件系统以 noatime 挂载时观测不到任何读取：probeReadTracking 返回 'unobserved'；
  * - 先读后写的文件只留下写的证据（它已在写集里，冲突判定不受影响）；
+ * - 符号链接的遍历不保证推进其 atime：链接路径单独列为保守依赖，不冒充实际读集；
  * - 进程读 fork 之外的路径不在读集里（事务只对 fork 内的状态负责）。
  */
 export type ReadTracking = 'atime' | 'unobserved';
@@ -31,6 +32,7 @@ export function wasAccessed(st: fs.BigIntStats): boolean {
 
 function walk(dir: string, visit: (abs: string, rel: string, st: fs.BigIntStats) => void, rel = ''): void {
   const st = fs.lstatSync(dir, { bigint: true });
+  if (!st.isDirectory()) throw new Error(`Read tracking root is not a real directory: ${dir}`);
   visit(dir, rel, st);
   for (const name of fs.readdirSync(dir)) {
     if (!rel && SKIP.has(name)) continue;
@@ -42,28 +44,37 @@ function walk(dir: string, visit: (abs: string, rel: string, st: fs.BigIntStats)
   }
 }
 
-/** 把 root 下每个条目（跳过顶层 .git）的 atime 设到其 mtime 之前。目录在列举之后再归一。 */
-export function normalizeAccessTimes(root: string): void {
+/** 归一真实条目的 atime，返回跳过的链接路径；目录在列举之后再归一，顶层 .git 不参与。 */
+export function normalizeAccessTimes(root: string): string[] {
   const dirs: Array<[string, fs.BigIntStats]> = [];
-  walk(root, (abs, _rel, st) => {
-    if (st.isSymbolicLink()) return; // utimes 会跟随链接，改到链接目标上
+  const pathDependencies: string[] = [];
+  walk(root, (abs, rel, st) => {
+    if (st.isSymbolicLink()) {
+      pathDependencies.push(rel);
+      return; // utimes 会跟随链接，改到链接目标上
+    }
     if (st.isDirectory()) dirs.push([abs, st]);
     else resetAccessTime(abs, st);
   });
   // 深的目录先归一：父目录的 mtime 不受子目录 atime 变化影响
   for (const [abs, st] of dirs.reverse()) resetAccessTime(abs, st);
+  return pathDependencies.sort();
 }
 
-/**
- * 读过的条目（相对 root，目录以 `/` 结尾，root 本身为 `./`）：atime 不早于 mtime。
- */
-export function collectReadSet(root: string): string[] {
-  const reads: string[] = [];
+/** 一趟遍历分别收集 atime 读集和无法通过 atime 判断是否被使用的链接路径。 */
+export function collectReadTracking(root: string): { readSet: string[]; pathDependencies: string[] } {
+  const readSet: string[] = [];
+  const pathDependencies: string[] = [];
   walk(root, (_abs, rel, st) => {
-    if (st.isSymbolicLink()) return;
-    if (wasAccessed(st)) reads.push(st.isDirectory() ? `${rel || '.'}/` : rel);
+    if (st.isSymbolicLink()) pathDependencies.push(rel);
+    else if (wasAccessed(st)) readSet.push(st.isDirectory() ? `${rel || '.'}/` : rel);
   });
-  return reads.sort();
+  return { readSet: readSet.sort(), pathDependencies: pathDependencies.sort() };
+}
+
+/** 读过的条目（相对 root，目录以 `/` 结尾，root 本身为 `./`）：atime 不早于 mtime。 */
+export function collectReadSet(root: string): string[] {
+  return collectReadTracking(root).readSet;
 }
 
 /** 在 dir 所在文件系统上实测一次「读取会推进 atime」。探针文件放在 dir 下并立即删除。 */

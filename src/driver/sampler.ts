@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import util from 'node:util';
+import { ProcessObservationError } from './observation.js';
 
 const execFileAsync = util.promisify(execFile);
 
@@ -70,8 +71,9 @@ export class ProcessSampler {
         }
         this.cachedSnapshot = { timestamp: Date.now(), map };
         return map;
-      } catch {
-        return this.cachedSnapshot?.map ?? new Map();
+      } catch (error) {
+        this.cachedSnapshot = null;
+        throw new ProcessObservationError('Process table observation failed', error);
       } finally {
         this.inFlightPromise = null;
       }

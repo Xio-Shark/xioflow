@@ -1,5 +1,5 @@
 import { ExecutionDomain } from '../domain.js';
-import { OperationIdConflictError, ProcessOperationResult, RecoveryRequiredError } from '../types.js';
+import { OperationIdConflictError, ProcessExecutionResult, RecoveryRequiredError } from '../types.js';
 import { ActiveOperationState, ExecuteProcessOptions } from './types.js';
 
 /**
@@ -11,7 +11,7 @@ export async function joinInFlight(
   inFlight: ActiveOperationState,
   options: ExecuteProcessOptions,
   inputFingerprint: string
-): Promise<ProcessOperationResult> {
+): Promise<ProcessExecutionResult> {
   if (inFlight.inputFingerprint !== inputFingerprint) {
     throw new OperationIdConflictError(
       options.opId,
@@ -41,7 +41,7 @@ export async function joinInFlight(
     unsubscribe();
     throw signal.reason || new Error('Operation wait aborted');
   }
-  return await new Promise<ProcessOperationResult>((resolve, reject) => {
+  return await new Promise<ProcessExecutionResult>((resolve, reject) => {
     const onAbort = () => {
       unsubscribe();
       reject(signal.reason || new Error('Operation wait aborted'));
@@ -70,7 +70,7 @@ export function replayRecorded(
   domain: ExecutionDomain,
   options: ExecuteProcessOptions,
   inputFingerprint: string
-): ProcessOperationResult | undefined {
+): ProcessExecutionResult | undefined {
   const existingRecorded = domain.getStore().getOperation(options.opId);
   if (!existingRecorded) return undefined;
 
@@ -90,11 +90,15 @@ export function replayRecorded(
   }
 
   // indeterminate：绝不重跑，原样返回，保留租约；已结清终态返回已持久化结果
-  const kind = existingRecorded.result?.status === 'indeterminate' ? 'indeterminate' : 'recorded';
+  const result = existingRecorded.result;
+  if (!result || (result.kind !== 'process' && result.kind !== 'indeterminate')) {
+    throw new Error(`Cannot replay process operation "${options.opId}": stored process result is missing or has an incompatible kind`);
+  }
+  const kind = result.status === 'indeterminate' ? 'indeterminate' : 'recorded';
   domain.getStore().recordReplay(domain.domainId, options.opId, kind, options.runId);
   return {
-    ...existingRecorded.result,
+    ...result,
     replayed: true,
     runId: existingRecorded.runId,
-  } as unknown as ProcessOperationResult;
+  };
 }

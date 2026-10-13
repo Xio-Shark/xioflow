@@ -1,8 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import assert from 'node:assert/strict';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { ExecutionDomain, quickRun } from '../../src/index.js';
+import { ExecutionDomain, ProcessSupervisor, quickRun } from '../../src/index.js';
+import type { QuickRunOptions, StructuredCommand } from '../../src/index.js';
 
 describe('内核 0.3.0: quickRun 便捷入口与自动生命周期 [Step 4]', () => {
   let tempDir: string;
@@ -16,6 +18,7 @@ describe('内核 0.3.0: quickRun 便捷入口与自动生命周期 [Step 4]', ()
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     if (!domain.isClosed()) {
       domain.close();
     }
@@ -34,6 +37,7 @@ describe('内核 0.3.0: quickRun 便捷入口与自动生命周期 [Step 4]', ()
 
     // 第一次调用：未提供 opId
     const res1 = await quickRun(command, { domain });
+    assert(res1.kind === 'process');
     expect(res1.status).toBe('succeeded');
     expect(res1.replayed).toBeUndefined();
     expect(res1.stdout).toContain('quick-run-out');
@@ -69,6 +73,7 @@ describe('内核 0.3.0: quickRun 便捷入口与自动生命周期 [Step 4]', ()
 
     // 第二次调用：相同 opId、相同输入
     const res2 = await quickRun(command, { domain, opId });
+    assert(res2.kind === 'process');
     expect(res2.status).toBe('succeeded');
     expect(res2.replayed).toBe(true);
     expect(res2.stdout).toContain('idem-out');
@@ -113,6 +118,7 @@ describe('内核 0.3.0: quickRun 便捷入口与自动生命周期 [Step 4]', ()
     };
 
     const res = await quickRun(command, { domainPath: customDomainDir });
+    assert(res.kind === 'process');
     expect(res.status).toBe('succeeded');
     expect(res.stdout).toContain('standalone');
 
@@ -120,5 +126,69 @@ describe('内核 0.3.0: quickRun 便捷入口与自动生命周期 [Step 4]', ()
     const reacquired = ExecutionDomain.acquire(customDomainDir, 'default');
     expect(reacquired.isClosed()).toBe(false);
     reacquired.close();
+  });
+
+  it.each([
+    ['runId', { runId: '' }],
+    ['runId', { runId: null }],
+    ['opId', { opId: null }],
+    ['name', { name: null }],
+    ['requiredResources', { requiredResources: null }],
+    ['resourceBudget', { resourceBudget: null }],
+    ['timeoutMs', { timeoutMs: NaN }],
+    ['waitTimeoutMs', { waitTimeoutMs: 2 ** 31 }],
+    ['maxOutputBytes', { maxOutputBytes: -1 }],
+  ])('rejects invalid %s before creating a domain or request records (%j)', async (field, invalid) => {
+    const command = { execPath: process.execPath, args: ['-e', '0'], cwd: tempDir };
+    const customDomainDir = path.join(tempDir, 'must-not-exist');
+    const invalidOptions = invalid as unknown as QuickRunOptions;
+    await expect(quickRun(command, { ...invalidOptions, domainPath: customDomainDir })).rejects.toThrow(String(field));
+    expect(fs.existsSync(customDomainDir)).toBe(false);
+    const before = domain.status;
+    await expect(quickRun(command, { ...invalidOptions, domain })).rejects.toThrow(String(field));
+    expect(domain.status.tasks).toEqual(before.tasks);
+    expect(domain.status.runs).toEqual(before.runs);
+    expect(domain.status.operations).toEqual(before.operations);
+    expect(domain.getStore().getJournalEvents(domain.domainId)).toEqual([]);
+  });
+
+  it.each([
+    ['command.execPath', { execPath: null }],
+    ['command.cwd', { cwd: null }],
+    ['command.args', { args: [1] }],
+    ['command.inheritEnv', { inheritEnv: 'false' }],
+  ])('rejects invalid %s before creating the implicit default domain', async (field, invalid) => {
+    const command = { execPath: process.execPath, args: ['-e', '0'], cwd: tempDir, ...invalid } as unknown as StructuredCommand;
+    await expect(quickRun(command)).rejects.toThrow(field);
+    expect(fs.existsSync(path.join(tempDir, '.xioflow'))).toBe(false);
+    expect(domain.status.tasks).toEqual([]);
+    expect(domain.status.runs).toEqual([]);
+  });
+
+  it('finalizes its own request run after an execution rejection and preserves the original error', async () => {
+    const failure = new Error('injected execution rejection');
+    vi.spyOn(ProcessSupervisor.prototype, 'executeProcess').mockRejectedValue(failure);
+    await expect(quickRun({ execPath: process.execPath, args: [], cwd: tempDir }, { domain })).rejects.toBe(failure);
+    expect(domain.status.runs).toHaveLength(1);
+    expect(domain.status.runs[0]).toMatchObject({ status: 'failed' });
+    expect(domain.status.runs[0].endedAt).toBeTruthy();
+  });
+
+  it('preserves both the execution failure and a request-run finalization failure', async () => {
+    const failure = new Error('injected execution rejection');
+    const finalizeFailure = new Error('injected finalization rejection');
+    vi.spyOn(ProcessSupervisor.prototype, 'executeProcess').mockRejectedValue(failure);
+    vi.spyOn(domain, 'reportRunFailed').mockImplementation(() => { throw finalizeFailure; });
+    const error = await quickRun({ execPath: process.execPath, args: [], cwd: tempDir }, { domain }).catch((error: unknown) => error);
+    assert(error instanceof AggregateError);
+    expect(error.errors).toEqual([failure, finalizeFailure]);
+    expect(error.cause).toBe(failure);
+  });
+
+  it('does not finalize a caller-owned run after an execution rejection', async () => {
+    const failure = new Error('injected execution rejection');
+    vi.spyOn(ProcessSupervisor.prototype, 'executeProcess').mockRejectedValue(failure);
+    await expect(quickRun({ execPath: process.execPath, args: [], cwd: tempDir }, { domain, runId: 'caller-run' })).rejects.toBe(failure);
+    expect(domain.getStore().getRun('caller-run')?.status).toBe('running');
   });
 });

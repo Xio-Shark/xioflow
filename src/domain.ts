@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { artifactStem, assertArtifactDirectory, OwnedArtifact, removeOwnedArtifact } from './artifacts.js';
 import { SqliteStore } from './store/sqlite.js';
 import { ignoredManifestPath } from './snapshot/ignored-manifest.js';
 import { PlatformDriver } from './driver/types.js';
@@ -22,6 +23,7 @@ import {
   Capability,
   CapabilityScope,
   CapabilityViolationError,
+  DuplicateOperationError,
 } from './types.js';
 import {
   normalizeScope,
@@ -84,7 +86,13 @@ export class ExecutionDomain {
     this.store = new SqliteStore(dbPath);
     const ownerId = `owner-${process.pid}-${Date.now()}`;
     this.ownerRecord = this.store.acquireOwnerLease(domainId, ownerId, os.hostname(), 60000);
-    this.rebuildIsolationFromStore();
+    try {
+      this.rebuildIsolationFromStore();
+    } catch (error) {
+      try { this.store.close(); }
+      catch (closeError) { throw new AggregateError([error, closeError], 'Domain isolation rebuild and store cleanup both failed'); }
+      throw error;
+    }
 
     // 周期心跳续约租约 (每 10s 续约一次，TTL 60s)
     this.heartbeatInterval = setInterval(() => {
@@ -266,6 +274,39 @@ export class ExecutionDomain {
       if (op.resourceBudget) {
         this.inMemoryBudgets.set(op.id, op.resourceBudget);
       }
+    }
+
+    // 工作区提交以 TX journal 为唯一持久真相；尚未结清的目标和重做源都必须先隔离。
+    const roots = new Map<string, { root: string; forkRoot: string }>();
+    const pending = new Map<string, string[]>();
+    for (const event of this.store.getJournalEvents(this.domainId)) {
+      const p = event.payload;
+      if (!event.type.startsWith('TX_') || typeof p.txId !== 'string') continue;
+      if (event.type === 'TX_BEGUN') {
+        roots.set(p.txId, { root: p.root as string, forkRoot: p.forkRoot as string });
+      } else if (event.type === 'TX_COMMITTING') {
+        const begun = roots.get(p.txId);
+        const target = p.root ?? begun?.root;
+        const source = p.sourceRoot ?? begun?.forkRoot;
+        if (typeof target !== 'string' || typeof source !== 'string') {
+          throw new Error(`Workspace transaction "${p.txId}" has incomplete commit isolation evidence`);
+        }
+        pending.set(p.txId, [...new Set([target, source])]);
+      } else if (event.type === 'TX_COMMITTED' || event.type === 'TX_ABORTED') {
+        pending.delete(p.txId);
+      }
+    }
+    for (const [txId, protectedRoots] of pending) {
+      const owner = `${txId}:apply`;
+      const operation = this.store.getOperation(owner);
+      if (operation) throw new DuplicateOperationError(owner, operation.status, operation.runId);
+      for (const root of protectedRoots) {
+        const resource = `workspace:write:${root}`;
+        const existing = this.inMemoryLockedResources.get(resource);
+        if (existing && existing !== owner) throw new ResourceConflictError(resource, existing, owner);
+        this.inMemoryLockedResources.set(resource, owner);
+      }
+      this.inMemoryAllocatedOps.add(owner);
     }
   }
 
@@ -587,9 +628,6 @@ export class ExecutionDomain {
 
     const releasedList: string[] = [];
 
-    this.inMemoryAllocatedOps.delete(operationId);
-    this.inMemoryBudgets.delete(operationId);
-
     if (resources && resources.length > 0) {
       for (const res of resources) {
         if (this.inMemoryLockedResources.get(res) === operationId) {
@@ -606,6 +644,11 @@ export class ExecutionDomain {
         }
       }
       this.store.releaseResourceLease(operationId);
+    }
+
+    if (![...this.inMemoryLockedResources.values()].includes(operationId)) {
+      this.inMemoryAllocatedOps.delete(operationId);
+      this.inMemoryBudgets.delete(operationId);
     }
 
     this.store.recordEventAndTransitionState({
@@ -751,7 +794,7 @@ export class ExecutionDomain {
    * 意图登记协议：先持久化意图与占用，再允许驱动调用
    */
   public registerOperationIntent(op: Operation): void {
-    this.assertNotFenced();
+    this.assertOperationIdAvailable(op.id);
     // 1. 检查资源隔离
     this.allocateResources(op.id, op.requiredResources, 0, op.resourceBudget);
 
@@ -765,6 +808,15 @@ export class ExecutionDomain {
     }
   }
 
+  /** Internal owners and registered operations also reserve their IDs before effects. */
+  public assertOperationIdAvailable(opId: string): void {
+    this.assertNotFenced();
+    const existing = this.store.getOperation(opId);
+    if (existing || this.inMemoryAllocatedOps.has(opId)) {
+      throw new DuplicateOperationError(opId, existing?.status ?? 'allocated', existing?.runId ?? 'unknown');
+    }
+  }
+
   /**
    * 产物回收防线 (ARCHITECTURE §4.3 / N7)
    * 只回收已终态且未被引用的产物，严格拒绝回收未终结或 indeterminate 状态的产物。
@@ -775,20 +827,37 @@ export class ExecutionDomain {
   } {
     this.assertNotFenced();
     const artifactsDir = path.join(this.domainPath, 'artifacts');
-    if (!fs.existsSync(artifactsDir)) {
+    if (!fs.lstatSync(artifactsDir, { throwIfNoEntry: false })) {
       return { deleted: [], retained: [] };
     }
+    assertArtifactDirectory(artifactsDir);
 
     const protectedFiles = new Set<string>();
     const allOps = this.store.getAllOperations(this.domainId);
+    const operations = new Map(allOps.map((op) => [op.id, op]));
+    const ownedFiles = new Map<string, OwnedArtifact>();
+    for (const event of this.store.getJournalEvents(this.domainId)) {
+      if (event.type !== 'ARTIFACT_CREATED' || !event.operationId) continue;
+      const op = operations.get(event.operationId);
+      if (!op || op.status !== 'done' || !op.result || op.result.status === 'indeterminate') continue;
+      const { path: file, dev, ino, birthtimeNs } = event.payload;
+      if (typeof file !== 'string' || !path.isAbsolute(file) || typeof dev !== 'string' || typeof ino !== 'string' || typeof birthtimeNs !== 'string') continue;
+      ownedFiles.set(file, { path: file, dev, ino, birthtimeNs });
+    }
     for (const op of allOps) {
       const isIndet = op.result?.status === 'indeterminate' || (op.result as any)?.kind === 'indeterminate';
       const isDone = op.status === 'done';
 
       if (!isDone || isIndet) {
         // 未终结或 indeterminate：保护所有可能关联的产物
-        protectedFiles.add(`${op.id}-stdout.log`);
-        protectedFiles.add(`${op.id}-stderr.log`);
+        // Legacy names only participate in basename comparisons; never resolve them as paths.
+        for (const stem of new Set([artifactStem(op.id), op.id])) {
+          protectedFiles.add(`${stem}-stdout.log`);
+          protectedFiles.add(`${stem}-stderr.log`);
+          protectedFiles.add(`${stem}.stderr.log`);
+          protectedFiles.add(`${stem}-reads.json.gz`);
+          if (op.kind === 'snapshot') protectedFiles.add(`${stem}-ignored.manifest`);
+        }
         if (op.outputRef) protectedFiles.add(path.basename(op.outputRef));
         if ((op.result as any)?.stdoutRef) protectedFiles.add(path.basename((op.result as any).stdoutRef));
         if ((op.result as any)?.stderrRef) protectedFiles.add(path.basename((op.result as any).stderrRef));
@@ -806,6 +875,7 @@ export class ExecutionDomain {
     for (const snapshot of this.store.listSnapshots(this.domainId)) {
       if (snapshot.ignoredManifestDigest) {
         protectedFiles.add(path.basename(ignoredManifestPath(this.domainPath, snapshot.id)));
+        protectedFiles.add(`${snapshot.id}-ignored.manifest`);
       }
     }
 
@@ -816,7 +886,18 @@ export class ExecutionDomain {
 
     for (const file of files) {
       const filePath = path.join(artifactsDir, file);
+      if (!fs.lstatSync(filePath, { throwIfNoEntry: false })?.isFile()) {
+        retained.push(filePath);
+        continue;
+      }
       if (protectedFiles.has(file)) {
+        retained.push(filePath);
+        continue;
+      }
+
+      // 文件名不能证明归属：只清理 journal 确认创建且仍是同一 inode 的文件。
+      const owned = ownedFiles.get(path.resolve(filePath));
+      if (!owned) {
         retained.push(filePath);
         continue;
       }
@@ -828,7 +909,7 @@ export class ExecutionDomain {
 
       if (filter?.olderThanMs !== undefined) {
         try {
-          const stat = fs.statSync(filePath);
+          const stat = fs.lstatSync(filePath);
           if (now - stat.mtimeMs < filter.olderThanMs) {
             retained.push(filePath);
             continue;
@@ -840,7 +921,7 @@ export class ExecutionDomain {
       }
 
       try {
-        fs.unlinkSync(filePath);
+        removeOwnedArtifact(owned);
         deleted.push(filePath);
       } catch {
         retained.push(filePath);

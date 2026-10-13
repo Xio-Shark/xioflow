@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -220,6 +221,7 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
     expect(cancelRes.stopped).toBe('confirmed_stopped');
 
     const execResult = await execPromise;
+    assert(execResult.kind === 'process');
     expect(execResult.status).toBe('cancelled');
     expect(execResult.terminationReason).toBe('user_cancelled');
     expect(execResult.evidence).toBe('unobserved');
@@ -273,6 +275,7 @@ describe('内核 0.2.0 批次 1 (B1): 终态单一写入者与诚实性契约测
       },
       requiredResources: ['res:spawn-cancel'],
     });
+    assert(execResult.kind === 'process');
 
     expect(execResult.status).toBe('cancelled');
     expect(execResult.terminationReason).toBe('user_cancelled');

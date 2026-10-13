@@ -76,6 +76,11 @@ describe('xioflow mcp (interoperability with the official MCP SDK client)', () =
     const first = await call('run_command', args);
     expect(first.isError).toBe(false);
     expect(first.data).toMatchObject({ status: 'succeeded', exitCode: 0, stdout: 'hello\n', replayed: false, driver: 'node-default' });
+    expect(first.data.processIdentity).toMatchObject({ pid: expect.any(Number), spawnTime: expect.any(String) });
+    expect(first.data.identityVerification).toBeDefined();
+    expect(first.data.treeSettlement).toBeDefined();
+    expect(first.data).toMatchObject({ isTruncated: false, stdoutBytes: 6, mcpOutput: { stdoutOmittedChars: 0, stderrOmittedChars: 0 } });
+    expect(first.data.stdoutHash).toMatch(/^[a-f0-9]{64}$/);
 
     const again = await call('run_command', args);
     expect(again.data).toMatchObject({ status: 'succeeded', replayed: true });
@@ -83,6 +88,7 @@ describe('xioflow mcp (interoperability with the official MCP SDK client)', () =
 
     const status = await call('operation_status', { opId: 'build-1' });
     expect(status.data).toMatchObject({ found: true, status: 'done', resultStatus: 'succeeded', leasesHeld: [] });
+    expect(status.data.result).toMatchObject({ stdoutHash: first.data.stdoutHash, identityVerification: first.data.identityVerification, treeSettlement: first.data.treeSettlement });
 
     const conflict = await call('run_command', { ...args, args: ['-e', '1'] });
     expect(conflict.isError).toBe(true);
@@ -132,6 +138,7 @@ describe('xioflow mcp (interoperability with the official MCP SDK client)', () =
 
     const missing = await call('run_command', { command: 'definitely-not-a-binary-xioflow', cwd: tempDir });
     expect(missing.data).toMatchObject({ status: 'failed', exitCode: 127 });
+    expect(missing.data.spawnFailure).toBeDefined();
 
     await expect(client.callTool({ name: 'no_such_tool', arguments: {} })).rejects.toThrow(/Unknown tool/);
     await expect(client.callTool({ name: 'run_command', arguments: { cwd: tempDir } })).rejects.toThrow(/missing required/);

@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -115,6 +116,7 @@ describe.skipIf(cgroupUnavailable !== null)(cgroupSuiteName('CgroupPlatformDrive
       name: 'whereami',
       command: { execPath: '/bin/cat', args: ['/proc/self/cgroup'], cwd: tempDir },
     });
+    assert(result.kind === 'process');
     const cgroupPath = domain.getStore().getOperation('whereami')?.processIdentity?.cgroupPath;
     expect(cgroupPath).toBeDefined();
     expect(cgroupPath!.startsWith(driver.opsDir)).toBe(true);
@@ -152,6 +154,7 @@ describe.skipIf(cgroupUnavailable !== null)(cgroupSuiteName('CgroupPlatformDrive
       command: { execPath: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], cwd: tempDir },
       requiredResources: ['res:unplaced'],
     });
+    assert(result.kind === 'process');
     expect(result.status).toBe('failed');
     expect(result.spawnFailure).toMatch(/could not place process/);
     expect(domain.isResourceLocked('res:unplaced')).toBe(false);

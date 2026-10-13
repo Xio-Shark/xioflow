@@ -5,9 +5,10 @@ import { PlatformDriver, StopProcessResult } from '../driver/types.js';
 import {
   Operation,
   OperationResult,
-  ProcessOperationResult,
+  ProcessExecutionResult,
   TerminationReason,
   OperationNotActiveError,
+  DuplicateOperationError,
   ServiceSpec,
   ServiceHandle,
   SnapshotDriver,
@@ -21,7 +22,7 @@ import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
 import { ServiceSupervisor } from './service.js';
 import {
   admitProcessScope,
-  assertHardBudgetSupported,
+  assertBudgetSupported,
   withHardLimits,
   assertRunAcceptsOperations,
   resolveConfinementDriver,
@@ -30,9 +31,11 @@ import { computeInputFingerprint } from './fingerprint.js';
 import { finalizeOperation, indeterminateResult } from './finalize.js';
 import { joinInFlight, replayRecorded } from './replay.js';
 import { runProcess, ProcessRunContext } from './process-run.js';
+import { validateExecuteProcessOptions } from './input-validation.js';
 import * as snapshotOps from './snapshot-ops.js';
 import { rollback } from './rollback.js';
-import { ReadTracker, evaluateReadEvidence } from './read-evidence.js';
+import { ReadTracker, evaluateReadEvidence, readEvidencePath } from './read-evidence.js';
+import { domainCoordination } from './domain-coordination.js';
 import {
   CommitOptions,
   CommitResult,
@@ -52,12 +55,11 @@ export type { ExecuteProcessOptions, CaptureSnapshotOptions, RollbackOptions } f
 export { normalizeResourceName, computeInputFingerprint } from './fingerprint.js';
 
 export class ProcessSupervisor {
-  private activeOperations: Map<string, ActiveOperationState> = new Map();
-  private readonly readTracker = new ReadTracker();
+  private readonly activeOperations: Map<string, ActiveOperationState>;
+  private readonly readTracker: ReadTracker;
   private serviceSupervisor: ServiceSupervisor;
   private snapshotDriver: SnapshotDriver;
   private confinementDriver?: ConfinementDriver;
-  private transactions?: WorkspaceTransactions;
 
   constructor(
     private readonly domain: ExecutionDomain,
@@ -65,11 +67,17 @@ export class ProcessSupervisor {
     snapshotDriver?: SnapshotDriver,
     confinementDriver?: ConfinementDriver
   ) {
+    const coordinator = domainCoordination(domain);
+    this.activeOperations = coordinator.activeOperations;
+    this.readTracker = coordinator.readTracker;
     this.domain.setDriver?.(driver);
     this.serviceSupervisor = new ServiceSupervisor(domain, driver, this);
-    this.snapshotDriver = snapshotDriver || new GitShadowSnapshotDriver();
+    const boundSnapshotDriver = coordinator.workspaceTransactions?.snapshotDriver;
+    this.snapshotDriver = snapshotDriver ?? boundSnapshotDriver ?? domain.getSnapshotDriver() ?? new GitShadowSnapshotDriver();
     this.confinementDriver = confinementDriver;
-    this.domain.setSnapshotDriver?.(this.snapshotDriver);
+    if (!boundSnapshotDriver || boundSnapshotDriver === this.snapshotDriver) {
+      this.domain.setSnapshotDriver?.(this.snapshotDriver);
+    }
   }
 
   public getDomain(): ExecutionDomain {
@@ -104,6 +112,7 @@ export class ProcessSupervisor {
    * 快照捕获协议 (ARCHITECTURE §3.5 / 契约 #32, #53)
    */
   public async captureSnapshot(options: CaptureSnapshotOptions): Promise<SnapshotOperationResult> {
+    this.assertOperationIdAvailable(options.opId);
     return snapshotOps.captureSnapshot(this.snapshotContext, options);
   }
 
@@ -111,6 +120,7 @@ export class ProcessSupervisor {
    * 回滚协议 (ARCHITECTURE §3.5 / 契约 #28–#30, #56)
    */
   public async rollback(options: RollbackOptions): Promise<RollbackOperationResult> {
+    this.assertOperationIdAvailable(options.opId);
     return rollback(this.snapshotContext, options);
   }
 
@@ -165,14 +175,22 @@ export class ProcessSupervisor {
   }
 
   private workspaceTransactions(): WorkspaceTransactions {
-    if (this.transactions) return this.transactions;
+    const coordinator = domainCoordination(this.domain);
     const snapshotDriver = this.snapshotDriver;
+    const existing = coordinator.workspaceTransactions;
+    if (existing) {
+      if (existing.snapshotDriver !== snapshotDriver) {
+        throw new Error(`Workspace transactions in domain "${this.domain.domainId}" are bound to a different snapshot driver`);
+      }
+      return existing.manager;
+    }
     if (!(snapshotDriver instanceof GitShadowSnapshotDriver)) {
       throw new Error(`Workspace transactions need the git-shadow snapshot driver (got ${snapshotDriver.name})`);
     }
-    this.transactions = new WorkspaceTransactions({
+    const manager = new WorkspaceTransactions({
       domain: this.domain,
       snapshotDriver,
+      assertOperationIdAvailable: (opId) => this.assertOperationIdAvailable(opId),
       captureSnapshot: async (runId, opId, root) => {
         const res = await this.captureSnapshot({ runId, opId, roots: [root] });
         if (res.status !== 'succeeded' || !res.snapshot) {
@@ -186,27 +204,31 @@ export class ProcessSupervisor {
         // fork 内 agent 操作之间的互斥由各自声明的 workspace:write:<fork> 保证。
         for (const res of new Set([`workspace:write:${path.resolve(forkPath)}`, `workspace:write:${fs.realpathSync(forkPath)}`])) {
           const owner = this.domain.getResourceOwner(res);
-          if (owner?.startsWith('mat-')) this.domain.internalReleaseResources(owner, [res]);
+          const createdOwner = coordinator.materializedWorkspaces.get(res);
+          coordinator.materializedWorkspaces.delete(res);
+          if (owner && owner === createdOwner) this.domain.internalReleaseResources(owner, [res]);
         }
       },
-      dematerialize: (forkPath) => this.dematerialize(forkPath, { force: true }),
+      dematerialize: (forkPath, leaseOwner) => snapshotOps.dematerialize(this.snapshotContext, forkPath, { force: true }, leaseOwner),
       pruneSnapshot: async (snapshotId, runId) => {
         await this.pruneSnapshots([snapshotId], { runId });
       },
     });
-    return this.transactions;
+    coordinator.workspaceTransactions = { snapshotDriver, manager };
+    return manager;
   }
 
   /**
    * 启动协议：准入检查 -> 先持久化意图 -> 请求驱动启动 -> 登记身份并转 active -> 监督运行 -> 记录结果
    */
-  public async executeProcess(options: ExecuteProcessOptions): Promise<ProcessOperationResult> {
+  public async executeProcess(options: ExecuteProcessOptions): Promise<ProcessExecutionResult> {
+    validateExecuteProcessOptions(options);
     // 0. 准入：capability 范围、写入限制、hard 预算能力、调用 Run 状态
     const { mutationRoots, capAdmission } = admitProcessScope(this.domain, options);
     const confinementDriver = resolveConfinementDriver(options, this.confinementDriver);
     const wrapped = confinementDriver ? confinementDriver.wrap(options.command, mutationRoots || []) : options.command;
     const startTime = Date.now();
-    assertHardBudgetSupported(this.driver, options.resourceBudget);
+    assertBudgetSupported(this.driver, options.resourceBudget);
     const command = withHardLimits(wrapped, options.resourceBudget);
     const inputFingerprint = options.inputFingerprint || computeInputFingerprint(options);
     assertRunAcceptsOperations(this.domain, options.runId, options.opId);
@@ -220,6 +242,7 @@ export class ProcessSupervisor {
     if (replayed) {
       return replayed;
     }
+    this.assertOperationIdAvailable(options.opId);
 
     const op: Operation = {
       id: options.opId,
@@ -271,6 +294,7 @@ export class ProcessSupervisor {
     const opState: ActiveOperationState = {
       opId: options.opId,
       runId: options.runId,
+      driver: this.driver,
       phase: 'waiting_resources',
       startTime,
       inputFingerprint,
@@ -349,7 +373,7 @@ export class ProcessSupervisor {
       this.domain.getStore().updateOperationStatus(opId, 'stopping');
 
       // 2. 调用驱动停止流水线 (SIGINT -> grace -> SIGTERM -> SIGKILL)
-      const stopResult = await this.driver.terminate(active.handle.identity, graceMs);
+      const stopResult = await active.driver.terminate(active.handle.identity, graceMs);
 
       // 3. 驱动无法确认停止 -> 立即转入 indeterminate，绝对保留隔离屏障与锁！
       if (stopResult.stopped !== 'confirmed_stopped') {
@@ -358,6 +382,8 @@ export class ProcessSupervisor {
           const indet = indeterminateResult({
             reason: `Process ${active.handle.identity.pid} could not be confirmed stopped: ${stopResult.errorDetails}`,
             startTime: active.startTime,
+            terminationReason: active.terminationReason,
+            resourceSamplingError: active.resourceSamplingError,
           });
           finalizeOperation(this.domain, opId, indet, { releaseResourceLock: false });
         }
@@ -395,6 +421,13 @@ export class ProcessSupervisor {
     return active;
   }
 
+  /** @internal Includes queued operations that have no durable intent yet. */
+  public assertOperationIdAvailable(opId: string): void {
+    const active = this.activeOperations.get(opId);
+    if (active) throw new DuplicateOperationError(opId, active.phase, active.runId);
+    this.domain.assertOperationIdAvailable(opId);
+  }
+
   /**
    * 一条带 `trackReads` 的命令的结果，是否仍然代表当前的工作区：`fresh` / `stale`（列出变了的依赖）/ `unknown`。
    * 只读，不改动访问时间之外的任何东西；重启后仍可查询（证据在 artifacts 里）。
@@ -402,7 +435,11 @@ export class ProcessSupervisor {
   public evidenceStatus(opId: string): EvidenceStatus {
     const op = this.domain.getStore().getOperation(opId);
     if (!op) throw new Error(`Operation "${opId}" does not exist in domain ${this.domain.domainId}`);
-    return evaluateReadEvidence((op.result as ProcessOperationResult | undefined)?.readEvidence);
+    const evidence = op.result?.kind === 'process' ? op.result.readEvidence : undefined;
+    if (evidence?.ref && path.basename(evidence.ref) !== path.basename(readEvidencePath(path.dirname(evidence.ref), op.id))) {
+      return { status: 'unknown', reason: 'evidence_unreadable' };
+    }
+    return evaluateReadEvidence(evidence);
   }
 
   public pruneArtifacts(filter?: { olderThanMs?: number; prefix?: string }): {
@@ -412,14 +449,14 @@ export class ProcessSupervisor {
     return this.domain.pruneArtifacts(filter);
   }
 
-  /** 保留原签名：共享契约与单写者测试直接调用它验证「重复终结必须抛错」。 */
-  private finalizeOperation(
+  /** 保留原入口：共享契约与单写者测试直接调用它验证「重复终结必须抛错」。 */
+  private finalizeOperation<T extends OperationResult>(
     opId: string,
-    result: OperationResult,
+    result: T,
     requiredResources?: string[],
     releaseResourceLock: boolean = true,
     artifactsDir?: string
-  ): ProcessOperationResult {
+  ): T {
     return finalizeOperation(this.domain, opId, result, { requiredResources, releaseResourceLock, artifactsDir });
   }
 }

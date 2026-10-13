@@ -10,6 +10,7 @@ import { PlatformDriver } from '../driver/types.js';
 import { RecoveryEngine } from '../recovery/engine.js';
 import { exportJournalToOtlp } from '../otel/otlp.js';
 import { ProcessSupervisor } from '../supervisor/supervisor.js';
+import { compileToolInputSchema } from './input-schema.js';
 import { TOOLS, ToolContext } from './tools.js';
 
 /**
@@ -47,11 +48,14 @@ interface JsonRpcMessage {
 class RpcError extends Error {
   constructor(
     readonly code: number,
-    message: string
+    message: string,
+    readonly data?: Record<string, unknown>
   ) {
     super(message);
   }
 }
+
+const inputValidators = new Map(TOOLS.map((tool) => [tool.name, compileToolInputSchema(tool.inputSchema)]));
 
 function packageVersion(): string {
   try {
@@ -81,6 +85,9 @@ export class KernelMcpServer {
   private readonly pending = new Set<Promise<void>>();
 
   constructor(private readonly options: KernelMcpServerOptions) {
+    if (options.maxOutputChars !== undefined && (!Number.isSafeInteger(options.maxOutputChars) || options.maxOutputChars < 0)) {
+      throw new RangeError('maxOutputChars must be a nonnegative safe integer');
+    }
     this.log = options.log ?? ((m) => process.stderr.write(`[xioflow-mcp] ${m}\n`));
     this.output = options.output ?? process.stdout;
   }
@@ -161,7 +168,7 @@ export class KernelMcpServer {
         return;
       }
       const code = err instanceof RpcError ? err.code : -32603;
-      this.send({ jsonrpc: '2.0', id: msg.id, error: { code, message: err?.message ?? String(err) } });
+      this.send({ jsonrpc: '2.0', id: msg.id, error: { code, message: err?.message ?? String(err), ...(err instanceof RpcError && err.data ? { data: err.data } : {}) } });
     }
   }
 
@@ -208,9 +215,9 @@ export class KernelMcpServer {
   private async callTool(params: any, id: JsonRpcId | undefined): Promise<unknown> {
     const tool = TOOLS.find((t) => t.name === params?.name);
     if (!tool) throw new RpcError(-32602, `Unknown tool: ${params?.name}`);
-    const args = params.arguments ?? {};
-    const missing = ((tool.inputSchema.required as string[]) ?? []).filter((k) => args[k] === undefined);
-    if (missing.length > 0) throw new RpcError(-32602, `${tool.name}: missing required argument(s) ${missing.join(', ')}`);
+    const args = params.arguments === undefined ? {} : params.arguments;
+    const issue = inputValidators.get(tool.name)!(args);
+    if (issue) throw new RpcError(-32602, `${tool.name}: ${issue.path} ${issue.message}`, { tool: tool.name, ...issue });
 
     const progressToken = params._meta?.progressToken;
     let progress = 0;

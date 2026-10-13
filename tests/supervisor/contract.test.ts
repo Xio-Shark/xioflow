@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -79,6 +80,7 @@ describe('Task 02: Real Platform Driver, Stopping Pipeline & Headless Contract T
       },
       requiredResources: ['res:dummy'],
     });
+    assert(result.kind === 'process');
 
     expect(result.status).toBe('failed');
     expect(result.exitCode).toBe(127);
@@ -112,6 +114,7 @@ describe('Task 02: Real Platform Driver, Stopping Pipeline & Headless Contract T
       requiredResources: ['res:output'],
       maxOutputBytes: 10 * 1024 * 1024, // 10MB
     });
+    assert(result.kind === 'process');
 
     expect(result.status).toBe('succeeded');
     expect(result.exitCode).toBe(0);
@@ -284,6 +287,7 @@ describe('Task 02: Real Platform Driver, Stopping Pipeline & Headless Contract T
       },
       requiredResources: ['res:independent-worker'],
     });
+    assert(independentResult.kind === 'process');
 
     expect(independentResult.status).toBe('succeeded');
     expect(independentResult.stdout.trim()).toBe('Independent worker finished');
@@ -537,6 +541,7 @@ setTimeout(() => {
       },
       requiredResources: ['res:stdin'],
     });
+    assert(echoed.kind === 'process');
 
     expect(echoed.status).toBe('succeeded');
     expect(echoed.exitCode).toBe(0);
@@ -556,6 +561,7 @@ setTimeout(() => {
       },
       requiredResources: ['res:stdin'],
     });
+    assert(earlyExit.kind === 'process');
 
     expect(earlyExit.status).toBe('succeeded');
     expect(earlyExit.exitCode).toBe(0);
@@ -585,6 +591,7 @@ setTimeout(() => {
       timeoutMs: 10_000,
       drainTimeoutMs: 300,
     });
+    assert(result.kind === 'process');
 
     // 不能挂到超时：root 已退出，操作应按真实退出事实收尾
     expect(Date.now() - started).toBeLessThan(5_000);
@@ -617,6 +624,7 @@ setTimeout(() => {
         chunks.push({ stream, text: chunk.toString('utf8') });
       },
     });
+    assert(result.kind === 'process');
 
     expect(result.status).toBe('succeeded');
     expect(result.stdout).toBe('out-1\nout-2\n');
@@ -639,6 +647,7 @@ setTimeout(() => {
         throw new Error('projection boom');
       },
     });
+    assert(throwing.kind === 'process');
 
     // 回调抛错不能让操作失败或丢输出，但必须留下可见事实
     expect(throwing.status).toBe('succeeded');

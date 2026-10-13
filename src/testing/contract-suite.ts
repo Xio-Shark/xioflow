@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import { gunzipSync } from 'node:zlib';
@@ -22,9 +23,11 @@ import {
   computeInputFingerprint,
   normalizeResourceName,
   ProcessOperationResult,
+  IndeterminateResult,
   CapabilityViolationError,
   ObservationEntry,
   ObservationValidation,
+  GitShadowSnapshotDriver,
 } from '../index.js';
 
 export interface ConsumerContext {
@@ -102,6 +105,7 @@ export function defineContractTestSuite(
         },
         requiredResources: ['res:c1'],
       });
+      assert(result.kind === 'process');
 
       expect(result.status).toBe('failed');
       expect(result.exitCode).toBe(127);
@@ -133,6 +137,7 @@ export function defineContractTestSuite(
         requiredResources: ['res:c2'],
         maxOutputBytes: 10 * 1024 * 1024,
       });
+      assert(result.kind === 'process');
 
       expect(result.status).toBe('succeeded');
       expect(result.exitCode).toBe(0);
@@ -402,6 +407,8 @@ export function defineContractTestSuite(
       expect(eventTypes).toEqual([
         'OPERATION_INTENT_REGISTERED',
         'OPERATION_STATUS_TRANSITION',
+        'ARTIFACT_CREATED',
+        'ARTIFACT_CREATED',
         'OPERATION_RESULT_RECORDED',
         'RUN_STATUS_TRANSITION',
       ]);
@@ -409,9 +416,16 @@ export function defineContractTestSuite(
       // 验证事件载荷确定性
       expect((runEvents[0].payload as any).name).toBe('echo-step');
       expect((runEvents[1].payload as any).status).toBe('active');
-      expect((runEvents[2].payload as any).result.status).toBe('succeeded');
-      expect((runEvents[3].payload as any).status).toBe('succeeded');
-      expect((runEvents[3].payload as any).terminationReason).toBe('completed');
+      for (const [event, suffix] of [[runEvents[2], '-stdout.log'], [runEvents[3], '-stderr.log']] as const) {
+        expect(event.operationId).toBe(`op-c8-${ctx.workflowType}`);
+        expect(event.payload).toMatchObject({
+          path: path.join(domain.domainPath, 'artifacts', `op-c8-${ctx.workflowType}${suffix}`),
+          dev: expect.any(String), ino: expect.any(String), birthtimeNs: expect.any(String),
+        });
+      }
+      expect((runEvents[4].payload as any).result.status).toBe('succeeded');
+      expect((runEvents[5].payload as any).status).toBe('succeeded');
+      expect((runEvents[5].payload as any).terminationReason).toBe('completed');
     });
 
     it('契约 9: 整组终止可靠收敛，整组信号与组空确认确保无残留后代', async () => {
@@ -733,6 +747,7 @@ export function defineContractTestSuite(
         maxOutputBytes: 1 * 1024 * 1024,
         artifactsDir,
       });
+      assert(result.kind === 'process');
 
       expect(result.status).toBe('succeeded');
       expect(result.isTruncated).toBe(true);
@@ -776,6 +791,7 @@ export function defineContractTestSuite(
         },
         requiredResources: ['res:c16'],
       });
+      assert(echoed.kind === 'process');
 
       // 只有收到 EOF（写入端已关闭）子进程才会输出，因此同时证明写入与关闭
       expect(echoed.status).toBe('succeeded');
@@ -795,6 +811,7 @@ export function defineContractTestSuite(
         },
         requiredResources: ['res:c16'],
       });
+      assert(earlyExit.kind === 'process');
 
       expect(earlyExit.status).toBe('succeeded');
       expect(earlyExit.exitCode).toBe(0);
@@ -824,6 +841,7 @@ export function defineContractTestSuite(
         timeoutMs: 10_000,
         drainTimeoutMs: 300,
       });
+      assert(result.kind === 'process');
 
       // root 已退出：操作按真实退出事实收尾，而不是等到 10 秒超时
       expect(Date.now() - started).toBeLessThan(5_000);
@@ -857,6 +875,7 @@ export function defineContractTestSuite(
           (stream === 'stdout' ? stdoutChunks : stderrChunks).push(chunk.toString('utf8'));
         },
       });
+      assert(projected.kind === 'process');
 
       expect(projected.status).toBe('succeeded');
       // chunk 边界由内核决定（可能合并写入），逐流拼接必须完整
@@ -878,6 +897,7 @@ export function defineContractTestSuite(
           throw new Error('consumer projection failed');
         },
       });
+      assert(throwing.kind === 'process');
 
       expect(throwing.status).toBe('succeeded');
       expect(throwing.stdout).toBe('captured-anyway');
@@ -920,14 +940,13 @@ export function defineContractTestSuite(
       expect(subPid).toBeGreaterThan(0);
 
       try {
-        // executeProcess 的声明类型不含 indeterminate，运行时结果可能是它
-        if ((result.status as string) === 'indeterminate') {
+        if (result.status === 'indeterminate') {
           // 逃逸者未被确认停止：保留租约等待裁决
           expect(domain.isResourceLocked('res:c19-bounded')).toBe(true);
         } else {
           // 驱动确认停掉了整棵树：只有逃逸者确已消失才允许按超时失败结清并释放租约
           expect(result.status).toBe('failed');
-          expect((result as ProcessOperationResult).terminationReason).toBe('timed_out');
+          expect(result.terminationReason).toBe('timed_out');
           expect(await waitUntilGone(subPid, 2000)).toBe(true);
           expect(domain.isResourceLocked('res:c19-bounded')).toBe(false);
         }
@@ -1158,6 +1177,7 @@ export function defineContractTestSuite(
         requiredResources: [],
         maxOutputBytes: 10 * 1024,
       });
+      assert(result.kind === 'process');
 
       expect(result.status).toBe('succeeded');
       expect(result.isTruncated).toBe(true);
@@ -1185,6 +1205,7 @@ export function defineContractTestSuite(
         requiredResources: [],
         artifactsDir: nonWritablePath,
       });
+      assert(result.kind === 'process');
 
       expect(result.status).toBe('succeeded');
       expect(result.spillError).toBeDefined();
@@ -1210,6 +1231,7 @@ export function defineContractTestSuite(
         requiredResources: [],
         artifactsDir,
       });
+      assert(untruncated.kind === 'process');
       expect(untruncated.status).toBe('succeeded');
       expect(untruncated.isTruncated).toBe(false);
       expect(untruncated.outputRef).toBeUndefined();
@@ -1253,11 +1275,13 @@ export function defineContractTestSuite(
       };
 
       const res1 = await supervisor.executeProcess(options);
+      assert(res1.kind === 'process');
       expect(res1.status).toBe('succeeded');
       expect(res1.replayed).toBeUndefined();
       expect(res1.stdout).toContain('c45-out');
 
       const res2 = await supervisor.executeProcess(options);
+      assert(res2.kind === 'process');
       expect(res2.status).toBe('succeeded');
       expect(res2.replayed).toBe(true);
       expect(res2.stdout).toContain('c45-out');
@@ -1373,15 +1397,11 @@ export function defineContractTestSuite(
         status: 'pending',
       }, domain.domainId);
 
-      const indetResult: ProcessOperationResult = {
-        kind: 'process',
-        status: 'indeterminate' as any,
-        exitCode: null,
-        signal: null,
-        stdout: '',
-        stderr: 'indeterminate residual',
-        isTruncated: false,
-        identityVerification: 'cannot_determine',
+      const indetResult: IndeterminateResult = {
+        kind: 'indeterminate',
+        status: 'indeterminate',
+        reason: 'indeterminate residual',
+        recoveryGuidance: 'Inspect the process before releasing its lease.',
         durationMs: 50,
         completedAt: new Date().toISOString(),
       };
@@ -2089,6 +2109,7 @@ export function defineContractTestSuite(
         capabilityId: confinedCap.id,
         confinementDriver: mockDriver,
       });
+      assert(p1.kind === 'process');
       expect(p1.status).toBe('succeeded');
       expect(p1.confined).toBe(true);
 
@@ -2122,6 +2143,7 @@ export function defineContractTestSuite(
         capabilityId: confinedCap.id,
         confinementDriver: mockDriver,
       });
+      assert(pFull.kind === 'process');
       expect(pFull.confined).toBe(true);
       const rollbackFull = await supervisor.rollback({
         runId: 'run-c56',
@@ -2152,6 +2174,7 @@ export function defineContractTestSuite(
         },
         requiredResources: [`workspace:write:${path.resolve(repoDir)}`],
       });
+      assert(p2.kind === 'process');
       expect(p2.confined).toBeFalsy();
 
       // 混入不受限操作，回滚 coverage 退化为 declared_roots
@@ -2315,6 +2338,7 @@ export function defineContractTestSuite(
         });
 
       const first = await run('c61-a');
+      assert(first.kind === 'process');
       expect(first.readEvidence?.scope).toBe('content_reads');
       expect(supervisor.evidenceStatus('c61-a')).toEqual({ status: 'fresh', basis: 'tree_unchanged' });
       // Filesystem atime may include other readers. Check freshness against the
@@ -2339,6 +2363,188 @@ export function defineContractTestSuite(
       if (first.readEvidence?.tracking === 'atime') {
         expect(after).toEqual({ status: 'stale', changed: ['input.txt', ...(otherWasRead ? ['other.txt'] : [])].map((name) => path.join(fs.realpathSync(root), name)), truncated: false });
       }
+    });
+
+    it('契约 63: 操作 ID 是不透明键，产物写入、清理与回收不得越界或破坏预存用户文件', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c63', 'run-c63');
+      const artifacts = path.join(domain.domainPath, 'artifacts');
+      fs.mkdirSync(artifacts, { recursive: true });
+      const outside = path.join(domain.domainPath, 'c63-victim-stdout.log');
+      const occupied = path.join(artifacts, 'c63-occupied-stdout.log');
+      const unknown = path.join(artifacts, 'c63-user-notes.txt');
+      for (const file of [outside, occupied, unknown]) fs.writeFileSync(file, 'user data');
+      const execute = (opId: string, output: string) => supervisor.executeProcess({
+        runId: 'run-c63', opId, name: 'artifact-boundary', maxOutputBytes: 100,
+        command: { execPath: process.execPath, args: ['-e', `process.stdout.write(${JSON.stringify(output)})`], cwd: tempDir },
+      });
+
+      const encoded = await execute('../c63-victim', 'output'.repeat(100));
+      assert(encoded.kind === 'process');
+      expect(encoded.status).toBe('succeeded');
+      expect(encoded.spillError).toBeUndefined();
+      expect(path.dirname(encoded.stdoutRef!)).toBe(artifacts);
+      expect(fs.readFileSync(encoded.stdoutRef!, 'utf8')).toBe('output'.repeat(100));
+      const collision = await execute('c63-occupied', 'short output');
+      assert(collision.kind === 'process');
+      expect(collision.status).toBe('succeeded');
+      expect(collision.stdout).toBe('short output');
+      expect(collision.stdoutSpillError).toMatch(/EEXIST/);
+
+      const pruned = supervisor.pruneArtifacts();
+      expect(pruned.retained).toEqual(expect.arrayContaining([occupied, unknown, encoded.stdoutRef]));
+      for (const file of [outside, occupied, unknown]) expect(fs.readFileSync(file, 'utf8')).toBe('user data');
+    });
+
+    it('契约 64: 同域多监督器共享在飞执行与租约，冲突不伤原操作，跨入口取消使用原驱动', async () => {
+      const { supervisor, domain, driver, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c64', 'run-c64');
+      let peerStops = 0;
+      const peerDriver: PlatformDriver = {
+        name: `${driver.name}-peer`, capabilities: driver.capabilities,
+        spawn: driver.spawn.bind(driver), verifyIdentity: driver.verifyIdentity.bind(driver),
+        terminate: async (identity, graceMs) => { peerStops += 1; return driver.terminate(identity, graceMs); },
+      };
+      const peer = new ProcessSupervisor(domain, peerDriver);
+      const effects = path.join(tempDir, 'c64-effects.txt');
+      let ready!: () => void;
+      const started = new Promise<void>((resolve) => { ready = resolve; });
+      const request = {
+        runId: 'run-c64', opId: 'c64-shared', name: 'shared-execution', requiredResources: ['res:c64'],
+        command: {
+          execPath: process.execPath,
+          args: ['-e', "require('fs').appendFileSync(process.argv[1], 'hit\\n'); console.log('ready'); setTimeout(() => {}, 5000)", effects],
+          cwd: tempDir,
+        },
+        onStreamChunk: () => ready(),
+      };
+      const pending = Promise.allSettled([supervisor.executeProcess(request), peer.executeProcess(request)]);
+      await started;
+      const conflict = await peer.executeProcess({ ...request, inputFingerprint: 'different-c64-input' }).catch((error: unknown) => error);
+      const owner = domain.getResourceOwner('res:c64');
+      const lease = domain.getStore().getPersistedResourceLeases(domain.domainId).find((entry) => entry.resourceId === 'res:c64');
+      const stop = await peer.cancelOperation(request.opId, 100).catch((error: unknown) => error);
+      if (stop instanceof Error) await supervisor.cancelOperation(request.opId, 100);
+      const results = await pending;
+
+      expect(conflict).toBeInstanceOf(OperationIdConflictError);
+      expect(owner).toBe(request.opId);
+      expect(lease?.operationId).toBe(request.opId);
+      expect(stop).not.toBeInstanceOf(Error);
+      const confirmed = (stop as { stopped: string }).stopped === 'confirmed_stopped';
+      expect(peerStops).toBe(0);
+      expect(results.map((result) => result.status)).toEqual(['fulfilled', 'fulfilled']);
+      if (results[0].status !== 'fulfilled' || results[1].status !== 'fulfilled') throw new Error('Both callers must share the execution result');
+      const status = confirmed ? 'cancelled' : 'indeterminate';
+      expect(results[0].value.status).toBe(status);
+      expect(results[1].value).toMatchObject({ status, replayed: true });
+      expect(fs.readFileSync(effects, 'utf8')).toBe('hit\n');
+      expect(domain.isResourceLocked('res:c64')).toBe(!confirmed);
+    });
+
+    it('契约 65: 同域多监督器共享工作区提交队列，并发冲突事务只能一笔提交成功', async () => {
+      const { domain, driver, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c65', 'run-c65');
+      const root = path.join(fs.realpathSync(tempDir), 'repo-c65');
+      fs.mkdirSync(root);
+      for (const args of [['init', '-b', 'main'], ['config', 'user.name', 'Tester'], ['config', 'user.email', 'tester@test.local']]) {
+        await execFileAsync('git', args, { cwd: root });
+      }
+      fs.writeFileSync(path.join(root, 'shared.txt'), 'base\n');
+      await execFileAsync('git', ['add', '.'], { cwd: root });
+      await execFileAsync('git', ['commit', '-m', 'fixture'], { cwd: root });
+      const snapshots = new GitShadowSnapshotDriver();
+      const first = new ProcessSupervisor(domain, driver, snapshots);
+      const second = new ProcessSupervisor(domain, driver, snapshots);
+      const begin = (supervisor: ProcessSupervisor, txId: string) => supervisor.beginWorkspaceTransaction({
+        txId, runId: 'run-c65', root, forkPath: path.join(tempDir, `${txId}-fork`),
+      });
+      const a = await begin(first, 'c65-a');
+      const b = await begin(second, 'c65-b');
+      fs.writeFileSync(path.join(a.forkRoot, 'shared.txt'), 'from a\n');
+      fs.writeFileSync(path.join(b.forkRoot, 'shared.txt'), 'from b\n');
+
+      // 只延迟真实 diff 的返回；不给校验注入伪造结果。
+      const diffTrees = snapshots.diffTrees.bind(snapshots);
+      let held = false;
+      let reached!: () => void;
+      const validationHeld = new Promise<void>((resolve) => { reached = resolve; });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      snapshots.diffTrees = async (cwd, fromTree, toTree, pathspecs) => {
+        const changes = await diffTrees(cwd, fromTree, toTree, pathspecs);
+        if (cwd === root && !held) { held = true; reached(); await gate; }
+        return changes;
+      };
+      const commitA = first.commitWorkspaceTransaction(a.txId);
+      await validationHeld;
+      const commitB = second.commitWorkspaceTransaction(b.txId);
+      const pending = Promise.all([commitA, commitB]);
+      let deadline: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([commitB, new Promise<void>((resolve) => { deadline = setTimeout(resolve, 500); })]);
+      } finally {
+        if (deadline) clearTimeout(deadline);
+        release();
+      }
+      expect((await pending).map((result) => result.status)).toEqual(['committed', 'conflict']);
+      expect(fs.readFileSync(path.join(root, 'shared.txt'), 'utf8')).toBe('from a\n');
+      await first.abortWorkspaceTransaction(b.txId);
+    });
+
+    it('契约 66: 资源观测失败不得当作零用量；软上限失败关闭，未确认停止保留租约', async () => {
+      const { supervisor, domain, driver, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c66', 'run-c66');
+      const original = driver.sampleMetrics;
+      if (!original) {
+        await expect(supervisor.executeProcess({
+          runId: 'run-c66', opId: 'c66-unsupported', name: 'unsupported metrics',
+          command: { execPath: process.execPath, args: ['-e', '0'], cwd: tempDir },
+          resourceBudget: { enforcement: 'soft', maxMemoryBytes: 2 ** 30 },
+        })).rejects.toThrow(UnsupportedCapabilityError);
+        return;
+      }
+      driver.sampleMetrics = async () => { throw new Error('contract 66 observer unavailable'); };
+      try {
+        const observed = await supervisor.executeProcess({
+          runId: 'run-c66', opId: 'c66-observe', name: 'observe unavailable metrics', timeoutMs: 2000,
+          command: { execPath: process.execPath, args: ['-e', 'setTimeout(() => console.log("completed"), 250)'], cwd: tempDir },
+          resourceBudget: { enforcement: 'observe' },
+        });
+        assert(observed.kind === 'process');
+        expect(observed.status).toBe('succeeded');
+        expect(observed.resourceSamplingError).toContain('contract 66 observer unavailable');
+        expect(observed.peakMemoryBytes).toBeUndefined();
+        expect(observed.cpuTimeMs).toBeUndefined();
+        const governed = await supervisor.executeProcess({
+          runId: 'run-c66', opId: 'c66-soft', name: 'soft observer unavailable', requiredResources: ['res:c66'], timeoutMs: 2000,
+          command: { execPath: process.execPath, args: ['-e', 'process.on("SIGINT", () => process.exit(0)); setInterval(() => {}, 1000)'], cwd: tempDir },
+          resourceBudget: { enforcement: 'soft', maxMemoryBytes: 2 ** 30 },
+        });
+        expect(['failed', 'indeterminate']).toContain(governed.status);
+        expect(governed.terminationReason).toBe('observation_failed');
+        expect(governed.resourceSamplingError).toContain('contract 66 observer unavailable');
+        expect(domain.isResourceLocked('res:c66')).toBe(governed.status === 'indeterminate');
+      } finally { driver.sampleMetrics = original; }
+    });
+
+    it('契约 67: 跨操作类型的 ID 冲突在副作用前拒绝，失败清理不改写已有操作或释放其租约', async () => {
+      const { supervisor, domain, tempDir } = ctx;
+      ensureTaskAndRun(domain, 'task-c67', 'run-c67');
+      const opId = 'c67-service#1';
+      domain.registerOperationIntent({
+        id: opId, runId: 'run-c67', kind: 'process', name: 'reserved', inputFingerprint: 'c67-original',
+        requiredResources: ['res:c67-original'], status: 'pending',
+      });
+      const before = domain.getStore().getOperation(opId);
+      await expect(supervisor.captureSnapshot({ runId: 'run-c67', opId, roots: [tempDir] })).rejects.toThrow(DuplicateOperationError);
+      await expect(supervisor.startService({
+        serviceId: 'c67-service', runId: 'run-c67', requiredResources: ['res:c67-service'],
+        command: { execPath: process.execPath, args: ['-e', '0'], cwd: tempDir },
+      })).rejects.toThrow(DuplicateOperationError);
+      expect(domain.getStore().getOperation(opId)).toEqual(before);
+      expect(domain.getResourceOwner('res:c67-original')).toBe(opId);
+      expect(domain.isResourceLocked('res:c67-service')).toBe(false);
     });
 
     it('契约 37: hard 内存上限由 OS 执行：超限时整棵树被杀，结果为 memory_exceeded 并释放租约；不支持的驱动准入拒绝', async () => {
@@ -2422,6 +2628,7 @@ export function defineContractTestSuite(
           requiredResources: ['res:c62'],
           timeoutMs: 15000,
         });
+        assert(result.kind === 'process');
         daemonPid = Number(fs.readFileSync(pidFile, 'utf8'));
         expect(result.status).toBe('succeeded');
         expect(result.treeSettlement).not.toBe('empty');
@@ -2443,6 +2650,7 @@ export function defineContractTestSuite(
           name: 'clean',
           command: { execPath: process.execPath, args: ['-e', '0'], cwd: tempDir },
         });
+        assert(clean.kind === 'process');
         if (provable) expect(clean.treeSettlement).toBe('empty');
         expect(clean.residualProcessesReaped).toBeUndefined();
       } finally {

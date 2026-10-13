@@ -4,13 +4,17 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
-import { AgentRuntime, CgroupPlatformDriver, ExecutionDomain } from '../dist/index.js';
+import { AgentRuntime, CgroupPlatformDriver, ExecutionDomain, NodePlatformDriver, ReaperPlatformDriver } from '../dist/index.js';
 
 const durationSeconds = Number(process.env.XIOFLOW_SOAK_SECONDS ?? 120);
 assert(Number.isSafeInteger(durationSeconds) && durationSeconds >= 1 && durationSeconds <= 86400, 'XIOFLOW_SOAK_SECONDS must be 1..86400');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'xf-agent-soak-'));
 const domain = ExecutionDomain.acquire(root, 'soak');
-if (process.env.XIOFLOW_EXPECT_CGROUP === '1') domain.setDriver(new CgroupPlatformDriver());
+const selectedDriver = process.env.XIOFLOW_SOAK_DRIVER ?? (process.env.XIOFLOW_EXPECT_CGROUP === '1' ? 'cgroup' : 'node');
+assert(['node', 'reaper', 'cgroup'].includes(selectedDriver), 'XIOFLOW_SOAK_DRIVER must be node, reaper or cgroup');
+if (process.env.XIOFLOW_EXPECT_CGROUP === '1') assert.equal(selectedDriver, 'cgroup', 'XIOFLOW_EXPECT_CGROUP requires the cgroup driver');
+domain.setDriver(selectedDriver === 'reaper' ? new ReaperPlatformDriver()
+  : selectedDriver === 'cgroup' ? new CgroupPlatformDriver() : new NodePlatformDriver());
 domain.setDomainBudget({ maxConcurrentOps: 1 });
 const store = domain.getStore();
 store.saveTask({ id: 'task', domainId: domain.domainId, name: 'soak', createdAt: new Date().toISOString() });

@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -74,6 +75,7 @@ describe('内核 0.2.0 批次 3 (B3): 输出与产物诚实 [P0-9, P0-10, P0-12,
           requiredResources: [],
           maxOutputBytes: 100, // 触发截断与转储
         });
+        assert(result.kind === 'process');
 
         // 1. 转储失败绝不返回虚假 outputRef
         expect(result.outputRef).toBeUndefined();
@@ -121,6 +123,7 @@ describe('内核 0.2.0 批次 3 (B3): 输出与产物诚实 [P0-9, P0-10, P0-12,
           requiredResources: [],
           maxOutputBytes: 100,
         });
+        assert(result.kind === 'process');
 
         expect(result.outputRef).toBeUndefined();
         expect(result.spillError).toBeDefined();
@@ -149,6 +152,7 @@ describe('内核 0.2.0 批次 3 (B3): 输出与产物诚实 [P0-9, P0-10, P0-12,
         maxOutputBytes: 100,
         artifactsDir: path.join(conflictFile, 'sub-artifacts'),
       });
+      assert(result.kind === 'process');
 
       expect(result.outputRef).toBeUndefined();
       expect(result.spillError).toBeDefined();
@@ -170,6 +174,7 @@ describe('内核 0.2.0 批次 3 (B3): 输出与产物诚实 [P0-9, P0-10, P0-12,
         requiredResources: [],
         maxOutputBytes: 64 * 1024, // 64KB 限制，触发转储
       });
+      assert(result.kind === 'process');
 
       expect(result.isTruncated).toBe(true);
       expect(result.outputRef).toBeDefined();
@@ -215,6 +220,7 @@ describe('内核 0.2.0 批次 3 (B3): 输出与产物诚实 [P0-9, P0-10, P0-12,
         requiredResources: [],
         maxOutputBytes: maxBytes,
       });
+      assert(result.kind === 'process');
 
       expect(result.isTruncated).toBe(true);
 
@@ -392,6 +398,7 @@ describe('内核 0.2.0 批次 3 (B3): 输出与产物诚实 [P0-9, P0-10, P0-12,
         maxOutputBytes: 10000,
         artifactsDir,
       });
+      assert(unTruncRes.kind === 'process');
 
       expect(unTruncRes.isTruncated).toBe(false);
       expect(unTruncRes.outputRef).toBeUndefined();
@@ -417,6 +424,7 @@ describe('内核 0.2.0 批次 3 (B3): 输出与产物诚实 [P0-9, P0-10, P0-12,
         maxOutputBytes: 100,
         artifactsDir,
       });
+      assert(truncRes.kind === 'process');
 
       expect(truncRes.isTruncated).toBe(true);
       expect(truncRes.outputRef).toBeDefined();
@@ -429,7 +437,7 @@ describe('内核 0.2.0 批次 3 (B3): 输出与产物诚实 [P0-9, P0-10, P0-12,
         fs.mkdirSync(artifactsDir, { recursive: true });
       }
 
-      // 1. 构造一个 done 且无引用的孤儿产物
+      // 1. 只有文件名、没有创建归属事实的旧文件，不能当成内核孤儿删除
       const orphanPath = path.join(artifactsDir, 'op-done-orphan-stdout.log');
       fs.writeFileSync(orphanPath, 'orphan content');
 
@@ -473,8 +481,9 @@ describe('内核 0.2.0 批次 3 (B3): 输出与产物诚实 [P0-9, P0-10, P0-12,
       // 执行 pruneArtifacts
       const pruned = domain.pruneArtifacts();
 
-      // 孤儿文件被回收
-      expect(fs.existsSync(orphanPath)).toBe(false);
+      // 未知来源的文件保留，不能仅凭文件名推断归属
+      expect(fs.existsSync(orphanPath)).toBe(true);
+      expect(pruned.retained).toContain(orphanPath);
 
       // active 和 indeterminate 的文件坚决保留
       expect(fs.existsSync(indetSpillPath)).toBe(true);

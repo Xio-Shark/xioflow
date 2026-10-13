@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -56,6 +57,7 @@ describe('read evidence', () => {
 
   it('records what the command read and answers fresh while nothing in the roots changed', async () => {
     const result = await check('c1');
+    assert(result.kind === 'process');
     expect(result.status).toBe('succeeded');
     expect(result.readEvidence).toMatchObject({ scope: 'content_reads', statCaches: 'possible', roots: [repo] });
     expect(fs.existsSync(result.readEvidence!.ref!)).toBe(true);
@@ -123,6 +125,7 @@ describe('read evidence', () => {
 
   it('uses the recorded read set once the caller has ruled stat caches out', async () => {
     const result = await check('c6', { statCaches: 'ruled_out' });
+    assert(result.kind === 'process');
     const recorded = JSON.parse(zlib.gunzipSync(fs.readFileSync(result.readEvidence!.ref!)).toString('utf8'));
     const reads = recorded.roots[0].reads;
     if (atime) expect(reads).toHaveProperty('data.json');
@@ -141,11 +144,106 @@ describe('read evidence', () => {
     });
   });
 
+  it.each(['file', 'directory', 'dangling'] as const)('does not treat a retargeted %s symlink as fresh even with stat caches ruled out', async (kind) => {
+    const target = kind === 'file' ? 'data.json' : kind === 'directory' ? 'fixtures' : 'missing';
+    fs.symlinkSync(target, path.join(repo, 'input'));
+    const result = await check(`link-${kind}`, { statCaches: 'ruled_out', script: kind === 'dangling'
+      ? "require('fs').existsSync('input')"
+      : `require('fs').readFileSync('${kind === 'directory' ? 'input/a.txt' : 'input'}')` });
+    assert(result.kind === 'process');
+    fs.unlinkSync(path.join(repo, 'input'));
+    fs.symlinkSync('other.txt', path.join(repo, 'input'));
+    expect(supervisor.evidenceStatus(`link-${kind}`)).toMatchObject({
+      status: 'unknown', reason: 'reads_unobserved', changedOutside: [path.join(repo, 'input')],
+    });
+    const file = JSON.parse(zlib.gunzipSync(fs.readFileSync(result.readEvidence!.ref!)).toString('utf8'));
+    expect(file.roots[0].reads ?? {}).not.toHaveProperty('input');
+  });
+
+  it.each(['__proto__', 'constructor', 'toString'])('tracks the symlink named %s without inheriting dictionary properties', (name) => {
+    fs.symlinkSync('data.json', path.join(repo, name));
+    const session = new ReadTracker().open('prototype-link', { roots: [repo], statCaches: 'ruled_out' });
+    try {
+      session.begin();
+      fs.readFileSync(path.join(repo, name));
+      const evidence = session.collect(path.join(tempDir, 'artifacts'));
+      fs.unlinkSync(path.join(repo, name));
+      fs.symlinkSync('other.txt', path.join(repo, name));
+      expect(evaluateReadEvidence(evidence)).toMatchObject({
+        status: 'unknown', reason: 'reads_unobserved', changedOutside: [path.join(repo, name)],
+      });
+    } finally {
+      session.close();
+    }
+  });
+
+  it.each(['__proto__', 'constructor', 'toString'])('includes unread file %s in the full-tree comparison', (name) => {
+    fs.writeFileSync(path.join(repo, name), 'before');
+    const session = new ReadTracker().open('prototype-file', { roots: [repo] });
+    try {
+      session.begin();
+      fs.readFileSync(path.join(repo, 'data.json'));
+      const evidence = session.collect(path.join(tempDir, 'artifacts'));
+      fs.writeFileSync(path.join(repo, name), 'after change');
+      expect(evaluateReadEvidence(evidence)).toMatchObject({
+        status: 'unknown', reason: atime ? 'changed_outside_read_set' : 'reads_unobserved', changedOutside: [path.join(repo, name)],
+      });
+    } finally {
+      session.close();
+    }
+  });
+
+  it('does not follow a read path after a parent directory becomes an external symlink', async () => {
+    const result = await check('parent-link', { statCaches: 'ruled_out', script: "require('fs').readFileSync('fixtures/a.txt')" });
+    assert(result.kind === 'process');
+    const outside = path.join(tempDir, 'outside');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'a.txt'), 'a\n');
+    const mtime = fs.statSync(path.join(outside, 'a.txt')).mtimeMs / 1000;
+    fs.utimesSync(path.join(outside, 'a.txt'), mtime - 2, mtime);
+    const before = fs.statSync(path.join(outside, 'a.txt'), { bigint: true });
+    fs.rmSync(path.join(repo, 'fixtures'), { recursive: true });
+    fs.symlinkSync(outside, path.join(repo, 'fixtures'));
+    expect(evaluateReadEvidence(result.readEvidence).status).toBe(atime ? 'stale' : 'unknown');
+    expect(fs.statSync(path.join(outside, 'a.txt'), { bigint: true }).atimeNs).toBe(before.atimeNs);
+  });
+
+  it('does not collect through a tracked root that has become a symlink', () => {
+    const session = new ReadTracker().open('root-replaced', { roots: [repo] });
+    try {
+      session.begin();
+      fs.renameSync(repo, path.join(tempDir, 'moved'));
+      fs.symlinkSync(path.join(tempDir, 'moved'), repo);
+      expect(session.collect(path.join(tempDir, 'artifacts'))).toMatchObject({ tracking: 'failed', error: expect.stringContaining('not a real directory') });
+    } finally {
+      session.close();
+    }
+  });
+
+  it('reads old evidence conservatively when link dependency coverage was not recorded', () => {
+    const session = new ReadTracker().open('legacy-links', { roots: [repo], statCaches: 'ruled_out' });
+    try {
+      session.begin();
+      fs.readFileSync(path.join(repo, 'data.json'));
+      const evidence = session.collect(path.join(tempDir, 'artifacts'));
+      const file = JSON.parse(zlib.gunzipSync(fs.readFileSync(evidence.ref!)).toString('utf8'));
+      delete file.roots[0].pathDependencies;
+      evidence.digest = crypto.createHash('sha256').update(JSON.stringify(file.roots.map((root: { root: string; reads: unknown }) => [root.root, root.reads]))).digest('hex');
+      fs.writeFileSync(evidence.ref!, zlib.gzipSync(JSON.stringify(file)));
+      expect(evaluateReadEvidence(evidence)).toEqual({ status: 'fresh', basis: 'tree_unchanged' });
+      fs.writeFileSync(path.join(repo, 'other.txt'), 'changed');
+      expect(evaluateReadEvidence(evidence)).toMatchObject({ status: 'unknown', reason: 'reads_unobserved' });
+    } finally {
+      session.close();
+    }
+  });
+
   it('evaluates a fixed read-set fixture independently of filesystem atime attribution', () => {
     const hash = (data: string | Buffer) => crypto.createHash('sha256').update(data).digest('hex');
     const roots = [{
       root: repo,
       reads: { 'data.json': hash(fs.readFileSync(path.join(repo, 'data.json'))) },
+      pathDependencies: {},
       tree: Object.fromEntries(['data.json', 'other.txt', 'fixtures/a.txt'].map((name) => {
         const st = fs.statSync(path.join(repo, name), { bigint: true });
         return [name, `${st.size}:${st.mtimeNs}`];
@@ -155,7 +253,7 @@ describe('read evidence', () => {
     fs.writeFileSync(ref, zlib.gzipSync(JSON.stringify({ version: 1, opId: 'fixture', statCaches: 'ruled_out', roots })));
     const evidence = {
       ref, tracking: 'atime' as const, scope: 'content_reads' as const, statCaches: 'ruled_out' as const,
-      roots: [repo], digest: hash(JSON.stringify(roots.map((root) => [root.root, root.reads]))),
+      roots: [repo], digest: hash(JSON.stringify(roots.map((root) => [root.root, root.reads, root.pathDependencies]))),
     };
     fs.writeFileSync(path.join(repo, 'other.txt'), 'changed\n');
     expect(evaluateReadEvidence(evidence)).toEqual({ status: 'fresh', basis: 'reads_unchanged' });
@@ -171,6 +269,7 @@ describe('read evidence', () => {
 
   it('answers unknown for a command that was not tracked, and throws for an operation that does not exist', async () => {
     const result = await check('c8', { track: false });
+    assert(result.kind === 'process');
     expect(result.readEvidence).toBeUndefined();
     expect(supervisor.evidenceStatus('c8')).toEqual({ status: 'unknown', reason: 'not_tracked' });
     expect(() => supervisor.evidenceStatus('nope')).toThrow(/does not exist/);
@@ -178,6 +277,7 @@ describe('read evidence', () => {
 
   it('answers unknown when the evidence file is gone or was altered', async () => {
     const result = await check('c9');
+    assert(result.kind === 'process');
     const ref = result.readEvidence!.ref!;
     const altered = JSON.parse(zlib.gunzipSync(fs.readFileSync(ref)).toString('utf8'));
     altered.roots[0].reads = {};
@@ -189,6 +289,7 @@ describe('read evidence', () => {
 
   it('keeps answering after a restart, and pruneArtifacts does not remove evidence that a result refers to', async () => {
     const result = await check('c10');
+    assert(result.kind === 'process');
     expect(supervisor.pruneArtifacts().deleted).not.toContain(path.basename(result.readEvidence!.ref!));
     domain.close();
     open();
@@ -197,6 +298,7 @@ describe('read evidence', () => {
     if (atime) expect(supervisor.evidenceStatus('c10').status).toBe('stale');
     // Replaying the same operation returns the recorded result, evidence included, without running again.
     const replayed = await check('c10');
+    assert(replayed.kind === 'process');
     expect(replayed.readEvidence).toEqual(result.readEvidence);
   });
 
@@ -208,8 +310,10 @@ describe('read evidence', () => {
       `const fs=require('fs');console.log('ready');setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)})){fs.readFileSync('data.json');process.exit(0)}},10);setTimeout(()=>process.exit(1),5000)` });
     await started;
     const second = await check('c11-second', { script: "const fs=require('fs');fs.readFileSync('data.json');fs.readFileSync('other.txt')" });
+    assert(second.kind === 'process');
     fs.writeFileSync(release, 'release');
     const first = await slow;
+    assert(first.kind === 'process');
     expect(first.status).toBe('succeeded');
     expect(second.readEvidence).toMatchObject({ tracking: 'unobserved', reason: 'roots_busy' });
     // Without a read set the answer can only rest on "nothing changed at all".

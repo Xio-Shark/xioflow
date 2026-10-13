@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,7 +11,7 @@ import {
   OperationIdConflictError,
   RecoveryRequiredError,
   DuplicateOperationError,
-  ProcessOperationResult,
+  IndeterminateResult,
 } from '../../src/types.js';
 
 describe('内核 0.3.0: op 幂等执行契约测试 (Idempotent Execution) [ARCHITECTURE §3.7 / 契约 #45–#49]', () => {
@@ -72,6 +73,7 @@ describe('内核 0.3.0: op 幂等执行契约测试 (Idempotent Execution) [ARCH
 
     // 第一次执行
     const res1 = await supervisor.executeProcess(options);
+    assert(res1.kind === 'process');
     expect(res1.status).toBe('succeeded');
     expect(res1.replayed).toBeUndefined();
     expect(res1.stdout).toContain('hello');
@@ -82,6 +84,7 @@ describe('内核 0.3.0: op 幂等执行契约测试 (Idempotent Execution) [ARCH
 
     // 第二次执行：相同 opId、相同输入指纹
     const res2 = await supervisor.executeProcess(options);
+    assert(res2.kind === 'process');
     expect(res2.status).toBe('succeeded');
     expect(res2.replayed).toBe(true);
     expect(res2.stdout).toContain('hello');
@@ -204,15 +207,11 @@ describe('内核 0.3.0: op 幂等执行契约测试 (Idempotent Execution) [ARCH
     };
 
     // 人工预先构造一个 indeterminate 状态的操作（带排他资源租约）
-    const indetResult: ProcessOperationResult = {
-      kind: 'process',
-      status: 'indeterminate' as any,
-      exitCode: null,
-      signal: null,
-      stdout: '',
-      stderr: 'process left running',
-      isTruncated: false,
-      identityVerification: 'cannot_determine',
+    const indetResult: IndeterminateResult = {
+      kind: 'indeterminate',
+      status: 'indeterminate',
+      reason: 'process left running',
+      recoveryGuidance: 'Inspect the process before releasing its lease.',
       durationMs: 100,
       completedAt: new Date().toISOString(),
     };
@@ -310,6 +309,7 @@ describe('内核 0.3.0: op 幂等执行契约测试 (Idempotent Execution) [ARCH
     };
 
     const resA = await supervisor.executeProcess(optionsA);
+    assert(resA.kind === 'process');
     expect(resA.status).toBe('succeeded');
     expect(resA.stdout).toContain('from-run-A');
 
@@ -320,6 +320,7 @@ describe('内核 0.3.0: op 幂等执行契约测试 (Idempotent Execution) [ARCH
     };
 
     const resB = await supervisor.executeProcess(optionsB);
+    assert(resB.kind === 'process');
     expect(resB.status).toBe('succeeded');
     expect(resB.replayed).toBe(true);
     expect(resB.runId).toBe('run-1'); // 结果归属原 Run A
@@ -374,6 +375,7 @@ describe('内核 0.3.0: op 幂等执行契约测试 (Idempotent Execution) [ARCH
 
     // 5. 发起重放
     const res2 = await supervisor2.executeProcess(options2);
+    assert(res2.kind === 'process');
     expect(res2.status).toBe('succeeded');
     expect(res2.replayed).toBe(true);
     expect(res2.runId).toBe('run-1'); // 结果归属原 Run 1
@@ -436,6 +438,7 @@ describe('内核 0.3.0: op 幂等执行契约测试 (Idempotent Execution) [ARCH
 
     // 6. 断言第一调用方不受影响，成功执行并返回结果
     const res1 = await p1;
+    assert(res1.kind === 'process');
     expect(res1.status).toBe('succeeded');
     expect(res1.stdout).toContain('done-slow-8');
 

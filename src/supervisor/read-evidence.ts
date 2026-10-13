@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
+import { artifactPath, readArtifact, writeArtifact } from '../artifacts.js';
 import { isPathContained } from '../capability/path-utils.js';
 import { EvidenceStatus, ReadEvidence } from '../types.js';
 import { probeReadTracking, resetAccessTime, wasAccessed } from '../workspace/read-tracking.js';
@@ -13,6 +14,7 @@ import { probeReadTracking, resetAccessTime, wasAccessed } from '../workspace/re
  * 读集来自访问时间（`read-tracking.ts`），范围是 `content_reads`：只 stat 不读内容的文件不在里面。
  * 「只看 stat 就复用的缓存」（Python 字节码缓存、增量编译器）正是这样的依赖，所以默认情况下读集之外
  * 有改动时只答 `unknown`；调用方声明已排除这类缓存（`statCaches: 'ruled_out'`）后才按读集答 `fresh`。
+ * 符号链接无法按 atime 判断是否被使用，另记链接本身的指纹；它们变化时仍只能答 `unknown`。
  *
  * 看不到的：roots 之外的依赖、环境变量、常驻进程替命令读的文件、命令运行期间别人的写入。
  */
@@ -27,7 +29,9 @@ interface RootEvidence {
   root: string;
   /** 读过的条目 -> 指纹；null 表示这个根的读取没有被观测到。 */
   reads: Record<string, string> | null;
-  /** 每个非目录条目 -> `size:mtimeNs` */
+  /** 无法判断是否被使用的符号链接 -> 链接文本哈希；旧证据不含此字段。 */
+  pathDependencies?: Record<string, string>;
+  /** 每个非目录条目 -> `size:mtimeNs`；符号链接用链接文本哈希，不跟随其目标。 */
   tree: Record<string, string>;
 }
 
@@ -41,11 +45,16 @@ interface EvidenceFile {
 const SKIP_TOP = new Set(['.git']);
 const CHANGED_LIMIT = 50;
 const sha = (data: string | Buffer) => crypto.createHash('sha256').update(data).digest('hex');
+const evidenceDigest = (roots: RootEvidence[]) => sha(JSON.stringify(roots.map((r) => (
+  r.pathDependencies === undefined ? [r.root, r.reads] : [r.root, r.reads, r.pathDependencies]
+))));
 
-export const readEvidencePath = (artifactsDir: string, opId: string) => path.join(artifactsDir, `${opId}-reads.json.gz`);
+export const readEvidencePath = (artifactsDir: string, opId: string) => artifactPath(artifactsDir, opId, '-reads.json.gz');
 
 function walk(dir: string, visit: (abs: string, rel: string, st: fs.BigIntStats) => void, rel = ''): void {
-  visit(dir, rel, fs.lstatSync(dir, { bigint: true }));
+  const dirStat = fs.lstatSync(dir, { bigint: true });
+  if (!dirStat.isDirectory()) throw new Error(`Read tracking root is not a real directory: ${dir}`);
+  visit(dir, rel, dirStat);
   for (const name of fs.readdirSync(dir)) {
     if (!rel && SKIP_TOP.has(name)) continue;
     const abs = path.join(dir, name);
@@ -74,6 +83,12 @@ export function normalizeAccessTimesOnePass(root: string): void {
 function fingerprint(root: string, entry: string): string {
   const abs = path.join(root, entry);
   try {
+    // 取证时是真实路径，复核时任意一层可能已变成链接。不要为判断有效性去读根之外的目标。
+    let current = root;
+    for (const part of entry.split('/').filter(Boolean)) {
+      current = path.join(current, part);
+      if (fs.lstatSync(current).isSymbolicLink()) return 'symbolic_link';
+    }
     if (entry.endsWith('/')) {
       const names = fs.readdirSync(abs).filter((name) => !(entry === './' && SKIP_TOP.has(name)));
       return sha(names.sort().join('\n'));
@@ -86,15 +101,20 @@ function fingerprint(root: string, entry: string): string {
 }
 
 /** 一趟遍历同时得到读过的条目（目录以 `/` 结尾，根为 `./`）与全树的 stat 清单。 */
-function scan(root: string): { reads: string[]; tree: Record<string, string> } {
+function scan(root: string): { reads: string[]; tree: Record<string, string>; pathDependencies: Record<string, string> } {
   const reads: string[] = [];
-  const tree: Record<string, string> = {};
-  walk(root, (_abs, rel, st) => {
+  const tree: Record<string, string> = Object.create(null);
+  const pathDependencies: Record<string, string> = Object.create(null);
+  walk(root, (abs, rel, st) => {
+    if (st.isSymbolicLink()) {
+      pathDependencies[rel] = sha(fs.readlinkSync(abs));
+      tree[rel] = `link:${pathDependencies[rel]}`;
+      return;
+    }
     if (!st.isDirectory()) tree[rel] = `${st.size}:${st.mtimeNs}`;
-    if (st.isSymbolicLink()) return;
     if (wasAccessed(st)) reads.push(st.isDirectory() ? `${rel || '.'}/` : rel);
   });
-  return { reads: reads.sort(), tree };
+  return { reads: reads.sort(), tree, pathDependencies };
 }
 
 export interface ReadTrackingSession {
@@ -135,22 +155,21 @@ export class ReadTracker {
       collect: (artifactsDir) => {
         try {
           const perRoot: RootEvidence[] = roots.map((root) => {
-            const { reads, tree } = scan(root);
-            if (!observed.get(root)) return { root, reads: null, tree };
-            return { root, reads: Object.fromEntries(reads.map((entry) => [entry, fingerprint(root, entry)])), tree };
+            const { reads, tree, pathDependencies } = scan(root);
+            if (!observed.get(root)) return { root, reads: null, tree, pathDependencies };
+            return { root, reads: Object.fromEntries(reads.map((entry) => [entry, fingerprint(root, entry)])), tree, pathDependencies };
           });
           const file: EvidenceFile = { version: 1, opId, statCaches: base.statCaches, roots: perRoot };
           const ref = readEvidencePath(artifactsDir, opId);
-          fs.mkdirSync(artifactsDir, { recursive: true });
           // 全树清单占了大头，路径文本压缩比高
-          fs.writeFileSync(ref, zlib.gzipSync(JSON.stringify(file)), { mode: 0o600 });
+          writeArtifact(ref, zlib.gzipSync(JSON.stringify(file)));
           const tracked = perRoot.every((r) => r.reads !== null);
           return {
             ...base,
             tracking: tracked ? 'atime' : 'unobserved',
             ...(tracked ? {} : { reason: busy ? ('roots_busy' as const) : ('no_atime' as const) }),
             entryCount: perRoot.reduce((sum, r) => sum + Object.keys(r.reads ?? {}).length, 0),
-            digest: sha(JSON.stringify(perRoot.map((r) => [r.root, r.reads]))),
+            digest: evidenceDigest(perRoot),
             ref,
           };
         } catch (err: any) {
@@ -181,29 +200,32 @@ export function evaluateReadEvidence(evidence: ReadEvidence | undefined): Eviden
   if (evidence.tracking === 'failed' || !evidence.ref) return { status: 'unknown', reason: 'evidence_missing' };
   let file: EvidenceFile;
   try {
-    file = JSON.parse(zlib.gunzipSync(fs.readFileSync(evidence.ref)).toString('utf8'));
+    file = JSON.parse(zlib.gunzipSync(readArtifact(evidence.ref)).toString('utf8'));
   } catch (err: any) {
     return { status: 'unknown', reason: err?.code === 'ENOENT' ? 'evidence_missing' : 'evidence_unreadable' };
   }
-  if (sha(JSON.stringify(file.roots.map((r) => [r.root, r.reads]))) !== evidence.digest) {
+  if (evidenceDigest(file.roots) !== evidence.digest) {
     return { status: 'unknown', reason: 'evidence_unreadable' };
   }
 
   const changedReads: string[] = [];
   const changedOutside: string[] = [];
   let unobserved = false;
-  for (const { root, reads, tree } of file.roots) {
-    if (!fs.statSync(root, { throwIfNoEntry: false })?.isDirectory()) {
+  for (const { root, reads, tree, pathDependencies } of file.roots) {
+    if (!fs.lstatSync(root, { throwIfNoEntry: false })?.isDirectory()) {
       changedReads.push(root);
       continue;
     }
-    if (reads === null) unobserved = true;
+    if (reads === null || pathDependencies === undefined) unobserved = true;
     for (const [entry, recorded] of Object.entries(reads ?? {})) {
       if (fingerprint(root, entry) !== recorded) changedReads.push(path.join(root, entry)); // 目录条目保留结尾的 `/`
     }
-    const now = scan(root).tree;
+    const { tree: now, pathDependencies: nowDependencies } = scan(root);
+    for (const rel of new Set([...Object.keys(pathDependencies ?? {}), ...Object.keys(nowDependencies)])) {
+      if (pathDependencies?.[rel] !== nowDependencies[rel]) unobserved = true;
+    }
     for (const rel of new Set([...Object.keys(tree), ...Object.keys(now)])) {
-      if (tree[rel] !== now[rel] && !(reads && rel in reads)) changedOutside.push(path.join(root, rel));
+      if (tree[rel] !== now[rel] && !(reads && Object.hasOwn(reads, rel))) changedOutside.push(path.join(root, rel));
     }
   }
 

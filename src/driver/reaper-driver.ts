@@ -21,8 +21,6 @@ import { computeCommandFingerprint, resolveExecutable } from './spawn-support.js
 type ExitFacts = { exitCode: number | null; signal: NodeJS.Signals | null };
 
 const HELPER_NAME = 'xioflow-reaper';
-/** 树已空的会话在通道关闭后保留多久，供结算查询。 */
-const SETTLED_SESSION_TTL_MS = 30_000;
 
 /**
  * 解析当前平台的 reaper helper：`XIOFLOW_REAPER_PATH` 优先，否则取包内
@@ -51,6 +49,7 @@ export interface ReaperDriverOptions {
 }
 
 interface ReaperSession {
+  identity?: ProcessIdentity;
   helper: ChildProcess;
   /** fd 3：Node 为额外的 'pipe' 创建 socketpair，双向可读写。 */
   ctl: Socket;
@@ -89,6 +88,8 @@ export class ReaperPlatformDriver implements PlatformDriver {
   private readonly stopReplyMarginMs: number;
   private readonly facts = new NodePlatformDriver();
   private readonly sessions = new Map<number, ReaperSession>();
+  // A completed identity needs only its terminal fact, never its streams/helper.
+  private readonly terminalFacts = new WeakMap<ProcessIdentity, { pid: number; startTimeMonotonic?: number }>();
 
   public static isAvailable(): boolean {
     return (process.platform === 'linux' || process.platform === 'darwin') && locateReaperHelper() !== null;
@@ -172,6 +173,8 @@ export class ReaperPlatformDriver implements PlatformDriver {
       commandFingerprint: computeCommandFingerprint(command.execPath, command.args),
       bootId: bootId ?? undefined,
     };
+    session.identity = identity;
+    if (session.treeEmpty && session.ctl.destroyed) this.rememberTerminal(session);
 
     this.writeStdin(helper, isStreamStdin, stdinPayload);
     let gateSettled = false;
@@ -207,8 +210,10 @@ export class ReaperPlatformDriver implements PlatformDriver {
   }
 
   public async verifyIdentity(identity: ProcessIdentity): Promise<IdentityVerificationResult> {
+    if (this.terminalFact(identity)) return 'not_original_process';
     const session = this.sessions.get(identity.pid);
     if (session && !session.helperLost) {
+      if (!this.matchesSession(session, identity)) return 'cannot_determine';
       // helper 是 root 的父进程：未回收之前 pid 不可能被复用，内存事实即可判定
       return session.rootExit ? 'not_original_process' : 'is_original_process';
     }
@@ -216,10 +221,14 @@ export class ReaperPlatformDriver implements PlatformDriver {
   }
 
   public async terminate(identity: ProcessIdentity, graceMs: number = 2000): Promise<StopProcessResult> {
+    if (this.terminalFact(identity)) return { stopped: 'confirmed_stopped', scope: this.treeScope() };
     const session = this.sessions.get(identity.pid);
     if (!session || session.helperLost) {
       // 不是本驱动持有的树（例如恢复期接手旧进程）或 helper 已丢失：只能退回操作系统事实
       return this.facts.terminate(identity, graceMs);
+    }
+    if (!this.matchesSession(session, identity)) {
+      return { stopped: 'cannot_determine', scope: 'unknown', errorDetails: 'Process identity does not match the held reaper session' };
     }
     if (session.treeEmpty) {
       return { stopped: 'confirmed_stopped', scope: this.treeScope() };
@@ -233,19 +242,25 @@ export class ReaperPlatformDriver implements PlatformDriver {
    * macOS：helper 只跟踪它看到的 fork，`empty` 不能排除未跟踪的逃逸者，只答 `unknown`。
    */
   public async settleTree(identity: ProcessIdentity, waitMs: number): Promise<TreeSettlement> {
+    if (this.terminalFact(identity)) return process.platform === 'linux' ? 'empty' : 'unknown';
     const session = this.sessions.get(identity.pid);
     if (!session) return this.facts.settleTree(identity, waitMs);
+    if (!this.matchesSession(session, identity)) return 'unknown';
     if (!session.treeEmpty && !session.helperLost) {
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, waitMs);
-        session.treeEmptyListeners.push(() => {
+        const settle = () => {
           clearTimeout(timer);
+          const index = session.treeEmptyListeners.indexOf(settle);
+          if (index !== -1) session.treeEmptyListeners.splice(index, 1);
           resolve();
-        });
+        };
+        const timer = setTimeout(settle, waitMs);
+        session.treeEmptyListeners.push(settle);
       });
     }
     if (session.treeEmpty) {
-      this.sessions.delete(identity.pid);
+      this.rememberTerminal(session);
+      if (this.sessions.get(identity.pid) === session) this.sessions.delete(identity.pid);
       return process.platform === 'linux' ? 'empty' : 'unknown';
     }
     // helper 丢失：树不再被持有，退回操作系统事实
@@ -256,6 +271,22 @@ export class ReaperPlatformDriver implements PlatformDriver {
 
   private treeScope(): StopProcessResult['scope'] {
     return process.platform === 'linux' ? 'subreaper_tree' : 'tracked_tree';
+  }
+
+  private matchesSession(session: ReaperSession, identity: ProcessIdentity): boolean {
+    return session.identity?.startTimeMonotonic === identity.startTimeMonotonic
+      && session.identity?.spawnTime === identity.spawnTime;
+  }
+
+  private terminalFact(identity: ProcessIdentity): boolean {
+    const fact = this.terminalFacts.get(identity);
+    return fact?.pid === identity.pid && fact.startTimeMonotonic === identity.startTimeMonotonic;
+  }
+
+  private rememberTerminal(session: ReaperSession): void {
+    if (session.treeEmpty && session.identity) {
+      this.terminalFacts.set(session.identity, { pid: session.rootPid, startTimeMonotonic: session.identity.startTimeMonotonic });
+    }
   }
 
   private async requestStop(session: ReaperSession, graceMs: number): Promise<StopProcessResult> {
@@ -356,13 +387,8 @@ export class ReaperPlatformDriver implements PlatformDriver {
       if (!session.treeEmpty) session.helperLost = true;
       session.onStopReply?.(null);
       for (const listener of session.treeEmptyListeners.splice(0)) listener();
-      // 树已空时保留会话一段时间：根进程退出、管道排空之后监督器还要来问结算结果
-      // 只删这一个会话：pid 在保留期内可能已被新的操作复用
-      if (session.treeEmpty) {
-        setTimeout(() => {
-          if (this.sessions.get(rootPid) === session) this.sessions.delete(rootPid);
-        }, SETTLED_SESSION_TTL_MS).unref();
-      }
+      this.rememberTerminal(session);
+      if (this.sessions.get(rootPid) === session) this.sessions.delete(rootPid);
       if (!session.rootExit) this.watchOrphanedRoot(session);
     });
     return session;

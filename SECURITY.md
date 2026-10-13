@@ -2,7 +2,8 @@
 
 ## Supported versions
 
-The latest `0.1.x` release receives fixes. Pre-1.0, older minors are not maintained.
+The latest published minor receives fixes. Pre-1.0, older minors are not maintained.
+Unreleased local changes are listed separately in `CHANGELOG.md`.
 
 ## Reporting a vulnerability
 
@@ -28,6 +29,8 @@ Releases are built and published only by `.github/workflows/release.yml`; no lon
 
 ## Scope notes
 
-- Windows is not supported in 0.1 and containment there is reported as unsupported rather than emulated.
-- Hard resource enforcement (cgroup v2 memory/CPU/PID limits) is not implemented yet; requesting `enforcement: 'hard'` for those on a driver without the capability is rejected at admission by design.
+- Windows is not supported; containment there is reported as unsupported rather than emulated.
+- The Linux cgroup v2 driver enforces memory and process limits when delegated controllers are available. Hard CPU limits are not implemented. A driver that cannot enforce a requested hard limit rejects it at admission.
+- Operation IDs do not authorize filesystem paths. Artifact creation refuses existing files and symbolic links; cleanup requires evidence of ownership. Unknown legacy files are retained by garbage collection.
+- The host owns the artifact parent directory. These checks do not provide an isolation boundary against another process with the same privileges that can concurrently rename parent directories.
 - The kernel executes the commands you give it. It is not a sandbox for hostile code: run untrusted input behind OS-level isolation of your own.

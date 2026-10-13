@@ -1,5 +1,5 @@
-import { ManagedProcessHandle, StructuredCommand, StopProcessResult } from '../driver/types.js';
-import { ConfinementDriver, ProcessOperationResult, ResourceBudget, TerminationReason } from '../types.js';
+import { ManagedProcessHandle, PlatformDriver, StructuredCommand, StopProcessResult } from '../driver/types.js';
+import { ConfinementDriver, ProcessExecutionResult, ResourceBudget, TerminationReason } from '../types.js';
 import type { TrackReadsSpec } from './read-evidence.js';
 
 export interface ExecuteProcessOptions {
@@ -65,10 +65,12 @@ export type StreamSubscriber = (stream: 'stdout' | 'stderr', chunk: Buffer) => v
 export interface ActiveOperationState {
   opId: string;
   runId: string;
+  /** 必须由启动此操作的驱动确认停止，不能随调用入口的驱动变化。 */
+  driver: PlatformDriver;
   phase: 'waiting_resources' | 'intent_registered' | 'spawning' | 'active' | 'stopping' | 'done';
   startTime: number;
   inputFingerprint: string;
-  resultPromise?: Promise<ProcessOperationResult>;
+  resultPromise?: Promise<ProcessExecutionResult>;
   streamSubscribers: Set<StreamSubscriber>;
   handle?: ManagedProcessHandle;
   command?: StructuredCommand;
@@ -76,6 +78,7 @@ export interface ActiveOperationState {
   cancelGraceMs?: number;
   timedOut: boolean;
   terminationReason?: TerminationReason;
+  resourceSamplingError?: string;
   stopPromise?: Promise<StopProcessResult>;
   stopResolve?: (res: StopProcessResult) => void;
 }

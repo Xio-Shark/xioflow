@@ -1,11 +1,12 @@
 import { ManagedProcessHandle, StopProcessResult } from '../driver/types.js';
-import { ProcessOperationResult } from '../types.js';
+import { IndeterminateResult, ProcessExecutionResult, ProcessOperationResult } from '../types.js';
 import { finalizeOperation, indeterminateResult } from './finalize.js';
 import { buildProcessResult, ExitFacts, openOutputCapture, OutputCapture } from './process-output.js';
 import type { ProcessRunContext, ProcessRunPlan } from './process-run.js';
 import { crashpoint } from '../fault/crashpoint.js';
+import { settleProcessTree } from '../driver/tree-settlement.js';
 /** 要么拿到根进程退出事实继续收尾，要么已经得出（并落盘）最终结果。 */
-type Settled = { exit: ExitFacts } | { final: ProcessOperationResult };
+type Settled = { exit: ExitFacts } | { final: ProcessExecutionResult };
 
 const ROOT_EXIT_WAIT_MS = 1000;
 /** 根进程自然退出后，等后代自行结束的上限；超过仍有存活者即按残留回收。 */
@@ -20,7 +21,7 @@ export async function superviseActive(
   plan: ProcessRunPlan,
   handle: ManagedProcessHandle,
   cleanups: Array<() => void>
-): Promise<ProcessOperationResult> {
+): Promise<ProcessExecutionResult> {
   const { options, opState } = plan;
   // 崩溃点：进程已放行运行、结果尚未落盘
   crashpoint('supervisor:process-running');
@@ -48,6 +49,7 @@ export async function superviseActive(
   const outcome = await raceRootOutcome(plan, handle, timeoutPromise);
   clearTimer();
   sampler.stop();
+  await sampler.settle();
 
   const settled = await settleRootOutcome(ctx, plan, handle, outcome);
   if ('final' in settled) return settled.final;
@@ -64,6 +66,7 @@ export async function superviseActive(
     residualProcessesReaped: drained.residualProcessesReaped,
     treeSettlement: drained.treeSettlement,
     peaks: sampler.peaks(),
+    resourceSamplingError: sampler.error(),
     identityVerification: await ctx.driver.verifyIdentity(handle.identity),
   });
 
@@ -91,23 +94,35 @@ function startBudgetSampler(ctx: ProcessRunContext, plan: ProcessRunPlan, handle
   const budget = options.resourceBudget;
   let peakMemoryBytes = 0;
   let peakCpuTimeMs = 0;
+  let observed = false;
+  let samplingError: string | undefined;
+  let stopped = false;
+  let pending: Promise<void> | undefined;
   let samplingInterval: NodeJS.Timeout | null = null;
   const stop = () => {
+    stopped = true;
     if (samplingInterval) clearInterval(samplingInterval);
   };
-  const peaks = () => ({ peakMemoryBytes, peakCpuTimeMs });
+  const peaks = () => ({
+    peakMemoryBytes: observed && !samplingError ? peakMemoryBytes : undefined,
+    peakCpuTimeMs: observed && !samplingError ? peakCpuTimeMs : undefined,
+  });
+  const settle = async () => { await pending; };
+  const error = () => samplingError;
 
   if (!ctx.driver.sampleMetrics || !budget) {
-    return { stop, peaks };
+    return { stop, peaks, settle, error };
   }
-  const stopFor = async (reason: 'memory_exceeded' | 'cpu_exceeded' | 'pids_exceeded') => {
+  const stopFor = async (reason: 'memory_exceeded' | 'cpu_exceeded' | 'pids_exceeded' | 'observation_failed') => {
     opState.terminationReason = reason;
     stop();
     await ctx.stop(options.opId, reason, 1000);
   };
-  samplingInterval = setInterval(async () => {
+  const sample = async () => {
     try {
       const metrics = await ctx.driver.sampleMetrics!(handle.identity);
+      if (stopped) return;
+      observed = true;
       peakMemoryBytes = Math.max(peakMemoryBytes, metrics.rssBytes);
       peakCpuTimeMs = Math.max(peakCpuTimeMs, metrics.cpuTimeMs);
       if (budget.enforcement === 'hard') {
@@ -125,9 +140,25 @@ function startBudgetSampler(ctx: ProcessRunContext, plan: ProcessRunPlan, handle
       } else if (budget.maxPids && metrics.pidsCount > budget.maxPids) {
         await stopFor('pids_exceeded');
       }
-    } catch {}
+    } catch (failure) {
+      samplingError ??= failure instanceof Error ? failure.message : String(failure);
+      opState.resourceSamplingError = samplingError;
+      if (!stopped && budget.enforcement === 'soft'
+        && (budget.maxMemoryBytes || budget.maxCpuTimeMs || budget.maxPids)
+        && !opState.terminationReason) {
+        try { await stopFor('observation_failed'); }
+        catch (stopError) {
+          samplingError += `; stopping failed: ${String(stopError)}`;
+          opState.resourceSamplingError = samplingError;
+        }
+      }
+    }
+  };
+  samplingInterval = setInterval(() => {
+    if (stopped || pending) return;
+    pending = sample().finally(() => { pending = undefined; });
   }, 100);
-  return { stop, peaks };
+  return { stop, peaks, settle, error };
 }
 
 /** 退出之后补读一次 OS 限制命中事实，覆盖采样间隔里发生的命中。 */
@@ -190,9 +221,8 @@ async function settleRootOutcome(
 
   if (outcome.type === 'stop') {
     if (outcome.stopRes.stopped !== 'confirmed_stopped') {
-      if (handle.rawProcess && typeof handle.rawProcess.kill === 'function') {
-        try { handle.rawProcess.kill('SIGKILL'); } catch {}
-      }
+      // The driver owns signalling authority. An unconfirmed result must not
+      // trigger a single-PID fallback through a stale ChildProcess reference.
       try {
         (handle.stdout as any).destroy?.();
         (handle.stderr as any).destroy?.();
@@ -215,7 +245,7 @@ async function settleRootOutcome(
   }
   const stored = ctx.domain.getStore().getOperation(options.opId);
   if (stored && stored.status === 'done' && stored.result?.status === 'indeterminate') {
-    return { final: stored.result as unknown as ProcessOperationResult };
+    return { final: stored.result };
   }
   const indet = indeterminateResult({
     reason: `Process ${handle.identity.pid} timed out and root process could not be confirmed exited within ${ROOT_EXIT_WAIT_MS}ms bound: ${stopRes.errorDetails || 'root process still alive'}`,
@@ -231,15 +261,21 @@ function recordUnconfirmedStop(
   handle: ManagedProcessHandle,
   stopRes: StopProcessResult,
   withCapability: boolean
-): ProcessOperationResult {
+): ProcessExecutionResult {
   const stored = ctx.domain.getStore().getOperation(plan.options.opId);
   if (stored && stored.status === 'done') {
-    return (stored.result ?? null) as unknown as ProcessOperationResult;
+    const result = stored.result;
+    if (!result || (result.kind !== 'process' && result.kind !== 'indeterminate')) {
+      throw new Error(`Cannot settle process operation "${plan.options.opId}": stored process result is missing or has an incompatible kind`);
+    }
+    return result;
   }
   const indet = indeterminateResult({
     reason: `Process ${handle.identity.pid} was cancelled or stopped but could not be confirmed: ${stopRes.errorDetails || 'residual processes still alive'}`,
     startTime: plan.opState.startTime,
     capabilityId: withCapability ? plan.options.capabilityId : undefined,
+    terminationReason: plan.opState.terminationReason,
+    resourceSamplingError: plan.opState.resourceSamplingError,
   });
   return holdLeases(ctx, plan, indet);
 }
@@ -248,7 +284,7 @@ function holdLeases(
   ctx: ProcessRunContext,
   plan: ProcessRunPlan,
   indet: ReturnType<typeof indeterminateResult>
-): ProcessOperationResult {
+): IndeterminateResult {
   return finalizeOperation(ctx.domain, plan.options.opId, indet, {
     requiredResources: plan.options.requiredResources,
     releaseResourceLock: false,
@@ -267,7 +303,7 @@ async function drainOrReap(
   handle: ManagedProcessHandle,
   capture: OutputCapture,
   facts: { exit: ExitFacts; exitedNaturally: boolean }
-): Promise<Drained | { final: ProcessOperationResult }> {
+): Promise<Drained | { final: IndeterminateResult }> {
   const { options, opState } = plan;
   const drainTimeoutMs = options.drainTimeoutMs ?? 2000;
   const drainPromise = Promise.all([capture.stdout.finishPromise, capture.stderr.finishPromise]);
@@ -320,19 +356,15 @@ async function settleTree(
   ctx: ProcessRunContext,
   plan: ProcessRunPlan,
   handle: ManagedProcessHandle
-): Promise<Drained | { final: ProcessOperationResult }> {
-  const answer = ctx.driver.settleTree ? await ctx.driver.settleTree(handle.identity, TREE_SETTLE_WAIT_MS) : 'unknown';
-  if (answer === 'empty') return { residualProcessesReaped: false, treeSettlement: 'empty' };
-  if (answer === 'unknown') return { residualProcessesReaped: false, treeSettlement: 'unverified' };
-
-  const reapResult = await ctx.driver.terminate(handle.identity, 1500);
-  if (reapResult.stopped !== 'confirmed_stopped') {
+): Promise<Drained | { final: IndeterminateResult }> {
+  const settlement = await settleProcessTree(ctx.driver, handle.identity, TREE_SETTLE_WAIT_MS, 1500);
+  if (settlement.status === 'unconfirmed') {
     const indet = indeterminateResult({
-      reason: `Process ${handle.identity.pid} exited but descendants that left its output pipes could not be confirmed stopped: ${reapResult.errorDetails ?? 'residual processes still alive'}`,
+      reason: `Process ${handle.identity.pid} exited but descendants that left its output pipes could not be confirmed stopped: ${settlement.stop.errorDetails ?? 'residual processes still alive'}`,
       capabilityId: plan.options.capabilityId,
       startTime: plan.opState.startTime,
     });
     return { final: holdLeases(ctx, plan, indet) };
   }
-  return { residualProcessesReaped: true, treeSettlement: 'reaped' };
+  return { residualProcessesReaped: settlement.residualProcessesReaped, treeSettlement: settlement.treeSettlement };
 }

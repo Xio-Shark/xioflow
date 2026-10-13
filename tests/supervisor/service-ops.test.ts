@@ -429,6 +429,7 @@ describe('内核长驻 service op: Step 2-4 startService, readiness 与 restart'
       serviceId: 'no-restart-on-stop',
       runId,
       command: { execPath: process.execPath, args: ['-e', script], cwd: tempDir },
+      restart: { policy: 'on-failure', maxRestarts: 3, backoffMs: 50 },
     });
     expect(handle2).toBe(handle);
 
@@ -474,6 +475,7 @@ describe('内核长驻 service op: Step 2-4 startService, readiness 与 restart'
     await expect(
       supervisor.executeProcess({
         opId: 'competing-op',
+        name: 'competing-op',
         runId,
         command: { execPath: process.execPath, args: ['-e', ''], cwd: tempDir },
         requiredResources: [resource],

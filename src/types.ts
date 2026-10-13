@@ -52,7 +52,8 @@ export type TerminationReason =
   | 'memory_exceeded'
   | 'cpu_exceeded'
   | 'pids_exceeded'
-  | 'output_exceeded';
+  | 'output_exceeded'
+  | 'observation_failed'; // Required soft-limit measurements became unavailable.
 
 /**
  * 资源治理预算契约
@@ -126,6 +127,9 @@ export type OperationResult =
   | SnapshotOperationResult
   | RollbackOperationResult;
 
+/** A process attempt may finish without enough evidence to confirm its outcome. */
+export type ProcessExecutionResult = ProcessOperationResult | IndeterminateResult;
+
 export interface BaseResult {
   durationMs: number;
   completedAt: string;
@@ -158,6 +162,7 @@ export interface ProcessOperationResult extends BaseResult {
   spawnFailure?: string;           // 非空表示可执行文件根本没起来（与子进程自己返回 127 区分）
   peakMemoryBytes?: number;
   cpuTimeMs?: number;
+  resourceSamplingError?: string; // Measurement failure; missing metrics are not zero usage.
   residualProcessesReaped?: boolean; // 根进程退出后仍存活的后代（持有管道或已脱离）已被停止流水线回收
   /**
    * 根进程自然退出后，「没有后代残留」这一结论的依据：`empty` 驱动证明树已空；
@@ -223,6 +228,8 @@ export interface GenericOperationResult extends BaseResult {
 }
 
 export interface IndeterminateResult extends BaseResult {
+  terminationReason?: TerminationReason;
+  resourceSamplingError?: string;
   kind: 'indeterminate';
   status: 'indeterminate';
   reason: string;                  // 未知原因

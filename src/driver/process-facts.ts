@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import util from 'node:util';
+import { ProcessObservationError } from './observation.js';
 
 const execFileAsync = util.promisify(execFile);
 
@@ -125,12 +126,13 @@ export async function getGroupMembers(pgid: number): Promise<GroupMemberFact[]> 
             const startTimeMs = await readStartTime(pid);
             members.push({ pid, startTimeMs });
           }
-        } catch {
-          // 进程可能在读取中途已退出
+        } catch (error: any) {
+          // A process disappearing during the scan is different from losing access.
+          if (error.code !== 'ENOENT' && error.code !== 'ESRCH') throw error;
         }
       }
-    } catch {
-      return [];
+    } catch (error) {
+      throw new ProcessObservationError('Process group observation failed', error);
     }
     return members;
   }
@@ -157,8 +159,8 @@ export async function getGroupMembers(pgid: number): Promise<GroupMemberFact[]> 
           }
         }
       }
-    } catch {
-      return [];
+    } catch (error) {
+      throw new ProcessObservationError('Process group observation failed', error);
     }
     return members;
   }

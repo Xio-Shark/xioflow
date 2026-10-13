@@ -66,10 +66,10 @@ export class SqliteStore {
     if (this.inTransaction) {
       return fn();
     }
-    this.inTransaction = true;
     // 崩溃点：事务提交前（整笔丢失）与提交后（已持久、内存后续动作未做）
     const label = crashpointsEnabled ? `store:${callerLabel(2)}` : '';
     this.db.exec('BEGIN IMMEDIATE');
+    this.inTransaction = true;
     try {
       const result = fn();
       crashpoint(`${label}:before-commit`);
@@ -77,7 +77,11 @@ export class SqliteStore {
       crashpoint(`${label}:after-commit`);
       return result;
     } catch (err) {
-      this.db.exec('ROLLBACK');
+      try {
+        this.db.exec('ROLLBACK');
+      } catch (rollbackError) {
+        throw new AggregateError([err, rollbackError], 'Transaction failed and rollback failed', { cause: err });
+      }
       throw err;
     } finally {
       this.inTransaction = false;

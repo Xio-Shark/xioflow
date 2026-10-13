@@ -3,6 +3,7 @@ export * from './domain.js';
 export * from './store/schema.js';
 export * from './store/sqlite.js';
 export * from './driver/types.js';
+export { ProcessObservationError } from './driver/observation.js';
 export * from './driver/node-driver.js';
 export * from './driver/reaper-driver.js';
 export * from './driver/cgroup-driver.js';

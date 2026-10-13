@@ -1,12 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { OwnedArtifact, removeOwnedArtifact } from '../artifacts.js';
 import { ExecutionDomain } from '../domain.js';
 import { Operation, ResourceConflictError, SnapshotDriver, SnapshotOperationResult } from '../types.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
-import { collectIgnoredEntries, ignoredManifestPath, writeIgnoredManifest } from '../snapshot/ignored-manifest.js';
+import { collectIgnoredEntries, ignoredManifestPath, resolveIgnoredManifest, writeIgnoredManifest } from '../snapshot/ignored-manifest.js';
 import { CapabilityAdmission, recordCapabilityUsed } from './admission.js';
 import { CaptureSnapshotOptions } from './types.js';
+import { domainCoordination } from './domain-coordination.js';
 
 export interface SnapshotContext {
   domain: ExecutionDomain;
@@ -102,6 +104,8 @@ export async function captureSnapshot(
     options.trackIgnored === 'manifest' && !options.includeIgnored
       ? ignoredManifestPath(domain.domainPath, options.opId)
       : undefined;
+  let manifestArtifact: OwnedArtifact | undefined;
+  let result!: SnapshotOperationResult;
   try {
     let ignoredManifest: { digest: string; entries: number } | undefined;
     if (manifestFile) {
@@ -109,7 +113,9 @@ export async function captureSnapshot(
         throw new Error(`Snapshot driver ${snapshotDriver.name} cannot list ignored files (trackIgnored: 'manifest')`);
       }
       const entries = collectIgnoredEntries(await snapshotDriver.listIgnored(realRoots));
-      ignoredManifest = { digest: writeIgnoredManifest(manifestFile, entries), entries: entries.length };
+      const written = writeIgnoredManifest(manifestFile, entries);
+      manifestArtifact = written.artifact;
+      ignoredManifest = { digest: written.digest, entries: entries.length };
     }
 
     const snapRef = await snapshotDriver.capture(realRoots, {
@@ -122,7 +128,6 @@ export async function captureSnapshot(
     snapRef.ignoredManifestDigest = ignoredManifest?.digest;
 
     const store = domain.getStore();
-    let result: SnapshotOperationResult;
     store.transaction(() => {
       const seq = store.recordEventAndTransitionState({
         domainId: domain.domainId,
@@ -163,12 +168,19 @@ export async function captureSnapshot(
       });
     });
 
-    domain.internalReleaseResources(options.opId);
-    return result!;
   } catch (err: any) {
-    if (manifestFile) fs.rmSync(manifestFile, { force: true });
+    if (manifestArtifact) {
+      try {
+        removeOwnedArtifact(manifestArtifact);
+      } catch (cleanupError) {
+        err = new AggregateError([err, cleanupError], `${err.message}; ignored manifest cleanup failed: ${cleanupError}`);
+      }
+    }
     throw recordFailedSnapshot(domain, options.opId, err, startTime);
   }
+  // 成功事实已持久化，产物由快照持有；释放租约失败不能撤销成功或删除证据。
+  domain.internalReleaseResources(options.opId);
+  return result;
 }
 
 /** 记录失败快照并释放租约；返回调用方应抛出的错误（失败事实没能落盘时要让调用方知道）。 */
@@ -211,7 +223,8 @@ export async function materialize(
   if (domain.isResourceLocked(writeRes)) {
     throw new ResourceConflictError(writeRes, domain.getResourceOwner(writeRes) || 'unknown', 'materialize');
   }
-  const opId = `mat-${snapshotId}-${Date.now()}`;
+  const opId = `mat-${snapshotId}-${crypto.randomUUID()}`;
+  domain.assertOperationIdAvailable(opId);
   domain.allocateResources(opId, [writeRes]);
 
   try {
@@ -220,7 +233,9 @@ export async function materialize(
     }
     const snapshot = domain.getStore().getSnapshot(snapshotId);
     const repoRoot = snapshot?.roots[0];
-    return await snapshotDriver.materialize(snapshotId, absNewRoot, { repoRoot });
+    const result = await snapshotDriver.materialize(snapshotId, absNewRoot, { repoRoot });
+    domainCoordination(domain).materializedWorkspaces.set(writeRes, opId);
+    return result;
   } catch (err) {
     domain.internalReleaseResources(opId);
     throw err;
@@ -233,7 +248,8 @@ export async function materialize(
 export async function dematerialize(
   ctx: SnapshotContext,
   newRoot: string,
-  options?: { force?: boolean }
+  options?: { force?: boolean },
+  internalLeaseOwner?: string
 ): Promise<void> {
   const { domain, snapshotDriver } = ctx;
   const absNewRoot = path.resolve(newRoot);
@@ -245,23 +261,36 @@ export async function dematerialize(
   if (!snapshotDriver.dematerialize) {
     throw new Error(`Snapshot driver ${snapshotDriver.name} does not support dematerialize`);
   }
-  await snapshotDriver.dematerialize(absNewRoot, options);
-
-  const writeRes = `workspace:write:${absNewRoot}`;
-  const writeResReal = `workspace:write:${realNewRoot}`;
-  const owner1 = domain.getResourceOwner(writeRes);
-  const owner2 = domain.getResourceOwner(writeResReal);
-  if (owner1) {
-    domain.internalReleaseResources(owner1, [writeRes]);
+  // 回收不能先删除目录再释放别人的租约。materialize 自己保留的租约允许交还；
+  // 事务内部回收只能使用它明确持有的 owner，公共入口不能借此绕过活跃进程。
+  const resources = [...new Set([`workspace:write:${absNewRoot}`, `workspace:write:${realNewRoot}`])];
+  const materialized = domainCoordination(domain).materializedWorkspaces;
+  let recordedOwner: string | undefined;
+  for (const resource of resources) {
+    const owner = domain.getResourceOwner(resource);
+    if (owner && owner !== internalLeaseOwner && materialized.get(resource) !== owner) {
+      throw new ResourceConflictError(resource, owner, 'dematerialize');
+    }
+    if (owner) recordedOwner = owner;
   }
-  if (owner2 && owner2 !== owner1) {
-    domain.internalReleaseResources(owner2, [writeResReal]);
-  }
-
-  const leases = domain.getStore().getPersistedResourceLeases(domain.domainId);
-  for (const lease of leases) {
-    if (lease.resourceId === writeRes || lease.resourceId === writeResReal) {
-      domain.internalReleaseResources(lease.operationId, [lease.resourceId]);
+  const owner = internalLeaseOwner ?? recordedOwner ?? `demat-${crypto.randomUUID()}`;
+  if (!internalLeaseOwner && !recordedOwner) domain.assertOperationIdAvailable(owner);
+  domain.allocateResources(owner, resources);
+  // 内部创建的租约只允许交还一次；并发公共回收不能借同一 owner 重入。
+  for (const resource of resources) materialized.delete(resource);
+  let primaryError: unknown;
+  try {
+    await snapshotDriver.dematerialize(absNewRoot, options);
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    // 释放后同名公开操作可以合法出现，旧的内部授权不能继续跟随该名字。
+    for (const resource of resources) materialized.delete(resource);
+    try { domain.internalReleaseResources(owner, resources); }
+    catch (error) {
+      if (primaryError !== undefined) throw new AggregateError([primaryError, error], 'Worktree removal and isolation release both failed');
+      throw error;
     }
   }
 }
@@ -287,10 +316,14 @@ export async function pruneSnapshots(
       snapshotDriver instanceof GitShadowSnapshotDriver
         ? (await snapshotDriver.assertGitRepo(snapshot.roots[0])).repoRoot
         : undefined;
-    await snapshotDriver.prune([id], { repoRoot });
+    let manifestToRemove: OwnedArtifact | undefined;
     if (snapshot.ignoredManifestDigest) {
-      fs.rmSync(ignoredManifestPath(domain.domainPath, id), { force: true });
+      const manifest = resolveIgnoredManifest(domain.domainPath, id, snapshot.ignoredManifestDigest);
+      if (manifest.state === 'mismatch') throw new Error(`Ignored manifest changed before pruning snapshot: ${id}`);
+      if (manifest.state === 'found') manifestToRemove = manifest.artifact;
     }
+    await snapshotDriver.prune([id], { repoRoot });
+    if (manifestToRemove) removeOwnedArtifact(manifestToRemove);
     store.transaction(() => {
       store.deleteSnapshot(id);
       store.recordEventAndTransitionState({

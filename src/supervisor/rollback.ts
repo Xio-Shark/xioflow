@@ -13,7 +13,6 @@ import { isPathContained } from '../capability/index.js';
 import {
   collectIgnoredEntries,
   diffIgnoredEntries,
-  ignoredManifestPath,
   readIgnoredManifest,
 } from '../snapshot/ignored-manifest.js';
 import { CapabilityAdmission } from './admission.js';
@@ -211,7 +210,8 @@ async function compareIgnoredManifest(
 ): Promise<{ state: IgnoredManifestState; changes?: IgnoredChanges }> {
   if (!snapshot.ignoredManifestDigest) return { state: 'absent' };
   const before = readIgnoredManifest(
-    ignoredManifestPath(domain.domainPath, snapshot.id),
+    domain.domainPath,
+    snapshot.id,
     snapshot.ignoredManifestDigest
   );
   if (!before || !snapshotDriver.listIgnored) return { state: 'unreadable' };

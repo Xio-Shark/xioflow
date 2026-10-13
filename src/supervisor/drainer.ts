@@ -1,5 +1,6 @@
 import * as crypto from 'node:crypto';
 import fs from 'node:fs';
+import { createArtifact, OwnedArtifact, removeOwnedArtifact } from '../artifacts.js';
 
 export function trimToValidUtf8(buf: Buffer): Buffer {
   const len = buf.length;
@@ -47,7 +48,8 @@ export function setupStreamDrainer(
   spillFilePath?: string,
   onChunk?: (bytes: number) => void,
   onData?: (chunk: Buffer) => void,
-  spillInitError?: string
+  spillInitError?: string,
+  onArtifactCreated?: (artifact: OwnedArtifact) => void
 ): StreamDrainer {
   const overhead = maxBytes >= 80 ? Math.min(64, Math.floor(maxBytes / 4)) : 0;
   const effectiveMax = maxBytes - overhead;
@@ -59,6 +61,7 @@ export function setupStreamDrainer(
   let bytesSeen = 0;
   let isTruncated = false;
   let spillFd: number | null = null;
+  let ownedSpill: OwnedArtifact | undefined;
   let spillError: string | undefined = spillInitError;
   const hash = crypto.createHash('sha256');
   let isFinalized = false;
@@ -70,7 +73,9 @@ export function setupStreamDrainer(
 
   if (spillFilePath && !spillError) {
     try {
-      spillFd = fs.openSync(spillFilePath, 'w');
+      const created = createArtifact(spillFilePath, onArtifactCreated);
+      spillFd = created.fd;
+      ownedSpill = created.artifact;
     } catch (openErr: any) {
       spillError = openErr.message || String(openErr);
       spillFd = null;
@@ -83,11 +88,24 @@ export function setupStreamDrainer(
     if (spillFd !== null) {
       try {
         fs.fsyncSync(spillFd);
-        fs.closeSync(spillFd);
       } catch (syncErr: any) {
         spillError = spillError || syncErr.message || String(syncErr);
+      } finally {
+        try {
+          fs.closeSync(spillFd);
+        } catch (closeErr: any) {
+          spillError = spillError || closeErr.message || String(closeErr);
+        }
       }
       spillFd = null;
+    }
+    // Only the drainer knows which file it created; failed opens never authorize deletion.
+    if (ownedSpill && (!isTruncated || spillError)) {
+      try {
+        removeOwnedArtifact(ownedSpill);
+      } catch (cleanupErr: any) {
+        spillError = spillError || cleanupErr.message || String(cleanupErr);
+      }
     }
     if (!spillError) {
       try {

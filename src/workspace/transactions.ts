@@ -4,7 +4,7 @@ import { ExecutionDomain } from '../domain.js';
 import { JournalEvent, SnapshotRef } from '../types.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
 import { isPathContained } from '../capability/index.js';
-import { collectReadSet, normalizeAccessTimes, probeReadTracking, ReadTracking } from './read-tracking.js';
+import { collectReadTracking, normalizeAccessTimes, probeReadTracking, ReadTracking } from './read-tracking.js';
 import { replayObservationLog } from './observation-replay.js';
 
 /**
@@ -53,6 +53,8 @@ export interface TransactionEffects {
   readTracking: ReadTracking;
   /** readTracking 为 'unobserved' 时为 null：不知道就不假装知道 */
   readSet: string[] | null;
+  /** 无法观测是否使用过的符号链接路径，保守参与冲突校验；旧事务未记此证据时为 null。 */
+  pathDependencies: string[] | null;
   writeSet: WriteEntry[];
 }
 
@@ -104,13 +106,14 @@ interface CommitPlan {
 export interface TransactionHost {
   domain: ExecutionDomain;
   snapshotDriver: GitShadowSnapshotDriver;
+  assertOperationIdAvailable(opId: string): void;
   captureSnapshot(runId: string, opId: string, root: string): Promise<SnapshotRef>;
   materialize(snapshotId: string, forkPath: string): Promise<void>;
-  dematerialize(forkPath: string): Promise<void>;
+  dematerialize(forkPath: string, leaseOwner?: string): Promise<void>;
   pruneSnapshot(snapshotId: string, runId: string): Promise<void>;
 }
 
-type OpenTransaction = WorkspaceTransaction & { forkPath: string; repoRoot: string };
+type OpenTransaction = WorkspaceTransaction & { forkPath: string; repoRoot: string; pathDependencies: string[] | null };
 
 export class WorkspaceTransactions {
   private readonly open = new Map<string, OpenTransaction>();
@@ -150,7 +153,9 @@ export class WorkspaceTransactions {
     const forkRoot = path.join(fs.realpathSync(forkPath), path.relative(repoRoot, root));
 
     const readTracking = probeReadTracking(path.dirname(forkPath));
-    if (readTracking === 'atime') normalizeAccessTimes(forkRoot);
+    const pathDependencies = readTracking === 'atime'
+      ? normalizeAccessTimes(forkRoot)
+      : collectReadTracking(forkRoot).pathDependencies;
 
     const beginSeq = this.record(options.runId, 'TX_BEGUN', {
       txId: options.txId,
@@ -159,6 +164,7 @@ export class WorkspaceTransactions {
       forkRoot,
       baseSnapshotId: base.id,
       readTracking,
+      pathDependencies,
     });
     const tx: OpenTransaction = {
       txId: options.txId,
@@ -170,6 +176,7 @@ export class WorkspaceTransactions {
       baseSnapshotId: base.id,
       beginSeq,
       readTracking,
+      pathDependencies,
       status: 'open',
     };
     this.open.set(tx.txId, tx);
@@ -178,25 +185,48 @@ export class WorkspaceTransactions {
 
   /** 当前读集与写集（不提交）。读集证据在计算写集前取出并落 journal，随后重新归一 atime。 */
   public async inspect(txId: string): Promise<TransactionEffects> {
-    return this.effects(await this.require(txId));
+    const tx = await this.require(txId);
+    const owner = `${txId}:inspect`;
+    this.host.assertOperationIdAvailable(owner);
+    this.host.domain.allocateResources(owner, [`workspace:write:${tx.forkRoot}`]);
+    try {
+      return await this.effects(tx);
+    } finally {
+      this.host.domain.internalReleaseResources(owner);
+    }
   }
 
   public commit(txId: string, options?: CommitOptions): Promise<CommitResult> {
-    // 同一域只有一个 owner：进程内串行化即可保证「校验 + 应用」相对其他提交是原子的
-    const run = this.commitQueue.then(() => this.commitSerialized(txId, options));
+    return this.serialize(() => this.commitSerialized(txId, options));
+  }
+
+  private serialize<T>(action: () => Promise<T>): Promise<T> {
+    // 提交与回收共用队列，abort 不能在异步校验期间销毁提交的重做源。
+    const run = this.commitQueue.then(action);
     this.commitQueue = run.catch(() => {});
     return run;
   }
 
-  public async abort(txId: string, reason = 'aborted by host'): Promise<void> {
+  public abort(txId: string, reason = 'aborted by host'): Promise<void> {
+    return this.serialize(() => this.abortSerialized(txId, reason));
+  }
+
+  private async abortSerialized(txId: string, reason: string): Promise<void> {
     const tx = await this.require(txId);
     if (tx.status === 'committing') {
       throw new Error(`Workspace transaction "${txId}" is committing; call commit() again to finish applying it`);
     }
-    await this.host.dematerialize(tx.forkPath);
-    await this.discardReplayFork(tx);
-    this.record(tx.runId, 'TX_ABORTED', { txId, reason });
-    this.open.delete(txId);
+    const owner = `${txId}:abort`;
+    this.host.assertOperationIdAvailable(owner);
+    this.host.domain.allocateResources(owner, [`workspace:write:${tx.forkRoot}`]);
+    try {
+      await this.host.dematerialize(tx.forkPath, owner);
+      await this.discardReplayFork(tx);
+      this.record(tx.runId, 'TX_ABORTED', { txId, reason });
+      this.open.delete(txId);
+    } finally {
+      this.host.domain.internalReleaseResources(owner);
+    }
   }
 
   /** 本进程内打开过的事务（崩溃后重建的事务在首次 inspect / commit / abort 时载入）。 */
@@ -211,49 +241,79 @@ export class WorkspaceTransactions {
       throw new Error(`Workspace transaction "${txId}" has conflicts; abort it and start again from the current workspace`);
     }
     const committing = this.journal(txId).find((e) => e.type === 'TX_COMMITTING');
-    let plan: CommitPlan;
-    let fileConflicts: TransactionConflict[] = [];
-    if (committing) {
-      // 崩溃后的重试：校验已经做过，只重放应用
-      const p = committing.payload as Partial<CommitPlan> & { effects: TransactionEffects };
-      plan = {
-        effects: p.effects,
-        sourceRoot: p.sourceRoot ?? tx.forkRoot,
-        validation: p.validation ?? (p.effects.readSet === null ? 'write_only' : 'files'),
-        replay: p.replay,
-      };
-      if (!fs.existsSync(plan.sourceRoot)) {
-        throw new Error(`Workspace transaction "${txId}" cannot finish committing: ${plan.sourceRoot} is gone`);
-      }
-    } else {
-      const effects = await this.effects(tx);
-      const conflicts = await this.validate(tx, effects);
-      plan = { effects, sourceRoot: tx.forkRoot, validation: effects.readSet === null ? 'write_only' : 'files' };
-      if (conflicts.length > 0) {
-        const byObservation = options?.observations
-          ? await this.validateByObservations(tx, effects, conflicts, options.observations)
-          : undefined;
-        if (!byObservation?.plan) return this.conflicted(tx, conflicts, effects, byObservation?.outcome);
-        plan = byObservation.plan;
-        fileConflicts = conflicts;
-      }
-    }
-
-    const { effects, validation } = plan;
     const leaseOwner = `${txId}:apply`;
-    this.host.domain.allocateResources(leaseOwner, [`workspace:write:${tx.root}`]);
+    const { domain } = this.host;
+    let held = false;
+    let durable = committing !== undefined;
+    let committed = false;
+    let primaryError: unknown;
+    let plan!: CommitPlan;
+    let fileConflicts: TransactionConflict[] = [];
+    const acquire = (roots: string[]) => {
+      if (!held) {
+        if (committing) {
+          // 只有 journal 对应的内部 owner 可以重入；不能借用公开操作的同名身份。
+          if (domain.getStore().getOperation(leaseOwner)) throw new Error(`Workspace commit owner "${leaseOwner}" belongs to a registered operation`);
+        } else {
+          this.host.assertOperationIdAvailable(leaseOwner);
+        }
+      }
+      domain.allocateResources(leaseOwner, [...new Set(roots)].map((root) => `workspace:write:${root}`));
+      held = true;
+    };
+    const release = () => {
+      domain.internalReleaseResources(leaseOwner);
+      held = false;
+    };
     try {
+      if (committing) {
+        // 隔离从未结清的 journal 在域启动时重建，源分叉仍是受保护的重做日志。
+        const p = committing.payload as Partial<CommitPlan> & { effects: TransactionEffects; isolationVersion?: number };
+        plan = {
+          effects: { ...p.effects, pathDependencies: p.effects.pathDependencies ?? null },
+          sourceRoot: p.sourceRoot ?? tx.forkRoot,
+          validation: p.validation ?? (p.effects.readSet === null ? 'write_only' : 'files'),
+          replay: p.replay,
+        };
+        acquire([tx.root, plan.sourceRoot]);
+        if (p.isolationVersion !== 1) {
+          throw new Error(`Workspace transaction "${txId}" lacks continuous commit isolation evidence; automatic replay is refused. Inspect its target and redo source before manual resolution.`);
+        }
+        if (!fs.existsSync(plan.sourceRoot)) {
+          throw new Error(`Workspace transaction "${txId}" cannot finish committing: ${plan.sourceRoot} is gone`);
+        }
+      } else {
+        // effects 也会 await；源和目标在取证之前一起占用，避免读集和写集随后失效。
+        acquire([tx.root, tx.forkRoot]);
+        const effects = await this.effects(tx);
+        const conflicts = await this.validate(tx, effects);
+        plan = { effects, sourceRoot: tx.forkRoot, validation: effects.readSet === null ? 'write_only' : 'files' };
+        if (conflicts.length > 0) {
+          // 重放会为主工作区拍快照，不能与同名写租约嵌套；它的结论稍后重新核对。
+          release();
+          const byObservation = options?.observations
+            ? await this.validateByObservations(tx, effects, conflicts, options.observations, (source) => acquire([source]))
+            : undefined;
+          if (!byObservation?.plan) return this.conflicted(tx, conflicts, effects, byObservation?.outcome);
+          plan = byObservation.plan;
+          fileConflicts = conflicts;
+          acquire([tx.root]);
+        }
+      }
+      const { effects, validation } = plan;
       if (!committing && plan.replay && !(await this.unchangedSince(tx, plan.replay.snapshotId))) {
         // 重放用的是拍快照那一刻的工作区；拿到写租约时它已经不是那个状态，重放的结论与写集都不再成立
+        release();
         await this.discardReplayFork(tx);
-        return this.conflicted(tx, fileConflicts, { ...effects, writeSet: (await this.effects(tx)).writeSet }, {
+        return this.conflicted(tx, fileConflicts, { ...effects, writeSet: (await this.inspect(txId)).writeSet }, {
           attempted: true,
           reason: 'workspace_changed',
         });
       }
       if (!committing) {
+        this.record(tx.runId, 'TX_COMMITTING', { txId, root: tx.root, ...plan, isolationVersion: 1 });
+        durable = true;
         tx.status = 'committing';
-        this.record(tx.runId, 'TX_COMMITTING', { txId, ...plan });
       }
       this.apply(tx, effects.writeSet, plan.sourceRoot);
       this.record(tx.runId, 'TX_COMMITTED', {
@@ -261,19 +321,31 @@ export class WorkspaceTransactions {
         root: tx.root,
         writeSet: effects.writeSet,
         readSet: effects.readSet,
+        pathDependencies: effects.pathDependencies,
         validation,
       });
+      committed = true;
+      tx.status = 'committed';
+      this.open.delete(txId);
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
-      this.host.domain.internalReleaseResources(leaseOwner);
+      // 部分应用、落结果失败都保留隔离；重试完成或启动重建之前不允许新写入。
+      if (held && (!durable || committed)) {
+        try { release(); }
+        catch (error) {
+          if (primaryError !== undefined) throw new AggregateError([primaryError, error], `Workspace commit ${txId} and isolation release both failed`);
+          throw error;
+        }
+      }
     }
-    tx.status = 'committed';
     await this.host.dematerialize(tx.forkPath);
     if (plan.replay) {
       await this.host.dematerialize(plan.replay.forkPath);
       await this.host.pruneSnapshot(plan.replay.snapshotId, tx.runId);
     }
-    this.open.delete(txId);
-    return { status: 'committed', txId, validation, ...effects };
+    return { status: 'committed', txId, validation: plan.validation, ...plan.effects };
   }
 
   private conflicted(
@@ -301,7 +373,8 @@ export class WorkspaceTransactions {
     tx: OpenTransaction,
     effects: TransactionEffects,
     conflicts: TransactionConflict[],
-    observations: ObservationValidation
+    observations: ObservationValidation,
+    protectSource: (root: string) => void
   ): Promise<{ plan?: CommitPlan; outcome?: ObservationOutcome }> {
     // 两边都写过的路径不靠观测放行：内核分不清带范围的编辑与整文件覆盖，后者会抹掉对方的改动
     const myWrites = new Set(effects.writeSet.map((w) => w.path));
@@ -334,6 +407,7 @@ export class WorkspaceTransactions {
     }
 
     // 写集取「主工作区当前状态 → 重放分叉」的差异：它就是要落到主工作区的全部改动
+    protectSource(replayRoot);
     const current = await snapshotDriver.fingerprint([replayRoot], { against: snapshot });
     const forkRepo = (await snapshotDriver.assertGitRepo(replayRoot)).repoRoot;
     const prefix = path.relative(forkRepo, replayRoot);
@@ -381,15 +455,19 @@ export class WorkspaceTransactions {
   }
 
   private async effects(tx: OpenTransaction): Promise<TransactionEffects> {
+    // 必须在任何 git 读取之前取证；链接只记路径，不跟随，也不声称它们被读过。
+    const currentReads = collectReadTracking(tx.forkRoot);
+    const earlier = this.journal(tx.txId).filter((e) => e.type === 'TX_READS');
     let readSet: string[] | null = null;
     if (tx.readTracking === 'atime') {
-      // 必须在任何 git 读取之前取证；之前 inspect 落盘的读集一并计入
-      const earlier = this.journal(tx.txId)
-        .filter((e) => e.type === 'TX_READS')
-        .flatMap((e) => e.payload.readSet as string[]);
-      readSet = [...new Set([...earlier, ...collectReadSet(tx.forkRoot)])].sort();
-      this.record(tx.runId, 'TX_READS', { txId: tx.txId, readSet });
+      readSet = [...new Set([...earlier.flatMap((e) => (e.payload.readSet as string[] | null) ?? []), ...currentReads.readSet])].sort();
     }
+    const pathDependencies = tx.pathDependencies === null ? null : [...new Set([
+      ...tx.pathDependencies,
+      ...earlier.flatMap((e) => (e.payload.pathDependencies as string[] | null) ?? []),
+      ...currentReads.pathDependencies,
+    ])].sort();
+    this.record(tx.runId, 'TX_READS', { txId: tx.txId, readSet, pathDependencies });
 
     const { snapshotDriver } = this.host;
     const base = this.host.domain.getStore().getSnapshot(tx.baseSnapshotId);
@@ -401,7 +479,7 @@ export class WorkspaceTransactions {
       (c) => ({ status: c.status, path: prefix ? path.relative(prefix, c.path) : c.path })
     );
     if (tx.readTracking === 'atime') normalizeAccessTimes(tx.forkRoot); // git 读过所有文件，重新归零证据
-    return { readTracking: tx.readTracking, readSet, writeSet };
+    return { readTracking: tx.readTracking, readSet, pathDependencies, writeSet };
   }
 
   /** 后向校验：本事务开始后提交的事务，以及绕过事务直接写入主工作区的改动。 */
@@ -507,6 +585,7 @@ export class WorkspaceTransactions {
       baseSnapshotId: p.baseSnapshotId,
       beginSeq: begun.seq,
       readTracking: p.readTracking as ReadTracking,
+      pathDependencies: (begun.payload.pathDependencies as string[] | undefined) ?? null,
       status,
     };
     this.open.set(txId, tx);
@@ -535,10 +614,11 @@ function intersect(
   const conflicts: TransactionConflict[] = [];
   const myWrites = new Set(mine.writeSet.map((w) => w.path));
   const myReads = new Set(mine.readSet ?? []);
+  const pathDependencies = new Set(mine.pathDependencies ?? []);
   for (const other of others) {
     if (myWrites.has(other.path)) {
       conflicts.push({ path: other.path, kind: writeKind, otherTxId });
-    } else if (myReads.has(other.path)) {
+    } else if (myReads.has(other.path) || mine.pathDependencies === null || pathDependencies.has(other.path)) {
       conflicts.push({ path: other.path, kind: readKind, otherTxId });
     } else if (other.status === 'A' || other.status === 'D') {
       const parent = path.posix.dirname(other.path);

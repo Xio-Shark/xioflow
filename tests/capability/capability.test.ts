@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -340,6 +341,7 @@ describe('Capability Scope & Admission (Steps 1, 2, 3)', () => {
         cwd: workDir,
       },
     });
+    assert(res.kind === 'process');
 
     expect(res.status).toBe('succeeded');
     expect(res.capabilityId).toBe(cap.id);
