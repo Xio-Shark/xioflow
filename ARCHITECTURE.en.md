@@ -1,6 +1,8 @@
 # xioflow Kernel & xiocode Distribution Architecture and Protocol Specification
 
-> **Start here for integration:** [Current implementation contract](spec/current-contract.md) separates the embedded TypeScript execution core, experimental AgentRuntime, and unimplemented Rust/daemon/Python/ABI plans. `CHANGELOG.md` distinguishes released behavior from worktree changes.
+> **Start here for integration:** [Current implementation contract](spec/current-contract.md) separates the embedded TypeScript execution core, experimental AgentRuntime, and the abandoned (2026-10-13) Rust/daemon/Python direction. `CHANGELOG.md` distinguishes released behavior from worktree changes.
+
+> **Direction ruling (2026-10-13, evening; supersedes the morning entry):** The Rust core, language bindings and daemon/multi-client direction is **abandoned** (reasons and revival conditions in the roadmap appendix). Decisions 3, 5 and 6 below are amended accordingly: arbitration is bounded by the host process, the TypeScript embedded core is the reference implementation, and `AgentRuntime` grows along a scheduling-versus-policy line. §5 daemon material remains a historical design record; its message shapes remain the transport baseline for black-box conformance.
 
 > **Kernel foundation (2026-10-13, unreleased):** An acquired domain coordinates all supervisor entry points, including in-flight execution, service ownership, read tracking and transaction commits. Artifact creation and reclamation require explicit ownership evidence. Symbolic-link assumptions remain conservative path dependencies. Contracts 63–65 cover these boundaries; the [current contract](spec/current-contract.md#domain-coordination-and-artifact-ownership) defines compatibility and limits.
 
@@ -11,7 +13,7 @@ The [interruption contract](spec/agent-runtime.md#interruption-contract) disting
 The [shutdown contract](spec/agent-runtime.md#shutdown-contract) closes admission before draining owned work. Runtime ownership remains held through active quanta, command settlement and workspace reconstruction; closing the runtime does not close its domain or release indeterminate leases.
 
 > **Document Status**: Authoritative Protocol Specification for the xioflow kernel repository. Sections 0, 3, and 7 define the core kernel protocol and conformance guarantees. For phased roadmap and current implementation status, see [`ROADMAP.md`](./ROADMAP.md). Chinese version: [`ARCHITECTURE.md`](./ARCHITECTURE.md).  
-> **Status**: Target-state protocol specification (v2 planning: Rust core + snapshot rollback + dual deployment topology). Sections marked "Target State" are in the roadmap for upcoming milestones; refer to `ROADMAP.md` for current implementation alignment.  
+> **Status**: Amended 2026-10-13 — the embedded TypeScript core is the product; the Rust core / daemon / language-binding direction is abandoned (roadmap appendix). All sections (0–8) are mirrored in English as of this amendment; the Chinese edition remains authoritative on any discrepancy. Sections marked "Target State" are historical design material, not roadmap commitments.  
 > **Core Positioning**:  
 > - **xioflow**: A supervised execution kernel for AI agent framework authors. The execution core provides domain lifecycle, supervised processes, resource arbitration, verified stops, workspace transactions, SQLite persistence and recovery. Experimental AgentRuntime adds cooperative dispatch, task scopes and shared budgets. Distributions supply model protocols, prompts and business tools.
 > - **xiocode**: The reference distribution assembled on top of xioflow: a complete local coding agent (model routing, coding tools, permission policy, CLI/TUI) that showcases what the kernel does. How it is assembled is documented in xiocode's own ARCHITECTURE.md.  
@@ -29,8 +31,8 @@ The [shutdown contract](spec/agent-runtime.md#shutdown-contract) closes admissio
 |---|---|
 | **Target Users** | Agent framework authors (not end-users of agents). Primary audience: **local-first** agent frameworks and coding agents executing commands directly on host machines. |
 | **Non-Target Users** | Frameworks executing entirely inside disposable remote containers or microVMs (where tearing down the container resets the world, minimizing kernel demand). |
-| **Kernel Form** | Current: embedded TypeScript/Node.js. Planned: Rust core and daemon mode (§0.2 Decision 3, §5). |
-| **Integration** | Current: Node.js package and TypeScript types. Language-neutral protocol and Python bindings remain planned. |
+| **Kernel Form** | Embedded TypeScript/Node.js single implementation is the product; the Rust core and daemon mode were abandoned on 2026-10-13 (§0.2 Decision 3, §5; revival conditions in the roadmap appendix). |
+| **Integration** | Node.js package and TypeScript types; language-neutral contract artifacts (JSON Schema, black-box conformance) are mainline work (P1a); other language bindings were abandoned (2026-10-13). |
 | **Governance Scope** | Local processes and workspace transactions; experimental agent lifecycle, task scopes, shared Run budgets and evidence-gated dispatch. Model protocols remain in distributions. |
 | **Controller Boundary** | Execution primitives and cooperative AgentRuntime; no forced preemption, plugin component model or business orchestration policy. |
 | **Success Criteria** | Adoption by third-party agent frameworks and passing the conformance suite; xiocode is merely the reference distribution. |
@@ -81,12 +83,12 @@ The kernel strictly differentiates between **"Outcome is indeterminate"** and **
 - **When blast radius cannot be determined**: Conservatively pause admission of new operations across the entire execution domain.
 - **Distribution Policy**: Distributions may adopt more conservative global pauses according to product preference, but can never relax the kernel's mandatory isolation.
 
-#### 3. Deployment Topology: One Core, Embedded and Daemon Modes, Unified Protocol
-"Single domain owner" and "every framework process embeds its own library" cannot coexist: a second embedded library accessing the same workspace receives `DomainLockedError`, while separate domains sacrifice cross-agent resource arbitration. Since kernel semantics require **one arbiter per workspace**:
-- **Embedded Mode**: The kernel runs inside the host process as an in-process library; the host is the domain owner. Suitable for single-agent, single-process CLI scenarios with zero operational overhead.
-- **Daemon Mode**: The kernel runs as a persistent workspace daemon holding domain ownership. Multiple clients (different frameworks, languages, or agents) connect via the §5 protocol; the daemon arbitrates resource leases centrally.
-- **Identical Contract**: Both modes enforce identical protocol semantics and conformance suites. The embedded language binding is simply an in-process transport implementation.
-- **Upgrade Path**: When an embedded caller detects the domain is already held by a daemon, it must attach as a protocol client; it must never attempt to steal locks or spawn shadow domains.
+#### 3. Deployment Topology: Embedded Single Implementation; Arbitration Bounded by the Host Process (Amended 2026-10-13)
+"Single domain owner" and "every framework process embeds its own library" cannot coexist: a second embedded library accessing the same workspace receives `DomainLockedError`, while separate domains sacrifice cross-agent resource arbitration. The original design delivered cross-process "one arbiter per workspace" through a daemon; **after the 2026-10-13 direction ruling abandoned the daemon, the promised boundary is narrowed honestly**:
+- **Arbitration scope = within one host process**: an acquired domain arbitrates in-flight execution, service ownership, read tracking and transaction commits for all supervisor entry points in that process (Contracts #64, #65);
+- **No cross-process arbitration**: a second framework process attempting to acquire the same workspace domain fails explicitly (`DomainLockedError`); serializing or splitting domains is the host's decision, not the kernel's guess;
+- **Reference domain-splitting pattern**: concurrent agents each run on their own git worktree with their own domain, sharing no `.git` writes; xiocode's worktree sandbox is the product-grade implementation of this pattern (distribution side);
+- **Original daemon design (cross-client lease arbitration, observer connections, `client_lost`)**: archived as abandoned design; §5 keeps the material as a historical record and revival reference (revival conditions in the roadmap appendix).
 
 #### 4. Rollback Honesty: Pluggable Snapshot Drivers, Coverage Must Be Honestly Declared
 The kernel is not a security sandbox (§8) and cannot observe arbitrary writes by unmanaged child processes. Rollback assurance is governed by two orthogonal capabilities:
@@ -99,10 +101,11 @@ The kernel is not a security sandbox (§8) and cannot observe arbitrary writes b
 The Linux distribution ecosystem relies upon long-term stability of the syscall ABI. xioflow's equivalents are:
 - **Three Core ABI Pillars**: Protocol message schemas (§5), `domain.db` schema with `user_version` migrations (§1), and the Conformance Suite (§7).
 - **Versioning Strategy**: Protocol and schema versioning are decoupled from language package versions, evolving under SemVer; breaking changes require major version bumps with explicit migrations.
-- **Implementation Status**: The Rust core is the normative reference implementation; TypeScript 0.1.x is the historical reference implementation. Conformance tier compliance is the sole criterion for compatibility.
+- **Implementation Status (amended 2026-10-13)**: The TypeScript embedded core is the reference implementation and currently the only implementation; conformance tier compliance — not code lineage — remains the sole criterion for compatibility. The planned Rust reference implementation was abandoned with the 2026-10-13 direction ruling (revival conditions in the roadmap appendix); the remaining commitments of this decision (three ABI pillars, SemVer evolution, breaking changes require a major bump with migration) are unchanged.
 
-#### 6. Operation Idempotency: Kernel as the Side-Effect Layer (At-Most-Once Execution)
+#### 6. Operation Idempotency and the Scheduling Boundary: When/Whether Belongs to the Kernel; What/Success Belongs to the Host (Amended 2026-10-13)
 - xioflow is not a workflow engine; it acts as the **side-effect layer** beneath durable workflow engines (Temporal, Restate, LangGraph, DBOS, Inngest). The workflow engine manages replays; the kernel guarantees that "side effects for the same `opId` occur at most once, or an honest error is returned."
+- **Scheduling-versus-policy line**: the kernel governs **when and whether** work executes in the execution lifecycle — admission, budgets, cancellation, lifecycle, checkpoints, evidence gates and task-tree joins (`AgentRuntime` is the experimental carrier of these primitives and may grow into a lightweight scheduler per the 2026-10-13 ruling); it never governs **what** the work is or **what counts as success** — model protocols, prompts, task decomposition, acceptance policy, business orchestration (DAG/workflow engines) and token/cost accounting stay with the host (§8 items 3–4). One-sentence criterion: **deciding when/whether to execute belongs to the kernel; deciding what to do and what counts as success belongs to the host.** Scheduling decisions are driven by evidence and budgets, never by the business graph.
 - `opId` is globally unique within an execution domain and persists across Runs (D17). A Run remains a single execution attempt: resuming a task after crash requires a new Run; replayed operations return previously recorded facts from the prior Run.
 - **Idempotency Adjudication Table** (see §3.7):
   - Missing → Normal execution;
@@ -133,6 +136,278 @@ The Linux distribution ecosystem relies upon long-term stability of the syscall 
 - A single capability unifies resource leases, `ConfinementDriver` writable roots, and snapshot roots into a single coherent truth source.
 - Rollback `coverage` is derived directly from whether execution was verifiably confined by capability: confined ⇒ eligible for `non_ignored`, and for `complete` once ignored files are accounted for (Decision 4); unconfined ⇒ capped at `declared_roots`.
 - Not a substitute for OS security boundaries (§8); unauthenticated in embedded mode (D18).
+
+---
+
+## 1. Persistence Architecture & Power-Loss Guarantees (SQLite Transactional Store)
+
+To achieve power-loss-grade crash recovery, the kernel abandons fragile bespoke plain-text appends for control state and uniformly adopts an **embedded SQLite transactional store**.
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                   Execution Domain storage boundary                    │
+│                                                                        │
+│   SQLite Database (domain.db)                                          │
+│   ├── tasks / runs / operations (state tables)                         │
+│   ├── resource_leases (persistent resource occupancy)                  │
+│   ├── snapshots (snapshot refs, coverage, fingerprints — target state) │
+│   └── journal_events (monotonic sequence-numbered event log)           │
+│   PRAGMA user_version = schema version (ABI; migrations must explicit) │
+│                                                                        │
+│   WAL mode + PRAGMA synchronous = FULL / macOS F_FULLFSYNC             │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### 1.1 Explicit Boundaries of Three Persistence Guarantees
+
+1. **Control-fact persistence**: committed Run states, Operation spawn intents, authorization decisions and results are flushed with `FULL` semantics after transaction commit and are 100% recoverable after power loss;
+2. **Managed-artifact persistence**: before the kernel reports "artifact saved", the artifact driver must call `fsync` for a physical flush rather than merely returning a path; flush or write failures must be reported as facts (e.g. `spillError`), and no artifact reference pointing at an incomplete file may be returned;
+3. **External side-effect state**: external shell commands and remote API calls cannot join local DB transactions. The kernel brackets every external call with a **pre-intent registration** and a **post-result verification** window; uncertain scenes are forced into the recovery pipeline.
+
+> **Power-loss guarantee boundary**: on declared-supported local filesystems (e.g. APFS, ext4) and storage hardware that honors synchronization semantics correctly, committed kernel facts and managed artifacts are recoverable; physical hardware damage or devices that falsely report completed flushes are not covered.
+
+### 1.2 Schema Versioning & Migration (ABI)
+
+- The `domain.db` table structure is part of the ABI (§0.2 Decision 5): versioned by `PRAGMA user_version`; every implementation must verify the version before opening a database;
+- Version older than own: perform explicit, replayable migration inside the ownership lock; the migration itself is written to `journal_events`; version newer than own: refuse to open and report `SchemaTooNewError`; downgrade writes are forbidden;
+- Purpose: any implementation conforming to this specification (including cross-language ones) can take over an existing domain (including a crash scene) verbatim and adjudicate it.
+
+---
+
+## 2. Core Domain Model & Entity Contracts (TypeScript Notation)
+
+> The types below use TypeScript notation to describe **protocol shapes**; they do not imply an implementation language. Any implementation conforming to this specification uses them as the serialization contract.
+
+```typescript
+/**
+ * Logical unit of work
+ */
+export interface Task {
+  id: string;                      // unique task identifier
+  domainId: string;                // owning execution domain
+  name: string;
+  createdAt: string;               // ISO8601
+  meta?: Record<string, unknown>;  // distribution metadata
+}
+
+/**
+ * A single execution attempt
+ */
+export interface Run {
+  id: string;
+  taskId: string;
+  domainId: string;
+  owner: string;                   // execution owner (session-id / agent-runner)
+  status: KernelRunStatus;
+  terminationReason?: TerminationReason;
+  startedAt: string;
+  endedAt?: string;
+  configSnapshotWhiteList?: Record<string, unknown>; // allow-listed safe config snapshot
+}
+
+export type KernelRunStatus =
+  | 'queued'        // queued
+  | 'starting'      // start-up preparation in progress
+  | 'running'       // executing normally
+  | 'stopping'      // stopping, awaiting driver confirmation
+  | 'succeeded'     // succeeded (all operations settled)
+  | 'failed'        // explicit execution failure
+  | 'cancelled'     // confirmed stopped
+  | 'indeterminate';// outcome unknown (cannot confirm stop, or side effects unclear)
+
+export type TerminationReason =
+  | 'completed'
+  | 'user_cancelled'
+  | 'timed_out'
+  | 'resource_preempted'
+  | 'crash_detected'
+  | 'memory_exceeded'              // physical / process-tree memory limit exceeded
+  | 'cpu_exceeded'                 // CPU time limit exceeded
+  | 'pids_exceeded'                // descendant process count exceeded (fork-bomb guard)
+  | 'output_exceeded'              // output byte hard truncation
+  | 'client_lost';                 // target state: originating client disconnected in daemon mode (§5.3)
+
+/**
+ * Resource governance budget contract
+ */
+export interface ResourceBudget {
+  maxMemoryBytes?: number;         // process-tree total memory (RSS/cgroup memory)
+  maxPids?: number;                // total descendant processes (cgroup pids.max)
+  maxCpuTimeMs?: number;           // CPU time (a different dimension from wall-clock timeoutMs)
+  maxOutputBytes?: number;         // stdout+stderr on-disk cap (spill ceiling)
+  enforcement: 'observe' | 'soft' | 'hard';
+}
+
+/**
+ * Supervised atomic operation
+ */
+export interface Operation {
+  id: string;
+  runId: string;
+  kind: 'process' | 'service' | 'snapshot' | 'rollback' | 'filesystem' | 'gate' | 'custom';
+  name: string;
+  inputFingerprint: string;        // content hash (sha256) of input and config; not a readable concatenation
+  requiredResources: string[];     // resources claimed (e.g. ["workspace:write:root"])
+  timeoutMs?: number;              // wall-clock run timeout
+  resourceBudget?: ResourceBudget; // explicitly declared resource governance budget
+  mutationRoots?: string[];        // target state: workspace roots this operation may modify (snapshot / rollback / write-confinement scope)
+  snapshotBefore?: boolean;        // target state: capture a pre-snapshot at intent registration (§3.5)
+  capabilityId?: string;           // target state: associated authorization capability id (§0.2 Decision 9)
+  status: 'pending' | 'intent_registered' | 'active' | 'stopping' | 'done';
+}
+
+/**
+ * Polymorphic execution result
+ */
+export type OperationResult =
+  | ProcessOperationResult
+  | SnapshotOperationResult
+  | RollbackOperationResult
+  | FilesystemOperationResult
+  | GenericOperationResult
+  | IndeterminateResult;
+
+export interface BaseResult {
+  durationMs: number;
+  completedAt: string;
+  replayed?: true;                 // target state: result returned by idempotent replay (§3.7)
+}
+
+export interface ProcessOperationResult extends BaseResult {
+  kind: 'process';
+  status: 'succeeded' | 'failed' | 'cancelled';
+  exitCode: number | null;
+  signal: string | null;           // POSIX signal name (e.g. 'SIGKILL'); null on Windows
+  stdout: string;                  // in-memory retained Head + Tail (§4.3) or full output
+  stderr: string;
+  isTruncated: boolean;            // aggregate flag: any stream hit the bounded cap and was truncated
+  stdoutTruncated: boolean;        // per-stream truncation fact
+  stderrTruncated: boolean;
+  stdoutRef?: string;              // artifact reference of the per-stream full spill; present only after a successful flush
+  stderrRef?: string;
+  stdoutHash?: string;             // sha256 over the spilled on-disk content
+  stderrHash?: string;
+  spillError?: string;             // spill failure fact; when present the corresponding *Ref must be absent
+  spawnFailure?: string;           // executable could not start (distinct from the child itself exiting 127)
+  peakMemoryBytes?: number;        // sampled process-tree memory peak
+  cpuTimeMs?: number;              // CPU time consumed
+  identityVerification: IdentityVerificationResult;
+  stopVerification?: StopProcessResult; // stop confirmation credential
+}
+
+/**
+ * Target state: workspace snapshot (§3.5)
+ */
+export interface SnapshotRef {
+  id: string;
+  driver: string;                  // 'git-shadow' | 'apfs-clonefile' | 'btrfs' | 'overlay' | third-party
+  roots: string[];                 // roots actually covered
+  coverage: 'worktree_non_ignored' | 'full_tree';  // a git-shadow reference excludes ignored files; must be declared honestly
+  treeFingerprint: string;         // snapshot content fingerprint, used to verify after rollback
+  journalSeq: number;              // global monotonic journal sequence of the transaction at capture time (§0.2 Decision 8)
+  createdAt: string;
+}
+
+export interface SnapshotOperationResult extends BaseResult {
+  kind: 'snapshot';
+  status: 'succeeded' | 'failed';
+  snapshot?: SnapshotRef;
+  errorMessage?: string;
+}
+
+export interface RollbackOperationResult extends BaseResult {
+  kind: 'rollback';
+  status: 'restored' | 'partial' | 'failed';
+  snapshotId: string;
+  // §0.2 Decision 4: without a confinement driver, coverage may not be 'complete';
+  // ignored files neither in the snapshot nor proven unchanged cap coverage at 'non_ignored'
+  coverage: 'complete' | 'non_ignored' | 'declared_roots' | 'none';
+  verifiedFingerprint: boolean;    // whether the post-rollback workspace fingerprint matches the snapshot
+  unrestoredPaths?: string[];      // paths that could not be restored on partial (including intentionally kept ignored files that appeared after a full_tree snapshot)
+  outOfScopeEffects: 'none_possible' | 'possible';      // whether managed operations could have written outside the roots
+  // What rollback can say about ignored files: in snapshot & restored / not in snapshot but proven unchanged by a manifest / not in snapshot and unproven / in snapshot but verification failed
+  ignoredFiles: 'restored' | 'unchanged_verified' | 'not_captured' | 'unverified';
+  ignoredChanges?: {               // with a manifest: changes of ignored files relative to it; max 50 entries per category, counts holds totals
+    added: string[]; removed: string[]; modified: string[];
+    metadataOnly: string[];        // only ctime changed: cannot prove unchanged, does not assert changed either
+    truncated: boolean;
+    counts: { added: number; removed: number; modified: number; metadataOnly: number };
+  };
+  coverageBasis: string[];         // basis, e.g. all_ops_confined、snapshot_full_tree、ignored_manifest_unchanged、ignored_not_captured
+}
+
+/**
+ * Target state: human adjudication record (§3.6)
+ */
+export interface AdjudicationRecord {
+  operationId: string;
+  verdict: 'confirmed_stopped' | 'abandon_with_residuals';
+  actor: string;                   // adjudicator identity submitted by the distribution (user / policy name)
+  note?: string;
+  residualPids?: number[];         // residual process facts retained honestly on abandon
+  decidedAt: string;
+}
+
+/**
+ * Target state: authorization Capability (§0.2 Decision 9)
+ */
+export interface Capability {
+  id: string;
+  scope: {
+    write: string[];                 // allowed workspace path roots for writes (realpath first, then inclusion check)
+    exclusive: string[];             // managed resources allowed for exclusive claims
+  };
+  issuedBy: string;                  // issuer identity (distribution policy name / user)
+  expiresAt: string;                 // ISO8601 expiry
+  parentId?: string;                 // deriving parent capability id (narrowing derivation)
+  epoch: number;                     // domain epoch at issuance; invalid across generations
+}
+
+/**
+ * Error type definitions (target state / 0.3.0)
+ */
+export class OperationIdConflictError extends Error {
+  constructor(public opId: string, public existingFingerprint: string, public incomingFingerprint: string) {
+    super(`Operation ID '${opId}' already exists with a different input fingerprint`);
+    this.name = 'OperationIdConflictError';
+  }
+}
+
+export class RecoveryRequiredError extends Error {
+  constructor(public opId: string, public existingStatus: string) {
+    super(`Operation '${opId}' is recorded as '${existingStatus}' but not active in memory; recovery must be performed before replay`);
+    this.name = 'RecoveryRequiredError';
+  }
+}
+
+export interface FilesystemOperationResult extends BaseResult {
+  kind: 'filesystem';
+  status: 'succeeded' | 'failed';
+  targetPath: string;
+  action: 'create' | 'modify' | 'delete';
+  bytesWritten?: number;
+  errorMessage?: string;
+}
+
+export interface GenericOperationResult extends BaseResult {
+  kind: 'generic';
+  status: 'succeeded' | 'failed' | 'cancelled';
+  outputRef?: string;              // immutable artifact reference
+  errorMessage?: string;
+}
+
+export interface IndeterminateResult extends BaseResult {
+  kind: 'indeterminate';
+  status: 'indeterminate';
+  reason: string;                  // unknown cause
+  recoveryGuidance: string;        // manual recovery or on-site triage guidance
+}
+
+export type IdentityVerificationResult =
+  | 'is_original_process'          // confirmed the originally spawned process
+  | 'not_original_process'         // definitively no longer the original process
+  | 'cannot_determine';            // cannot reliably determine
+```
 
 ---
 
@@ -301,6 +576,359 @@ For long-running processes (e.g., MCP stdio servers, local test runners, dev wat
 
 ---
 
+### 3.9 Workspace Transaction Protocol: Optimistic Concurrency for Parallel Agents
+
+When multiple agents modify the same workspace concurrently, locks (the `workspace:write` lease of §3.1) can only serialize them; workspace transactions let them **work in parallel and validate at commit**, moving database OCC (optimistic concurrency control, backward validation) onto the filesystem:
+
+- **begin**: capture a baseline snapshot of the transaction roots (§3.5) and materialize an isolated fork; the fork's exclusive lease transfers to the transaction, the agent executes arbitrary operations inside the fork, mutual exclusion via each one's declared `workspace:write:<fork>`. Write `TX_BEGUN`; its journal seq is the transaction's start point.
+- **Read set** (unprivileged observation): after the fork is created, set each entry's atime before its mtime (2-second margin); subsequent reads (file content, directory listings) are judged by `atime >= mtime`, including timestamp equality within the same Linux clock tick. Linux relatime updates atime when atime ≤ mtime; macOS APFS updates only when atime is strictly earlier than mtime (atime == mtime does not update on read — measured). Transactions and command evidence share the nanosecond-precision judgement and normalization logic. stat alone does not change atime, so collection itself does not pollute evidence, and it must complete before any git reads. The probe directly compares atime before and after the read; filesystems mounted `noatime` honestly declare `readTracking: 'unobserved'`, `readSet: null` — no pretending to know.
+- **Write set**: per-file diff from the baseline snapshot tree to the fork's current tree (`A / M / D / T`), same caliber as the snapshot — exact and independent of observation method.
+- **Backward validation** (at commit):
+  - The write set of every transaction committed since this transaction began, intersected with this transaction's write set ⇒ `write_write`; intersected with the read set ⇒ `read_write` (content this transaction relied on is stale);
+  - Directories in the read set (`dir/`) conflict only with direct entry additions or removals inside that directory — a listing sees the entry set; content modification does not change it;
+  - Changes to the main workspace since the baseline not explained by committed transactions (direct writes bypassing transactions) participate in validation too ⇒ `external_write`;
+  - A domain has a single owner; validation and application are serialized in-process, guaranteeing atomicity relative to other commits.
+- **Apply**: hold the main workspace's `workspace:write` lease, first write `TX_COMMITTING` (with the write set, intent first), then land the write set verbatim onto the main workspace (preserving executable bits and symlinks, refusing writes through symlink parent directories out of the transaction root), finally write `TX_COMMITTED` and reclaim the fork. Crash mid-apply: the fork is the redo log; after restart the transaction is rebuilt from the journal and application is idempotently replayed, without re-validating.
+- **Observation-level validation** (optional, `commit(txId, { observations })`): a file-level read set says "this file was read", while an agent usually relied on only a segment of it, or the result of one search. When someone else changed a different part of the same file, file-level validation still reports `read_write` — a false conflict. The host may hand over the transaction's observation log (ordered steps: read-only observations carry result hashes; a change's return value likewise carries a result hash when it exposed other content to the agent) and a replay function. The kernel uses it **only when file-level validation has already reported a conflict**:
+  1. The conflict contains `write_write`, or the conflicting paths are in this transaction's write set ⇒ no attempt, conflict stands (`observation: { attempted: false, reason: 'write_conflict' }`). The kernel does not interpret tool calls and cannot distinguish ranged edits from whole-file overwrites; files written by both sides are never released on observation evidence;
+  2. A process or service ran in the fork since the transaction began (judged by declared write roots and leases) ⇒ no attempt, write `TX_VALIDATION_DOWNGRADED` (`reason: 'not_closed_world'`). A process can read things beyond the log, so the host's `closedWorld` declaration does not hold here;
+  3. Otherwise first write `TX_REPLAY_STARTED` (recording the replay fork and snapshot so a crash can abort and reclaim accordingly), snapshot the main workspace's current state, materialize a replay fork, and have the host replay each step in order: an observation's result hash differing from the record, or a change that cannot be applied ⇒ conflict stands, reporting the first difference (`observation: { attempted: true, divergedAt, reason }`);
+  4. All identical ⇒ the write set becomes the diff from "current state → replay fork". After acquiring the main workspace write lease, verify once more that the main workspace is still in the snapshotted state: changed during replay (direct writes bypassing transactions) ⇒ the conclusion is void, conflict stands (`observation: { attempted: true, reason: 'workspace_changed' }`), nothing applied; otherwise commit from the replay fork. `TX_COMMITTING` records the source directory and `validation`; a post-crash retry still applies from the replay fork.
+  The commit result carries `validation`, stating what "no conflict" rests on: `observations` (replayed observations), `files` (file-level read/write sets), `write_only` (reads unobserved; only the write set was validated). The correctness of observation-level validation depends on the host's log being complete and normalized results being reproducible; the only thing the kernel can verify is rule 2 above. It does not guarantee the merged code is semantically correct (two individually valid changes merged may still be invalid) — same as file-level validation.
+- **Conflict is terminal**: failed validation writes `TX_CONFLICTED` (with `observation` if observation validation was attempted), the main workspace is unchanged, the fork is retained for inspection; the host can only abort and restart from the current workspace (continuing from the fork point, rebasing — host policy, not in the kernel).
+- **Boundaries**: only reads inside the fork are observed; the fork is checked out from the snapshot tree and excludes ignored files (e.g. `node_modules`).
+
+### 3.10 Read-Set Evidence: Validation Results Carry Their Dependencies
+
+A validation command's conclusion (tests pass, typecheck passes) holds only for the files it depends on. `executeProcess({ trackReads: { roots } })` uses the same observation as §3.9 (access time, unprivileged) to record the files the command read and the directories it listed inside roots; the result carries a `readEvidence` summary, with details written to `artifacts/<opId>-reads.json.gz`:
+
+- **Recording**: before start, normalize roots once (only files read since the last normalization; directories every time); after the process exits, collect the read set, hash the content of files read and the entry sets of directories listed, and record every file's size / mtime inside roots. `scope` is always `content_reads`: dependencies that only stat without reading content are not in the read set.
+- **`evidenceStatus(opId)`**: content of a read file changed or entries of a listed directory changed ⇒ `stale` (naming them); nothing inside roots changed ⇒ `fresh` (`basis: 'tree_unchanged'`); only files outside the read set changed ⇒ `fresh` (`basis: 'reads_unchanged'`) when the caller declared `statCaches: 'ruled_out'`, otherwise `unknown` (`changed_outside_read_set`).
+- **Why the default is `unknown`**: a command that hits a valid cache only stats source files without reading them (Python bytecode caches, incremental compilers), so source files are not in the read set. Measured: with the default configuration, selecting tests by read set achieves only 0.015 recall against source mutations; pointing the bytecode cache at an empty directory yields 1.000. The kernel cannot know whether a command has such caches, so it only releases by read set after the caller rules them out.
+- **When unobservable**: the filesystem does not advance atime (`no_atime`), or another observed command is running on the same root (`roots_busy`; the later one does not normalize and the earlier one's evidence is unaffected) ⇒ `tracking: 'unobserved'`, able to answer `fresh` only via "nothing changed", otherwise `unknown`. Evidence collection itself failing ⇒ `tracking: 'failed'`; the command result is still persisted, status `unknown`.
+- **Boundaries**: dependencies outside roots, environment variables, files read by resident processes on behalf of the command, and others' writes during the run are all outside the evidence; evidence is not a hermeticity guarantee. Normalization changes read files' ctime; §3.5's ignored-file manifest records it as a metadata-only change.
+
+---
+
+### 3.10 Experimental Agent Lifecycle & Evidence-Aware Scheduling
+
+`AgentRuntime` places agent identity, input, parent relationships, checkpoints, step budgets and cooperative scheduling inside the execution domain, reusing the SQLite journal. Distributions still provide the model, tools and single-step execution adapter. Pre-dispatch observation validation, valid checkpoint selection, pause and resume protocols are in the [experimental runtime specification](spec/agent-runtime.md); validation is in `tests/agents/` and E6. This is an experimental increment shipped with the package since 0.7.0; it does not mean the full multi-agent kernel is complete. Per the 2026-10-13 direction ruling, AgentRuntime's growth boundary is Decision 6's "scheduling vs policy" line: scheduling, budgets, cancellation and lifecycle primitives may keep growing; model protocols, prompts, task decomposition and acceptance policy never enter the kernel. "Supervisor and AgentRuntime can be used independently" is unchanged (see the current implementation contract).
+
+`interrupt`'s protocol distinguishes cancellation requests from settlement: record the request first, then notify the adapter and cancel managed commands, wait for the current batch to finish while preserving old checkpoints and spent budgets. It does not force-kill the JavaScript adapter and does not rewrite unconfirmed process stops as success; full boundaries are in the [interruption contract](spec/agent-runtime.md#interruption-contract).
+
+`shutdown` first closes admission of new work, then waits for active quanta, managed commands and workspace reconstruction to settle, and finally releases runtime ownership. It does not close the domain and does not release leases of operations with undetermined outcomes; full boundaries are in the [shutdown contract](spec/agent-runtime.md#shutdown-contract).
+
+## 4. Platform Driver Contracts & Stop-Confirmation Pipeline
+
+### 4.1 Platform Driver Capabilities & the Containment Abstraction
+
+In industrial-grade kernels, `spawn`'s responsibility is never "launch and get a PID", but **"launch and immediately place into a container that can be terminated as a whole group and resource-isolated (Containment)"**:
+
+- On POSIX, establish an independent process group (PGID) via `detached: true`, becoming Group Leader;
+- On Linux, prefer placement into a systemd user scope or a delegated cgroup v2 subtree;
+- On Windows, use `CREATE_NEW_PROCESS_GROUP` and associate a Job Object handle;
+- Any spawn that cannot establish container-level identity must expose the capability gap explicitly at the driver layer; silent degradation to unreliable single-PID management is forbidden.
+
+```typescript
+export interface PlatformDriver {
+  name: string;
+  capabilities: PlatformCapabilities;
+  /**
+   * Launch a managed command and place it in an isolation container
+   */
+  spawn(
+    command: StructuredCommand,
+    options?: { containment?: ContainmentSpec; gated?: boolean } // gated: §3.1 two-phase gated spawn
+  ): Promise<ManagedProcessHandle>;
+  /**
+   * Multi-dimensional process identity verification based on OS process start time and fingerprint (prevents PID wraparound reuse)
+   */
+  verifyIdentity(identity: ProcessIdentity): Promise<IdentityVerificationResult>;
+  /**
+   * Execute the termination pipeline with group-level confirmation and escape scanning
+   */
+  terminate(identity: ProcessIdentity, graceMs: number): Promise<StopProcessResult>;
+  /**
+   * Crash recovery only: when the leader is dead, target-clean by pgid / job and confirm the group is empty
+   */
+  terminateGroup?(group: { pgid?: number; jobId?: string; cgroupPath?: string }, graceMs: number): Promise<StopProcessResult>;
+  /**
+   * Periodically sample process-tree resource metrics (for observe/soft governance); implementations must be non-blocking (§4.4.5)
+   */
+  sampleMetrics?(identity: ProcessIdentity): Promise<ProcessTreeMetrics>;
+}
+
+export interface PlatformCapabilities {
+  processGroupKill: boolean;         // whole-group termination (-pgid / TerminateJobObject / cgroup.kill)
+  startTimeSource: 'os' | 'none';    // 'os': can read kernel-recorded process creation time (survives host restart); 'none': PID liveness only
+  gatedSpawn: boolean;               // §3.1 two-phase gated spawn support
+  memoryHardLimit: boolean;          // OS-level hard memory limit (Linux cgroup v2 memory.max)
+  pidsLimit: boolean;                // total descendant process limit (cgroup pids.max)
+  cpuLimit: boolean;                 // CPU time hard limit (cgroup cpu.max)
+  descendantEnumeration: 'full' | 'cgroup' | 'job' | 'none'; // descendant enumeration and escape detection capability
+}
+
+/**
+ * Target state: snapshot driver (§0.2 Decisions 4, §3.5)
+ */
+export interface SnapshotDriver {
+  name: string;
+  coverage: 'worktree_non_ignored' | 'full_tree';
+  capture(roots: string[]): Promise<SnapshotRef>;
+  restore(snapshot: SnapshotRef): Promise<{ unrestoredPaths: string[] }>;
+  fingerprint(roots: string[]): Promise<string>;
+  prune(snapshotIds: string[]): Promise<void>;
+}
+
+/**
+ * Target state: write-confinement driver (optional; serves rollback correctness, not a security boundary)
+ * Note: the source of writableRoots is the associated Capability (§0.2 Decision 9), no longer scattered config.
+ */
+export interface ConfinementDriver {
+  name: string;                      // 'bubblewrap' | 'sandbox-exec' | 'srt' | third-party
+  /** Wrap the command into "can only write writableRoots" form; must throw when it cannot be honored — returning an unrestricted command is forbidden */
+  wrap(command: StructuredCommand, writableRoots: string[]): StructuredCommand;
+}
+
+export interface ContainmentSpec {
+  pgidLeader: boolean;               // POSIX detached: true group creation
+  jobObject?: boolean;               // Windows Job Object association
+  cgroupScope?: {                    // Linux cgroup v2 isolation zone
+    scopeName: string;
+    budget?: ResourceBudget;
+  };
+}
+
+export interface StructuredCommand {
+  execPath: string;
+  args: string[];                    // argv, never shell-wrapped
+  cwd: string;
+  stdin?: string | Uint8Array;       // one-shot stdin pipe, written then closed (compatible with stdinMode: 'once')
+  stdinMode?: 'once' | 'stream';     // target state: input mode, default 'once'; service instances may use 'stream' (§3.8)
+  envWhiteList?: Record<string, string>; // exact environment: exactly what is given, no PATH injection, never persists full env
+  inheritEnv?: boolean;              // only effective without a white list; false yields an empty environment
+}
+
+export interface ProcessIdentity {
+  pid: number;
+  pgid?: number;                     // POSIX process group id — created at spawn
+  jobId?: string;                    // Windows Job Object identifier
+  cgroupPath?: string;               // Linux cgroup v2 path
+  osStartTime?: string;              // kernel-recorded process creation time (see identity verification rules below)
+  bootId?: string;                   // host boot identifier (Linux /proc/sys/kernel/random/boot_id etc.), compared across restarts; recorded at spawn registration since 0.2.0
+  spawnTime: string;                 // ISO8601 (host record, display only, not identity evidence)
+  commandFingerprint: string;        // sha256(JSON.stringify([execPath, ...args])), audit fact, not part of identity determination
+}
+
+export interface StopProcessResult {
+  stopped: 'confirmed_stopped' | 'not_stopped' | 'cannot_determine'; // three-state stop convergence
+  scope: 'direct_child' | 'process_group' | 'containment_cgroup' | 'job_object' | 'unknown';
+  residualPids?: number[];           // escaped descendants or suspect residual PIDs
+  errorDetails?: string;
+}
+
+export interface ProcessTreeMetrics {
+  rssBytes: number;                  // process-tree physical memory (Resident Set Size)
+  pidsCount: number;                 // surviving descendant process count
+  cpuTimeMs: number;                 // user + system CPU time
+}
+```
+
+#### 4.1.1 Process Identity Verification Rules (Preventing PID Reuse)
+
+- **The only trusted evidence is the OS-recorded process creation time**: Linux reads field 22 `starttime` of `/proc/<pid>/stat` combined with `boot_id`; macOS reads `pbi_start_tvsec/pbi_start_tvusec` of `proc_pidinfo(PROC_PIDTBSDINFO)`; Windows reads the creation time from `GetProcessTimes`;
+- Decision table:
+
+  | Observation | Conclusion |
+  |---|---|
+  | PID does not exist, or is a zombie (exited, awaiting reaping) | `not_original_process` |
+  | `bootId` differs from the current host | `not_original_process` (the original process necessarily no longer exists after restart) |
+  | OS creation time matches the record | `is_original_process` |
+  | OS creation time differs from the record | `not_original_process` |
+  | Driver cannot read OS creation time (`startTimeSource = 'none'`) | `cannot_determine` |
+- **Forbidden** as cross-restart identity evidence: "command line contains execPath" or "a monotonic clock in the host process" — the former misjudges an unrelated same-named process that reused the PID (e.g. another `node`) as the original, which the recovery pipeline would then kill by mistake;
+- `osStartTime` must be read from the OS and recorded at spawn (under gated spawn the child blocks on the gate; `exec` does not change creation time); not recorded or currently unreadable ⇒ `cannot_determine`; readings from the same source are compared by original value, with no tolerance;
+- `commandFingerprint` is an audit fact only, used neither to confirm nor to deny: shebang scripts (`npm`, `pnpm`, Python scripts) have their OS-visible argv rewritten by the kernel into "interpreter + script path + arguments", and programs that rewrite `argv` likewise; denying with it would misjudge a genuine original process as a stranger and wrongly enter the group-cleanup path.
+
+### 4.2 Stop-Confirmation Pipeline (Stopping Pipeline)
+
+Treating "a signal was sent to the PID" as "the process has stopped" is strictly forbidden:
+
+1. **Group-level delivery with graceful escalation**:
+   - Prefer sending `SIGINT` to `-pgid` (or via `cgroup.kill` / `TerminateJobObject`);
+   - After the grace period `graceMs` (default 3000ms), escalate to `SIGTERM`, then `SIGKILL`;
+2. **Group-empty polling verification (Wait for ESRCH)**:
+   - After sending `SIGKILL` to `-pgid`, the driver periodically polls `kill(-pgid, 0)` until it returns `ESRCH` (confirming no surviving process in the group);
+3. **Escaped-descendant explicit scan (Escaped Descendants Audit)**:
+   - Grandchildren may call `setsid()` to leave the original PGID. After the group is empty, the driver performs one descendant-tree scan (Linux walks the `/proc` parent chain, or verifies cgroup membership);
+   - If escaped residual processes are found, record them honestly in `residualPids` and set the stop verdict to `'cannot_determine'` or `'not_stopped'` — **never hastily conclude full stop merely because the group is empty**;
+4. **Decision branching & isolation release**:
+   - `stopped === 'confirmed_stopped'`: confirmed fully terminated; advance to `cancelled` or `timed_out`, atomically release related resource leases;
+   - `stopped !== 'confirmed_stopped'`: retain the on-site resource isolation barrier, advance to `indeterminate`, record a warning event and prevent the resources from being reused by new operations;
+5. **All waits must be bounded**: timeouts / cancellation paths wait for the **root process exit fact**, not stdio pipe closure; when escaped descendants hold pipes, the operation must still return within `timeoutMs + stop pipeline grace + drain timeout` (conclusion `indeterminate`), never hanging until the escapee exits on its own;
+6. **Stop requests must have a real object**: stopping a non-existent, already-terminal, or domain-closed operation must return an explicit error (e.g. `OperationNotActiveError`); returning `confirmed_stopped` is forbidden.
+
+```text
+Cancel / timeout / resource limit triggered
+ └──> Run status enters 'stopping' (locks conflicting resources, rejects new child op claims)
+       └──> Send graceful interrupt (SIGINT) to the process group (-pgid) or cgroup
+             └──> Start controlled grace-period timer graceMs (e.g. 3000ms)
+                   └──> Still not exited? Escalate SIGTERM -> SIGKILL (-pgid)
+                         └──> Poll kill(-pgid, 0) until ESRCH (no processes in group)
+                               └──> Trigger escaped-descendant scan (/proc chain or cgroup enumeration)
+                                     ├── Escapes present or unverifiable -> stopped: 'cannot_determine' -> keep resource isolation, mark indeterminate
+                                     └── Group empty and no escaped residuals -> stopped: 'confirmed_stopped' -> advance to terminal state and release leases
+```
+
+### 4.2.1 Native Holder: reaper helper (`ReaperPlatformDriver`)
+
+The pipeline above can only be **honest** (escape ⇒ `cannot_determine`) on drivers that "observe the process tree from outside", not **complete**. `ReaperPlatformDriver` turns observation into holding: every operation is launched and held throughout by a native helper (`native/reaper/xioflow-reaper.c`, zero-dependency C, shipped as prebuilt binaries per platform).
+
+- **Process layout**: host → helper (new session; `PR_SET_CHILD_SUBREAPER` on Linux) → root (independent process group, blocked on the gate until the host registers identity). The gate is implemented via the helper's pipe, replacing the `/bin/sh` trampoline; after `spawned <pid>` the host reads the OS creation time and records it, then sends `go`.
+- **Tree definition and stopping**:
+  - Linux: orphans necessarily return under the helper, so a `/proc` parent-chain scan enumerates the whole tree; signals are delivered via `pidfd_open` + start-time re-verification with `pidfd_send_signal`, eliminating PID-reuse misfires; **`waitpid` returning `ECHILD` proves the tree is empty** (`scope: 'subreaper_tree'`, `descendantEnumeration: 'subreaper'`).
+  - macOS: no child subreaper. The helper triggers scans via kqueue `NOTE_FORK`; tree = parent-chain descendants ∪ tracked processes ∪ helper session members (a double fork still stays in the session), identity is (pid, microsecond start time). "All tracked processes have disappeared" is weaker than proof, so scope is recorded as `tracked_tree`; an escape that calls `setsid` first, loses the parent chain, and completes before being seen can still be missed, caught by §4.3's pipe-hold detection falling back to `indeterminate`.
+  - The stop ladder is the same as §4.2 (SIGINT → grace → SIGTERM → SIGKILL), but the target is the whole tree rather than the process group; tree not cleared ⇒ `residual <pids>` → `cannot_determine`.
+- **Supervisor death**: on control-channel EOF (host crash) or the helper receiving SIGTERM/SIGINT/SIGHUP, the helper stops the whole tree before exiting — no unsupervised process outlives its supervisor. After root exit the host drops its ref on the helper; remaining descendants do not block host exit, and host exit triggers cleanup.
+- **Relation to recovery**: cross-crash verification, group cleanup and metric sampling reuse the same OS facts as `NodePlatformDriver` (procfs / `ps lstart`); identities registered by the two drivers can adjudicate each other. After the helper is lost (e.g. SIGKILLed), the driver falls back to OS facts and does not fabricate exit codes: root's exit fact is recorded as `{ exitCode: null, signal: null }`.
+- **Selection & distribution**: currently explicitly opted into (construction throws when the helper is not found; no silent driver swap); `ReaperPlatformDriver.isAvailable()` lets hosts decide. Release artifacts include linux-x64 / linux-arm64 (statically linked) and darwin-arm64 / darwin-x64, with CI building all targets on every push.
+- **Not done**: cgroup v2 delegated subtree (`cgroup.kill`, `memory.max`, `pids.max`) remains §4.4's target state; subreaper solves "tree completeness", cgroup solves "hard limits" — the two are orthogonal.
+
+### 4.3 Bounded Output Draining & Spill-to-Artifacts Mechanism
+
+Large-output handling follows "memory ceiling, streaming to disk, preventing pipe deadlock":
+
+1. **In-memory buffer ceiling**: the default per-operation in-memory retention cap is 10MB (computed per stream). Beyond it, the corresponding stream's `*Truncated = true` is set, in-memory accumulation stops, but **Head (leading overview) + Tail (latest exceptions)** are retained in memory — test failure messages usually appear at the tail; keeping Head alone does not satisfy this rule; truncation points must land on UTF-8 character boundaries;
+2. **Overflow spill to artifacts**: each stream is appended from the first byte to a managed artifacts file; `fsync` must complete before the operation finishes; on truncation, register the per-stream `*Ref` and the `*Hash` **computed over the spilled on-disk content**. This honors the memory ceiling while preserving 50MB+ of diagnostic evidence intact; untruncated spill files may be deleted at settlement;
+   - **Spill failures must be visible**: failure at open, write or flush records `spillError`, and the corresponding `*Ref` must not be returned;
+   - **Artifact reclamation**: the kernel provides the `pruneArtifacts(filter)` primitive, which refuses to reap artifacts still referenced by non-terminal / unadjudicated operations; retention policy is the distribution's decision;
+3. **Kernel pipe deadlock-prevention drain pump**: even under truncation or disk write, **the implementation must keep listening and consuming `stream.on('data')` at the bottom**, strictly preventing the OS kernel pipe buffer (commonly 64KB) from filling and permanently hanging the child;
+4. **Drain timeout guard**: waiting for stdio closure has a bounded timeout (default 2000ms); on timeout, force truncate and settle, preventing zombie processes holding stdout/stderr handles from making the main process's event loop wait forever;
+5. **Domain-level total buffer guard**: the sum of in-memory buffers of all active operations in an execution domain has a cap (default 200MB). When the whole domain's accumulated buffer reaches the threshold, new operations queue at admission, preventing a burst of concurrent operations from each taking 10MB and breaking through the host Node process.
+
+### 4.4 Resource Governance System & Platform Adaptation Matrix (Resource Governance & Platform Containment)
+
+Resource governance is elevated to a first-class citizen on par with process supervision: a three-layer defense of "operation budget + domain quota + platform driver isolation".
+
+#### 4.4.1 Three-Tier Enforcement Semantics
+
+| Governance level | Core semantics | Underlying enforcement and execution path |
+|---|---|---|
+| **`observe`** | Sampling only, no execution intervention | Driver periodically samples process-tree RSS / CPU into result metadata; overruns do not interrupt |
+| **`soft`** | Detecting an overrun triggers the graceful stop pipeline | The monitoring loop checks the budget; on overrun, status turns `stopping`, entering the standard stop pipeline, termination reason being the corresponding `_exceeded` |
+| **`hard`** | OS-kernel-level physical prevention of overruns | Relies on OS kernel mechanisms (Linux cgroup v2 / Windows Job Object) for caps; **if the driver does not support hard, admission is rejected outright** |
+
+#### 4.4.2 Pre-admission Capability Check
+
+- The check happens before the `intent_registered` transaction commits;
+- If an operation declares `enforcement: 'hard'` (e.g. a hard memory budget) but the current platform driver declares `capabilities.memoryHardLimit === false`, the kernel **must throw `UnsupportedCapabilityError` and refuse**;
+- **Silent downgrade is forbidden**: quietly degrading `hard` to `observe` or `soft` to pretend support for the sake of apparent success is never allowed.
+
+#### 4.4.3 Domain Budget & Admission Queue
+
+Per-operation limits cannot prevent whole-machine OOM (e.g. 10 operations each wanting 1GB). The execution domain maintains a domain-level resource water level in SQLite:
+
+```text
+domainBudget = {
+  maxTotalMemoryBytes: 4096 * 1024 * 1024, // 4GB domain memory budget
+  maxConcurrentOps: 8,                      // max concurrent managed processes
+  maxTotalOutputBytes: 500 * 1024 * 1024    // 500MB domain-wide output on-disk cap
+}
+
+Admission check:
+  activeOpsBudgetSum + newOp.resourceBudget <= domainBudget
+  ├── satisfied -> register as intent_registered, allocate quota
+  └── exceeded -> new operation stays pending, queued in the execution domain's wait queue until existing leases settle
+```
+
+- **Counting caliber**: every non-terminal Operation counts toward `maxConcurrentOps`, regardless of whether it claims resources (operations claiming no resources must not bypass the concurrency cap);
+- **Queueing semantics**: the wait queue admits in registration order FIFO, giving each waiter holder and elapsed-wait diagnostics; deciding order by polling races is forbidden;
+- **Quota persistence**: the domain budget itself is written to `domain.db` (not just host memory); per-operation occupancy is recorded in the `budget` column of `resource_leases`;
+- On power loss or restart, the recovery engine restores the occupied domain quota water level when loading non-terminal operations, with no additional recovery mechanism needed.
+
+#### 4.4.4 Platform Practices for the Three Major Operating Systems
+
+> **Core principle: declare honestly, never promise capabilities the underlying platform cannot deliver.**
+
+| OS platform | hard memory/CPU/PIDs limits | Group termination & escape protection | v1 landing & delivery strategy |
+|---|---|---|---|
+| **Linux** | **cgroup v2 unified governance**:<br>• `memory.max` (hard-limit OOM kill)<br>• `memory.high` (soft throttling)<br>• `pids.max` (fork-bomb guard)<br>• `cpu.max` (CPU quota) | **`cgroup.kill`**:<br>kernel-level atomic whole-group termination; member enumeration is naturally complete, eliminating escaped descendants at the root | **Implemented (TS, `CgroupPlatformDriver`)**:<br>1. The host runs in a cgroup delegated to it (`systemd-run --user --scope -p Delegate=yes`, or a container with a private cgroup namespace); the driver reads and writes cgroupfs directly;<br>2. Processes are placed into a dedicated cgroup while stopped at the startup gate; `hard` budgets land on `memory.max` / `pids.max` (`cpu.max` not implemented);<br>3. When preconditions are unmet, construction throws `CgroupUnavailableError` explicitly, with no fallback to another driver; controller enablement failure leaves `memoryHardLimit` / `pidsLimit` honestly `false` |
+| **macOS** | **No native process-tree hard limit**:<br>`setrlimit` is single-process only and cannot constrain the derived child tree | **PGID process-group termination**:<br>relies on `kill(-pgid, signal)` broadcast | **Honest declaration**:<br>• supports `observe` + `soft` + PGID kill;<br>• `memoryHardLimit` explicitly declared `false`;<br>• optional file/network policy constraints via `sandbox-exec`, but never packaged as a fake hard memory limit |
+| **Windows** | **Job Object container (design material)**:<br>• `JOB_OBJECT_LIMIT_JOB_MEMORY`<br>• `ACTIVE_PROCESS`<br>• `KILL_ON_JOB_CLOSE` | **`TerminateJobObject` (design material)**:<br>all processes associated with the handle exit atomically as a group | **Not supported (archived 2026-10-13)**:<br>• Job Object containment is an abandoned direction; revival conditions in the ROADMAP appendix;<br>• the current TypeScript implementation does not support Windows, honestly declaring `processGroupKill: false` |
+
+#### 4.4.5 Kernel Self-Preservation Engineering Rules
+
+1. **Distribution host explosion protection**: when the embedded host is Node, CLI startup scripts and distribution deployments explicitly configure `--max-old-space-size=4096` by default;
+2. **Event batching into the store**: high-frequency streaming output and progress events are aggregated into batch transactions into SQLite, avoiding a filesystem fsync per character written;
+3. **Zero unbounded string concatenation**: internal transport uses fixed-length Buffers and streaming pipelines throughout; massive string `+` operations in the main event loop are forbidden;
+4. **Do not block the host**: process-tree scanning, resource sampling and disk spill must not execute synchronously on the host event loop / calling thread; one sampler is shared domain-wide (one read-only pass over the process table per sampling period for all active operations); per-operation high-frequency full process-table pulls are forbidden.
+
+---
+
+## 5. Deployment Topology, Protocol & ABI (Target State)
+
+> **2026-10-13 ruling**: daemon mode (the right column of 5.1, 5.3 client/disconnect/Observer semantics, contracts #33–#36) is archived as an abandoned design, retained as historical design material and a revival reference; 5.2's message shapes remain the transport contract baseline for P1a black-box conformance. Embedded mode is the current and product form (Decision 3).
+
+### 5.1 Two Deployment Modes
+
+| Dimension | Embedded mode | Daemon mode |
+|---|---|---|
+| Domain owner | Host process | Workspace-level resident `xioflowd` process |
+| Transport | In-process calls (language bindings: napi-rs / PyO3) | Unix domain socket (`<domain>/kernel.sock`) / Windows named pipe |
+| Client count | 1 | Multiple (different frameworks, languages, multiple agents) |
+| Crash recovery | Explicit `recovery.run` call after host restart | Automatic at daemon startup; results queryable via `recovery.lastReport` |
+| Suitable for | Single-agent CLI, testing, single-task CI | Multiple agents in parallel on one workspace, multiple frameworks coexisting |
+
+Both modes use the same set of message shapes and the same conformance contract; embedded bindings are merely "in-process transport".
+
+### 5.2 Protocol
+
+- **Encoding**: JSON-RPC 2.0; request and result field shapes are the types defined in §2 / §4;
+- **Handshake**: `kernel.hello { protocolVersion, client: { name, version }, observer?: boolean }` → returns kernel version, protocol version, schema version, driver capabilities (`PlatformCapabilities`, snapshot / confinement driver lists) and conformance level;
+- **Methods (v1 draft)**:
+
+  | Method | Semantics | Observer available |
+  |---|---|---|
+  | `domain.status` | Domain owner, epoch, active operations, leases, unadjudicated indeterminate | Yes |
+  | `task.save` / `run.open` | Register Task and Run | No |
+  | `run.reportSucceeded` / `run.reportFailed` / `run.reportCancelled` | §3.3 Run completion protocol | No |
+  | `op.execProcess` | §3.1 spawn protocol; params include `mutationRoots`, `snapshotBefore`, `confine` | No |
+  | `op.cancel` | §4.2 stop pipeline | No |
+  | `op.adjudicate` | §3.6 human adjudication | No |
+  | `snapshot.capture` / `snapshot.rollback` / `snapshot.prune` / `snapshot.materialize` / `snapshot.dematerialize` | §3.5 snapshots & forks | No |
+  | `artifacts.read` / `artifacts.prune` | Segmented reads of spill artifacts by reference / reclamation | Read: yes |
+  | `recovery.run` / `recovery.lastReport` | §3.2 recovery protocol | Report read: yes |
+  | `journal.read` / `journal.subscribe` | Read / subscribe to events by sequence | Yes |
+
+- **Notifications**: `op.chunk` (real-time output projection), `op.result`, `journal.event`. `op.chunk` is a best-effort projection, droppable under backpressure, and must report the drop count; **facts come only from `op.result` and the journal**; full output is the spill artifact, and dropped projections never lose facts.
+
+### 5.3 Clients, Ownership & Disconnect
+
+- Each connection's `client.name` is recorded as the `owner` of its Runs; lease arbitration applies across clients;
+- **Client disconnect**: operations initiated by that client and still running enter the stop pipeline with `terminationReason: 'client_lost'` after `clientGraceMs`; except operations registered as `detached: true` (their results are retained for later query);
+- **Observer connections**: read-only transactions, hold no leases, write no state, satisfying §0.2 Decision 1's read-only observer requirement;
+- **Local boundary**: socket file permissions `0600`, with peer credentials (`SO_PEERCRED` / `getpeereid` / named pipe client SID) verifying the same user; no network ports are listened on (§8).
+
+### 5.4 Versioning & Compatibility
+
+- `protocolVersion`, `domain.db`'s `user_version` and the conformance level each evolve by SemVer, decoupled from language package versions;
+- A daemon supports at least the current and the previous protocol major versions simultaneously, negotiated at client handshake; negotiation failure returns an explicit error rather than degrading to run;
+- Language bindings' public APIs may use language-idiomatic forms, but semantics must map one-to-one onto protocol methods and pass the same conformance suite.
+
+---
+
+## 6. Distribution Assembly
+
+The kernel repository does not describe any distribution's internal structure. Components, workflows, edit policy and interaction form are the responsibility of the distribution's own documentation; this section only defines the boundary between distribution and kernel.
+
+- **Reference distribution xiocode**: a complete local coding agent, used to demonstrate kernel capabilities under real load (session ↔ execution domain, turn ↔ Run, MCP server ↔ service, checkpoint ↔ snapshot, `indeterminate` ↔ adjudication exit). How it assembles on the kernel has its sole source in the xiocode repository's [`ARCHITECTURE.md`](https://github.com/Xio-Shark/xiocode/blob/main/ARCHITECTURE.md).
+- **Constraints applied equally to all distributions** (all are existing rules in this document, indexed here only):
+  1. Consume the kernel only through the public protocol / language bindings (see "repository division of labor" at the top);
+  2. Run status is reported only via `reportRunSucceeded` / `reportRunFailed` / `reportRunCancelled`; distributions must not write Run status directly (§3.3);
+  3. May be more conservative than the kernel, but must not relax the kernel's isolation (§0.2 Decision 2).
+
+---
+
 ## 7. Cross-Implementation Conformance Suite
 
 The conformance contract is part of the ABI (§0.2 Decision 5): it verifies **execution facts**, independent of any language or implementation internals.
@@ -318,10 +946,18 @@ The conformance contract is part of the ABI (§0.2 Decision 5): it verifies **ex
   | **L4 Multi-Client Daemon** | Central daemon mode, multi-client lease arbitration | All tests pass for daemon-enabled implementations |
   | **H Platform Hard Limits** | OS-level hard resource limits (cgroup v2, Windows Job Object) | Gated by platform capability declaration |
 - **Capability Gating**: Capabilities not declared by a driver must be reported as `unsupported` (specifying capability name); they must never be counted as passed, nor silently skipped.
+- **External compliance tiers** (for third-party implementations and hosts, added 2026-10-13): L1–H above are the suite's internal levels; external compatibility claims use the three tiers below. How to run: [conformance entry](spec/conformance.md):
+  | Tier | Requirement | Semantics |
+  |---|---|---|
+  | **core** | All of L1 + L2 pass (entries for declared capabilities in H must not be `unsupported`) | The minimum line of "xioflow-compatible/core": complete honesty of execution facts (spawn, stop, output, recovery, ownership) |
+  | **workspace** | core + transaction and coverage-declaration entries in L3 (#56–#61, #65) | Parallel-agent workspace transactions and read-set evidence usable |
+  | **experimental** | workspace + AgentRuntime behavior (spec/agent-runtime.md) | Experimental increment, may change with minor versions, must not stand alone as a compatibility claim |
+  - L4 (multi-client daemon) is archived and does not enter the compatibility tiers; H entries are declared separately by platform capability gating and do not count toward the tiers.
+  - Compliance is a **tier declaration**, not a certification: the implementer self-tests and declares; the suite provides a reproducible green/red conclusion. Reference format: `xioflow-compatible/core (@xioflow/kernel 0.7.x suite, YYYY-MM-DD)`.
 
 ### 7.2 Conformance Contract Inventory
 
-Status column: `S<n>` indicates implementation as test #n in the shared conformance suite (`@xioflow/kernel/testing`); `R` indicates internal implementation in repository tests pending suite promotion; `Planned` indicates upcoming roadmap milestone.
+Status column: `S<n>` indicates implementation as test #n in the shared conformance suite (`@xioflow/kernel/testing`); `R` indicates internal implementation in repository tests pending suite promotion; `Planned` indicates upcoming roadmap milestone; `Archived` indicates the owning direction was abandoned (2026-10-13 ruling, revival conditions in the roadmap appendix).
 
 | # | Level | Contract Description | Status |
 |---|---|---|---|
@@ -357,12 +993,12 @@ Status column: `S<n>` indicates implementation as test #n in the shared conforma
 | 30 | L3 | Rollback is mutually exclusive with active or indeterminate operations on target root directories. | Planned |
 | 31 | L3 | Crash mid-rollback: recovery evaluates disk fingerprint to determine `restored` or `indeterminate`. | Planned |
 | 32 | L3 | `git-shadow` snapshots leave user index, HEAD, and branches untouched; declares `worktree_non_ignored`. | Planned |
-| 33 | L4 | Multi-client mutual exclusion: conflicting resource claims provide clear diagnostics pointing to competing client. | Planned |
-| 34 | L4 | Embedded instances attach as clients when domain is held by daemon; lock contention or shadow domains forbidden. | Planned |
-| 35 | L4 | Observer connections are read-only: hold no leases and never interrupt domain owners. | Planned |
-| 36 | L4 | Client disconnect: in-flight operations enter stop pipeline with `terminationReason: 'client_lost'` after grace period. | Planned |
-| 37 | H | Hard memory limit (Linux cgroup `memory.max` / Windows Job) triggers termination with `memory_exceeded`. | S37 (Linux cgroup v2; Windows planned) |
-| 38 | H | Process count limit (`pids.max` / Job `ACTIVE_PROCESS`) blocks fork bombs without impacting host. | S38 (Linux cgroup v2; Windows planned) |
+| 33 | L4 | Multi-client mutual exclusion: conflicting resource claims provide clear diagnostics pointing to competing client. | Archived (daemon) |
+| 34 | L4 | Embedded instances attach as clients when domain is held by daemon; lock contention or shadow domains forbidden. | Archived (daemon) |
+| 35 | L4 | Observer connections are read-only: hold no leases and never interrupt domain owners. | Archived (daemon) |
+| 36 | L4 | Client disconnect: in-flight operations enter stop pipeline with `terminationReason: 'client_lost'` after grace period. | Archived (daemon) |
+| 37 | H | Hard memory limit (Linux cgroup `memory.max` / Windows Job) triggers termination with `memory_exceeded`. | S37 (Linux cgroup v2; Windows abandoned) |
+| 38 | H | Process count limit (`pids.max` / Job `ACTIVE_PROCESS`) blocks fork bombs without impacting host. | S38 (Linux cgroup v2; Windows abandoned) |
 | 39 | H | Domain total memory budget: admission queues when full; admits sequentially upon resource release. | Planned |
 | 40 | L1 | Duplicate `opId` rejected explicitly (0.2.0: `DuplicateOperationError`); leases and cancellability of existing op untouched. | S22 |
 | 41 | L1 | Exactly one `OPERATION_RESULT_RECORDED` event per op; unobserved fields are `null` (no default signals/exit codes). | R |
@@ -392,3 +1028,21 @@ Status column: `S<n>` indicates implementation as test #n in the shared conforma
 | 65 | L3 | Supervisor entry points on one domain share workspace commit coordination: concurrent conflicting transactions cannot both commit. | S65 |
 | 66 | L1 | Failed process/resource observation is neither an empty tree nor zero usage. Losing observation required by a soft limit requests stop; unconfirmed stops retain leases, and observe-only failures remain explicit. | S66 |
 | 67 | L1 | Cross-kind operation ID conflicts are rejected before effects. Failure cleanup preserves existing operations and leases; queued operations and internal allocations reserve their identities. | S67 |
+
+### 7.3 Crash-Point Matrix & Formal Specification
+
+Contracts prove "normal and foreseeable exceptional paths"; the following two prove the protocol still holds "when the supervisor dies at any step", and both check the same set of invariants.
+
+- **Crash-point matrix** (`tests/fault/crash-matrix.test.ts`): the kernel has crash points (`src/fault/crashpoint.ts`, active only when the test environment variable is present, SIGKILLing itself on hit) before/after each store-layer transaction commit, and at "process released, result not yet persisted". The matrix first runs the scenario fault-free, recording every crash point passed, then kills the supervisor process at each point, recovers in a new process and verifies:
+  1. no operation stopped mid-state; 2. leases belong only to `indeterminate` operations; 3. the process has either disappeared or the operation is isolated; 4. side effects happen at most once; 5. `succeeded` implies real execution and a zero exit code; 6. result facts recorded at most once; plus same-`opId` resubmission in the new process replays only, never re-runs. The matrix runs once each for `NodePlatformDriver` and `ReaperPlatformDriver`, for completion and cancellation scenarios.
+- **TLA+ specification** (`spec/tla/OperationRecovery.tla`, `pnpm check:tla`): a single operation's gated spawn, stop pipeline, crash at any moment (bounded times, including crashing again mid-recovery) and recovery. TLC exhausts all interleavings of the two drivers, checking `NoFakeRunning`, `NoPrematureRelease`, `AtMostOnce`, `NoFakeSuccess`, `IndeterminateHoldsLease`, `GateBeforeEffect`, `DoneHasResult`, and liveness `EventuallySettled`, `NoOrphanAtRest`.
+- **A gap both found and fixed**: a crash before the result is persisted while the process has already exited — recovery only knew "the process is gone" and once recorded an ordinary `failed` as `marked_dead` — even when the process had completed its side effects and exited 0 (TLC falsified `NoFalseFailure` with Effect → Exit → Crash → Recover; the matrix observed the same on the real implementation). That conclusion now carries `terminationReason: 'exit_unobserved'`: the status is still `failed` to mean "no longer occupying resources, lease releasable", but the outcome is unknown and the host must not retry with a new opId on this basis. In the specification it is a distinct conclusion `exited_unknown`; `NoFalseFailure` enters CI checks; the matrix and shared contracts assert `marked_dead` must carry that reason.
+
+---
+
+## 8. Explicit Non-Goals
+
+To guard against speculative abstraction and unbounded scope creep, the following design boundaries are explicitly retained:
+
+1. **No security sandbox (Firecracker / microVM / adversarial isolation)**: xioflow trusts development tools launched by managed components and user authorization, focusing on process governance and runaway containment, and does not undertake defense against malicious escapes. §0.2 Decision 4's confinement driver and Decision 9's capability serve only rollback correctness and authorization-fact integrity; no documentation or API may present them as security boundaries;
+2. **No IO frequency limiting, network access policy or GPU quota**: the core pain points are memory blowups, orphan processes and runaway infinite loops; without real business drivers, complex network and GPU orchestrators are not introduced in advance;

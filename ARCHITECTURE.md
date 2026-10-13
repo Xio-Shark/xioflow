@@ -2,9 +2,11 @@
 
 > **2026-10-13 内核基础加固（未发布）**：同一取得的执行域统一协调各监督器入口的在飞执行、服务归属、读观测与事务提交。产物创建和回收依据明确的所有权事实，符号链接作为保守路径依赖。契约 63–65 覆盖这些边界；兼容性与限制以[当前实现契约](spec/current-contract.md#domain-coordination-and-artifact-ownership)为准。
 
+> **2026-10-13 方向裁决（晚，优先于当日早间条目）**：Rust 核心、语言绑定与 daemon/多客户端方向**放弃**（理由与复活条件见 `ROADMAP.md` 附录 A）。据此修订裁决 3（仲裁范围以单宿主进程为界：同进程多入口共享仲裁，跨进程接入同一工作区显式失败，daemon 语义退场）、裁决 5（TypeScript 嵌入式核心即参考实现）与裁决 6（确立「调度 vs 策略」线，AgentRuntime 据此生长）。§5 的 daemon 设计材料保留为历史记录，其消息形状仍是黑盒 conformance 的传输契约基线。
+
 > **本文位置**：这是 xioflow 内核仓的权威协议规范。第 0–5、7–8 节为内核协议；第 6 节只界定发行版与内核的边界，发行版内部结构见各发行版仓库。分阶段落地路线与当前实现差异见 [`ROADMAP.md`](./ROADMAP.md)。
 
-> **状态**：本文同时保留目标态设计。接入当前包先读[当前实现契约](spec/current-contract.md)：执行核心是嵌入式 TypeScript/Node.js；`AgentRuntime` 是实验性扩展；Rust、daemon、Python 绑定和冻结 ABI 尚未实现。发布与本地未发布变更以 `CHANGELOG.md` 为界。
+> **状态**：本文同时保留目标态设计。接入当前包先读[当前实现契约](spec/current-contract.md)：执行核心是嵌入式 TypeScript/Node.js；`AgentRuntime` 是实验性扩展；Rust、daemon 与语言绑定方向已于 2026-10-13 放弃（见 ROADMAP 附录 A），其设计材料保留为历史记录。发布与本地未发布变更以 `CHANGELOG.md` 为界。
 > **核心定位**：  
 > - **xioflow**：面向 Agent 框架作者的受监督执行内核。执行核心提供执行域管理、受监督进程、资源仲裁、停止确认、工作区快照与回滚、SQLite 持久化与恢复；实验性 `AgentRuntime` 提供协作式调度、任务作用域和预算。模型协议、提示词与业务工具留在发行版。
 > - **xiocode**：基于 xioflow 装配的参考发行版，一个完整的本地 coding agent（模型接入、编程工具、权限策略、CLI/TUI），用来展示内核能力；装配方式见 xiocode 仓的 ARCHITECTURE.md。  
@@ -22,8 +24,8 @@
 |---|---|
 | **目标用户** | Agent 框架作者（不是最终使用 agent 的开发者）。首要人群：在宿主机上直接执行命令的**本地优先**框架与 coding agent |
 | **非目标用户** | 执行完全托管在远程容器 / microVM 的框架（销毁容器即可清场，对本内核需求弱） |
-| **内核形态** | 当前：嵌入式 TypeScript/Node.js；目标：Rust 核心与 daemon 双部署（§0.2 裁决 3、§5） |
-| **接入方式** | 当前：Node.js 包与 TypeScript 类型；语言无关协议及 Python 绑定属于目标态 |
+| **内核形态** | 嵌入式 TypeScript/Node.js 单实现即产品；Rust 核心与 daemon 双部署已于 2026-10-13 放弃（§0.2 裁决 3、§5；复活条件见 ROADMAP 附录 A） |
+| **接入方式** | Node.js 包与 TypeScript 类型；语言无关契约（JSON Schema 与黑盒 conformance，P1a）在主线推进；其他语言绑定已放弃（2026-10-13） |
 | **管辖范围** | 本地进程、工作区事务；实验性 Agent 生命周期、父子任务联动、共享 Run 预算与证据门控派发；不实现模型协议 |
 | **控制器边界** | 执行原语与协作式 AgentRuntime；不提供强制抢占、插件组件模型或业务编排策略 |
 | **成功标准** | 被第三方 Agent 框架采用并通过 conformance 契约；xiocode 只是第一个发行版 |
@@ -74,12 +76,12 @@
 - **无法确定影响范围时**：保守暂停整个执行域的新操作；
 - **发行版策略**：发行版可根据产品偏好选择更保守的全局暂停，但绝对不能放宽内核的强制隔离。
 
-#### 3. 部署形态：一个核心，嵌入与 daemon 两种模式，同一协议
-「单域单所有者」与「每个框架进程各嵌一份库」不可同时成立：同一工作区的第二个嵌入方只会拿到 `DomainLockedError`，而各开一个域又会丢失跨 agent 的资源仲裁。内核语义要求**一个工作区只有一个仲裁者**，因此：
-- **嵌入模式**：内核以库形式运行在宿主进程内，宿主即域所有者。适用单 agent / 单进程场景，零运维；
-- **daemon 模式**：内核作为工作区级常驻进程持有域所有权，多个客户端（不同框架、不同语言、多个 agent）通过 §5 协议连接，由 daemon 统一仲裁租约；
-- **同一契约**：两种模式执行同一份协议语义与 conformance 契约，嵌入模式的语言绑定只是「进程内传输」的协议实现；
-- **升级路径**：嵌入方检测到域已被 daemon 持有时，必须以协议客户端身份接入，禁止抢锁或另开影子域。
+#### 3. 部署形态：嵌入式单实现；仲裁范围以宿主进程为界（2026-10-13 修订）
+「单域单所有者」与「每个框架进程各嵌一份库」不可同时成立：同一工作区的第二个嵌入方只会拿到 `DomainLockedError`，而各开一个域又会丢失跨 agent 的资源仲裁。原设计以 daemon 模式兑现跨进程的「一个工作区一个仲裁者」；**2026-10-13 方向裁决放弃 daemon 后，承诺边界如实收窄**：
+- **仲裁范围 = 单宿主进程内**：一个取得的执行域在该进程内统一仲裁在飞执行、服务归属、读观测与事务提交；同进程的多个监督器入口共享同一套在飞表、租约与事务提交协调（契约 #64、#65）；
+- **跨进程不提供仲裁**：第二个框架进程尝试取得同一工作区域时显式失败（`DomainLockedError`）；串行接入还是分域由宿主决定，内核不猜测；
+- **参考分域模式**：并行 agent 各自在独立 git worktree 上开自己的域，互不共享 `.git` 写入；xiocode 的 worktree sandbox 是该模式的产品级实现（发行版侧）；
+- **原 daemon 设计（跨客户端租约仲裁、Observer 连接、`client_lost`）**：随 2026-10-13 裁决归档为已放弃设计，§5 保留其材料作为历史记录与复活参考；复活条件见 ROADMAP 附录 A。
 
 #### 4. 回滚诚实性：快照驱动可插拔，覆盖范围必须如实声明
 内核不做安全沙箱（§8），因此无法观察受管进程写到了哪里。回滚能力的承诺边界由两个正交能力共同决定：
@@ -92,10 +94,11 @@
 Linux 发行版生态建立在 syscall ABI 长期稳定之上。xioflow 的等价物是：
 - **三件 ABI**：§5 的协议消息形状、§1 的 `domain.db` schema（带 `user_version` 迁移）、§7 的 conformance 契约；
 - **版本策略**：协议与 schema 独立于任何语言包的版本号，按 SemVer 演进；破坏性变更必须提升主版本并提供迁移；
-- **实现地位**：Rust 核心是规范实现，TypeScript 0.1.x 是历史参考实现；任何实现（含第三方）以通过 conformance 等级为准，而不以代码同源为准。
+- **实现地位（2026-10-13 修订）**：TypeScript 嵌入式核心是参考实现与当前唯一实现；任何实现（含第三方）以通过 conformance 等级为准，而不以代码同源为准。原计划的 Rust 规范实现随 2026-10-13 方向裁决放弃（复活条件见 ROADMAP 附录 A）；本裁决其余承诺（三件 ABI、SemVer 演进、破坏性变更须升主版本并附迁移）不变。
 
-#### 6. op 幂等：内核只做副作用层，至多发生一次（或诚实报错）
+#### 6. op 幂等与调度边界：何时/是否执行归内核，做什么/怎样算成功归宿主（2026-10-13 修订）
 - xioflow 不做 workflow 引擎；它是 durable 引擎（Temporal、Restate、LangGraph 等）下面的**副作用层**。引擎负责重放，内核负责「同一个 opId 的副作用至多发生一次，否则如实报告」；
+- **调度 vs 策略线**：内核管辖执行生命周期中的「何时与是否」——准入、预算、取消、生命周期、checkpoint、证据门控与任务树 join（`AgentRuntime` 是这些原语的实验性载体，按 2026-10-13 裁决可成长为轻量调度框架）；永不管辖「做什么与怎样算成功」——模型协议、提示词、任务分解、验收策略、业务编排（DAG/工作流引擎）与 token/费用核算归宿主（§8 第 3、4 条）。判定一句话：**决定何时/是否执行归内核，决定做什么/怎样算成功归宿主**。调度决策的依据是证据与预算，不是业务图；
 - `opId` 在执行域内唯一，跨 Run 生效（D17）。Run 仍是「单次执行尝试」：崩溃后继续同一任务需开新 Run，重放的 op 返回原 Run 下已记录的事实；
 - 重放判定表（详见 §3.7）：不存在 → 正常执行；存在且指纹不同 → `OperationIdConflictError`；在飞 → 加入同一结果；已结清 → 返回已记录结果并标 `replayed: true`；`indeterminate` → 原样返回，绝不重跑；未终结且不在内存（崩溃现场未恢复） → `RecoveryRequiredError`；
 - 每次重放写 `OPERATION_REPLAYED` 事件，让「没有盲目重放」本身可审计；
@@ -149,13 +152,13 @@ Linux 发行版生态建立在 syscall ABI 长期稳定之上。xioflow 的等�
 ### 1.2 Schema 版本与迁移（ABI）
 - `domain.db` 的表结构是 ABI 的一部分（§0.2 裁决 5）：以 `PRAGMA user_version` 标记版本，任何实现打开数据库时先校验版本；
 - 版本低于自身：在所有权锁内执行显式、可回放的迁移，迁移本身写入 `journal_events`；版本高于自身：拒绝打开并报 `SchemaTooNewError`，禁止降级写入；
-- 目的：TypeScript 0.1.x 实现遗留的域（含崩溃现场）能被 Rust 核心原样接管并裁决。
+- 目的：任何遵循本规范的实现（含跨语言实现）都能原样接管既有域（含崩溃现场）并裁决。
 
 ---
 
 ## 2. 核心领域模型与实体契约 (TypeScript 记法)
 
-> 下列类型用 TypeScript 记法描述**协议形状**，不代表实现语言；Rust 核心与各语言绑定以此为序列化契约。
+> 下列类型用 TypeScript 记法描述**协议形状**，不代表实现语言；任何遵循本规范的实现以此为序列化契约。
 
 ```typescript
 /**
@@ -576,7 +579,7 @@ executeProcess(op) 准入与重放判定表：
 
 ### 3.10 实验性 agent 生命周期与依据感知调度
 
-`AgentRuntime` 将 agent 身份、输入、父子关系、checkpoint、轮次预算和协作式调度放进执行域，复用 SQLite journal。发行版仍提供模型、工具和单轮执行 adapter。派发前的观测校验、有效 checkpoint 选择、暂停和恢复协议见 [实验性运行时规范](spec/agent-runtime.md)；验证见 `tests/agents/` 与 E6。这是 0.7.0 起随包发布的实验性增量，不代表完整多 agent 内核已经完成。
+`AgentRuntime` 将 agent 身份、输入、父子关系、checkpoint、轮次预算和协作式调度放进执行域，复用 SQLite journal。发行版仍提供模型、工具和单轮执行 adapter。派发前的观测校验、有效 checkpoint 选择、暂停和恢复协议见 [实验性运行时规范](spec/agent-runtime.md)；验证见 `tests/agents/` 与 E6。这是 0.7.0 起随包发布的实验性增量，不代表完整多 agent 内核已经完成。按 2026-10-13 方向裁决，AgentRuntime 的生长边界即裁决 6 的「调度 vs 策略」线：调度、预算、取消与生命周期原语可继续生长；模型协议、提示词、任务分解与验收策略永不进入内核。「supervisor 与 AgentRuntime 可独立使用」保持不变（见当前实现契约）。
 
 `interrupt` 的协议区分取消请求和结清：先记录请求，再通知 adapter 并取消受管命令，等待当前批次结束后保留旧 checkpoint 与已花费预算。它不强杀 JavaScript adapter，不把进程停止未确认改写成成功；完整边界见 [中断契约](spec/agent-runtime.md#interruption-contract)。
 
@@ -809,7 +812,7 @@ domainBudget = {
 |---|---|---|---|
 | **Linux** | **cgroup v2 统一治理**：<br>• `memory.max`（硬限 OOM kill）<br>• `memory.high`（软节流）<br>• `pids.max`（防 fork 炸弹）<br>• `cpu.max`（CPU 配额） | **`cgroup.kill`**：<br>内核级原子终止整组，成员枚举天然完备，从根源杜绝逃逸后代 | **已实现（TS，`CgroupPlatformDriver`）**：<br>1. 宿主运行在委派给它的 cgroup 里（`systemd-run --user --scope -p Delegate=yes`，或私有 cgroup 命名空间的容器），驱动直接读写 cgroupfs；<br>2. 进程停在启动门上时放入专属 cgroup，`hard` 预算落到 `memory.max` / `pids.max`（`cpu.max` 未实现）；<br>3. 前提不满足时构造显式抛 `CgroupUnavailableError`，不退回别的驱动；控制器启用失败时 `memoryHardLimit` / `pidsLimit` 如实为 `false` |
 | **macOS** | **无原生等价进程树硬限**：<br>`setrlimit` 仅限单进程，无法约束衍生子进程树 | **PGID 进程组终止**：<br>依赖 `kill(-pgid, signal)` 广播 | **诚实声明**：<br>• 支持 `observe` + `soft` + PGID kill；<br>• `memoryHardLimit` 显式声明为 `false`；<br>• 可选通过 `sandbox-exec` 做文件/网络策略约束，但绝不包装成假内存硬限制 |
-| **Windows** | **Job Object 容器**：<br>• `JOB_OBJECT_LIMIT_JOB_MEMORY`<br>• `ACTIVE_PROCESS`<br>• `KILL_ON_JOB_CLOSE` | **`TerminateJobObject`**：<br>句柄关联的所有进程整组原子退出 | **Rust 核心直接调用 Win32 Job API**：<br>• `CREATE_SUSPENDED` + 关联 Job + `ResumeThread` 同时兑现受控启动与整组容器；<br>• 0.1.x TypeScript 实现不支持 Windows，如实声明 `processGroupKill: false` |
+| **Windows** | **Job Object 容器（设计材料）**：<br>• `JOB_OBJECT_LIMIT_JOB_MEMORY`<br>• `ACTIVE_PROCESS`<br>• `KILL_ON_JOB_CLOSE` | **`TerminateJobObject`（设计材料）**：<br>句柄关联的所有进程整组原子退出 | **未支持（2026-10-13 归档）**：<br>• Job Object 容器化为已放弃方向，复活条件见 ROADMAP 附录 A；<br>• 当前 TypeScript 实现不支持 Windows，如实声明 `processGroupKill: false` |
 
 #### 4.4.5 内核自保工程守则 (Kernel Self-Preservation)
 1. **发行版宿主防爆**：嵌入宿主为 Node 时，CLI 启动脚本与发行版部署默认显式配置 `--max-old-space-size=4096`；
@@ -820,6 +823,8 @@ domainBudget = {
 ---
 
 ## 5. 部署形态、协议与 ABI（目标态）
+
+> **2026-10-13 裁决**：daemon 模式（5.1 右列、5.3 客户端/断连/Observer 语义、契约 #33–#36）归档为已放弃设计，保留本节作为历史设计材料与复活参考；5.2 的消息形状仍是 P1a 黑盒 conformance 的传输契约基线。嵌入式模式是当前与产品形态（裁决 3）。
 
 ### 5.1 两种部署模式
 
@@ -894,10 +899,18 @@ domainBudget = {
   | **L4 多客户端** | §5 daemon 模式 | 声明支持 daemon 的实现全部通过 |
   | **H 平台硬限制** | cgroup / Job Object | 按能力门控 |
 - **能力门控**：驱动未声明的能力对应条目必须报告为 `unsupported`（附能力名），**不得计为通过**，也不得静默跳过。
+- **对外合规分级**（面向第三方实现与宿主，2026-10-13 增补）：上面 L1–H 是套件内部等级；对外声明兼容性用下面三级，运行方式见 [conformance 入口](spec/conformance.md)：
+  | 合规级 | 要求 | 语义 |
+  |---|---|---|
+  | **core** | L1 + L2 全部通过（H 中已声明能力对应的条目不得为 unsupported） | 「xioflow-compatible/core」的最低线：执行事实诚实性（启动、停止、输出、恢复、所有权）完整 |
+  | **workspace** | core + L3 中事务与覆盖声明相关条目（#56–#61、#65） | 并行 agent 工作区事务与读集证据可用 |
+  | **experimental** | workspace + AgentRuntime 行为（spec/agent-runtime.md） | 实验性增量，可随 minor 版本变更，不得单独作为兼容性声明 |
+  - L4（多客户端 daemon）已归档，不进入兼容性分级；H 级条目按平台能力门控单独声明，不计入分级。
+  - 合规是**等级声明**而非认证：实现方自测通过后自行声明，套件提供可复现的绿/红结论；引用格式：`xioflow-compatible/core（@xioflow/kernel 0.7.x 套件，YYYY-MM-DD）`。
 
 ### 7.2 契约清单
 
-状态列：`S<n>` 表示已在共享套件（`@xioflow/kernel/testing`，50 项）中以第 n 项实现；`R` 表示仅在内核仓自身测试中实现、待提升进共享套件；`计划` 表示尚未实现（落地阶段见 `ROADMAP.md`）。
+状态列：`S<n>` 表示已在共享套件（`@xioflow/kernel/testing`）中以第 n 项实现；`R` 表示仅在内核仓自身测试中实现、待提升进共享套件；`计划` 表示尚未实现（落地阶段见 `ROADMAP.md`）；`已归档` 表示所属方向已放弃（2026-10-13 裁决，复活条件见 ROADMAP 附录 A）。
 
 | # | 等级 | 契约 | 状态 |
 |---|---|---|---|
@@ -933,12 +946,12 @@ domainBudget = {
 | 30 | L3 | 回滚与目标根目录上的活跃 / 未裁决操作互斥 | 计划 |
 | 31 | L3 | 回滚中途崩溃：恢复按指纹判定 restored 或 indeterminate | 计划 |
 | 32 | L3 | `git-shadow` 快照不改动用户 index、HEAD 与分支，并如实声明 `worktree_non_ignored` | 计划 |
-| 33 | L4 | 两个客户端申请同一资源互斥，诊断信息指向对方客户端 | 计划 |
-| 34 | L4 | 嵌入方遇到 daemon 持有的域必须以客户端接入，不得抢锁或另开影子域 | 计划 |
-| 35 | L4 | Observer 连接只读、不持有租约、不打断所有者 | 计划 |
-| 36 | L4 | 客户端断连：其操作在宽限后以 `client_lost` 进入停止流水线（`detached` 除外） | 计划 |
-| 37 | H | 硬内存限制（Linux cgroup `memory.max` / Windows Job）生效并记录 `memory_exceeded` | S37（Linux cgroup v2；Windows 计划） |
-| 38 | H | 进程数上限（`pids.max` / Job `ACTIVE_PROCESS`）拦截 fork 炸弹，宿主不受影响 | S38（Linux cgroup v2；Windows 计划） |
+| 33 | L4 | 两个客户端申请同一资源互斥，诊断信息指向对方客户端 | 已归档（daemon） |
+| 34 | L4 | 嵌入方遇到 daemon 持有的域必须以客户端接入，不得抢锁或另开影子域 | 已归档（daemon） |
+| 35 | L4 | Observer 连接只读、不持有租约、不打断所有者 | 已归档（daemon） |
+| 36 | L4 | 客户端断连：其操作在宽限后以 `client_lost` 进入停止流水线（`detached` 除外） | 已归档（daemon） |
+| 37 | H | 硬内存限制（Linux cgroup `memory.max` / Windows Job）生效并记录 `memory_exceeded` | S37（Linux cgroup v2；Windows 已放弃） |
+| 38 | H | 进程数上限（`pids.max` / Job `ACTIVE_PROCESS`）拦截 fork 炸弹，宿主不受影响 | S38（Linux cgroup v2；Windows 已放弃） |
 | 39 | H | 域级内存总额度：占满后新操作排队，释放后按序放行 | 计划 |
 | 40 | L1 | 重复 opId 被显式拒绝（0.2.0：`DuplicateOperationError`）；原操作的租约、活跃状态与可取消性不受影响 | S22 |
 | 41 | L1 | 每个 op 恰好一条 `OPERATION_RESULT_RECORDED`；未观测字段为 `null`，不得填默认信号或退出码 | R |
@@ -987,5 +1000,5 @@ domainBudget = {
 2. **不做 IO 频次限制、网络访问策略与 GPU 配额**：核心痛点在于内存爆仓、孤儿进程与失控死循环，无真实业务驱动不预先引入复杂的网络与 GPU 编排器；
 3. **调度边界**：实验性 AgentRuntime 管理协作式 quantum、作用域、checkpoint 和预算；优先级、强制抢占、业务编排与插件组件模型不在当前实现内（service 是受监督的长驻进程，不是插件系统）；
 4. **不管理 LLM 调用、提示词与模型成本**：它们不是本地执行事实，属于发行版；
-5. **不做跨机分布式调度、远程执行后端与网络监听**：专注于工作区级单机执行域；daemon 只监听本机 IPC 端点；
+5. **不做跨机分布式调度、远程执行后端与网络监听**：专注于工作区级、单宿主进程内的执行域仲裁；跨进程仲裁不提供（daemon 方向已放弃，2026-10-13，见裁决 3 与 ROADMAP 附录 A）；
 6. **不做 eBPF 探针注入**：常规开发机器不具备 root/CAP_SYS_ADMIN 权限，进程表与 `/proc` 采样足以满足开发期可观测性。
