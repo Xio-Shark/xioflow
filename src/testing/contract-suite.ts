@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import path from 'node:path';
@@ -7,6 +6,11 @@ import crypto from 'node:crypto';
 import util from 'node:util';
 import { spawn, execFile } from 'node:child_process';
 const execFileAsync = util.promisify(execFile);
+// The suite is environment-agnostic: the vitest-compatible API is resolved from
+// the runner — vitest itself (with `globals: true` in vitest.config) or the
+// dependency-free shim installed by `installPlainEnvironment` from
+// './plain-runner'. This module imports no test framework.
+import { resolveTestEnvironment } from './plain-runner.js';
 import {
   ExecutionDomain,
   SqliteStore,
@@ -79,6 +83,7 @@ export function defineContractTestSuite(
   consumerName: string,
   createContext: () => Promise<ConsumerContext>
 ) {
+  const { describe, it, expect, beforeEach, afterEach } = resolveTestEnvironment();
   describe(`Consistency Contract Suite: [${consumerName}]`, () => {
     let ctx: ConsumerContext;
 
