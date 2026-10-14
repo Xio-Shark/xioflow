@@ -492,15 +492,10 @@ export function defineContractTestSuite(
       expect(domain.isResourceLocked('res:c9-group')).toBe(false);
 
       // 核心真实断言：整组 kill(-pgid) 广播后，同组孙进程必须确定性死亡，绝不泄漏为 PID 1 孤儿！
-      let grandchildAliveAfter = true;
-      try {
-        process.kill(grandchildPid, 0);
-      } catch (err: any) {
-        if (err.code === 'ESRCH') {
-          grandchildAliveAfter = false;
-        }
-      }
-      expect(grandchildAliveAfter).toBe(false);
+      // 与其它契约一致，容许 init / 持有者回收僵尸的短暂延迟：孙进程退场前会在进程表里
+      // 留下僵尸条目，kill(pid, 0) 对僵尸同样成功，瞬时快照会把「待回收」误判成「仍存活」。
+      // 有界等待退场；真泄漏（超时仍不退场）仍然失败。
+      expect(await waitUntilGone(grandchildPid, 2000)).toBe(true);
 
       await executePromise;
     });
@@ -1581,6 +1576,15 @@ export function defineContractTestSuite(
       const failed = events.find((e) => e.type === 'SERVICE_FAILED' && (e.payload as any)?.serviceId === 'service-c51');
       expect(failed).toBeDefined();
       expect((failed?.payload as any)?.maxRestartsExceeded).toBe(true);
+
+      // 每个自行退出的实例都必须留下真实退出码：停止结论不得因「helper 应答竞态」
+      // 把自退出的实例改判成 indeterminate——那会中断重启策略并丢掉真实退出事实。
+      for (const opId of ['service-c51#1', 'service-c51#2', 'service-c51#3']) {
+        const result = domain.getStore().getOperation(opId)!.result!;
+        expect(result.kind).toBe('process');
+        expect(result.status).toBe('failed');
+        expect((result as any).exitCode).toBe(42);
+      }
     });
 
     it('契约 52: 宿主崩溃后 service 实例被核验并清场，恢复引擎不自动重启', async () => {

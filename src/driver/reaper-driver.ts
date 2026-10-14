@@ -294,6 +294,12 @@ export class ReaperPlatformDriver implements PlatformDriver {
     this.send(session, `stop ${Math.max(0, Math.floor(graceMs))}`);
     const line = await reply;
     session.stopPromise = undefined;
+    // 通道在停止请求在飞期间关闭，而 helper 关闭前已证明树空：停止请求无事可做
+    // （没有残留可回收），结论与进入 terminate 时 treeEmpty 为真一致，不得改判 cannot_determine。
+    // 自退出的根进程走 settleTree('residual') 来到这里时这条竞态是常态：helper 报完 empty 即退场。
+    if (line === null && session.treeEmpty) {
+      return { stopped: 'confirmed_stopped', scope: this.treeScope() };
+    }
     if (line === 'stopped') {
       markTreeEmpty(session);
       return { stopped: 'confirmed_stopped', scope: this.treeScope() };
