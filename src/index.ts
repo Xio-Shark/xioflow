@@ -21,12 +21,19 @@ export type {
   CommitValidation,
   ObservationEntry,
   ObservationOutcome,
+  ObservationStepOutcome,
   ObservationValidation,
   TransactionConflict,
   TransactionEffects,
   WorkspaceTransaction,
   WriteEntry,
 } from './workspace/transactions.js';
+export {
+  replayObservationLog,
+  computeSymbolSliceCutoffHash,
+  computeDiscoverySetCutoff,
+} from './workspace/observation-replay.js';
+export type { ObservationReplayResult } from './workspace/observation-replay.js';
 export type { ReadTracking } from './workspace/read-tracking.js';
 export type { TrackReadsSpec } from './supervisor/read-evidence.js';
 export * from './capability/index.js';

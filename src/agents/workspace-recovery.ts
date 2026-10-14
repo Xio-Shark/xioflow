@@ -22,7 +22,13 @@ interface RecoveryEvidence {
 }
 
 export type AgentWorkspaceRecoveryResult = RecoveryEvidence & (
-  | { status: 'restored'; checkpointSeq: number; transaction: WorkspaceTransaction }
+  | {
+      status: 'restored';
+      checkpointSeq: number;
+      transaction: WorkspaceTransaction;
+      cutoffSteps?: number;
+      cutoffIndices?: number[];
+    }
   | { status: 'no_valid_checkpoint' }
 );
 
@@ -98,15 +104,16 @@ async function prepareCandidates(
         await supervisor.abortWorkspaceTransaction(transaction.txId, 'recovery candidate rejected');
         candidatePending = false;
       };
-      let matched: boolean;
+      let matchedResult: Extract<ObservationReplayResult, { status: 'matched' }> | undefined;
       try {
         const replay = observations.replay;
         const result = await replayObservationLog({
           ...observations,
           replay: async (entry, root) => { replayedSteps++; return replay(entry, root); },
         }, transaction.forkRoot);
-        matched = result.status === 'matched';
-        if (result.status === 'diverged') {
+        if (result.status === 'matched') {
+          matchedResult = result;
+        } else {
           rejections.push({ checkpointSeq: saved.seq, source: 'executed', replay: result });
           if (result.error === undefined) knownFailures.push({ prefix: originalLog.slice(0, result.divergedAt + 1), replay: result });
         }
@@ -115,8 +122,17 @@ async function prepareCandidates(
         catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Workspace recovery and cleanup failed'); }
         throw error;
       }
-      if (matched) {
-        return { status: 'restored', checkpointSeq: saved.seq, transaction, attempts, replayedSteps, skippedCheckpoints, rejections };
+      if (matchedResult) {
+        return {
+          status: 'restored',
+          checkpointSeq: saved.seq,
+          transaction,
+          attempts,
+          replayedSteps,
+          skippedCheckpoints,
+          rejections,
+          ...(matchedResult.cutoffSteps !== undefined ? { cutoffSteps: matchedResult.cutoffSteps, cutoffIndices: matchedResult.cutoffIndices } : {}),
+        };
       }
       await discard();
     }

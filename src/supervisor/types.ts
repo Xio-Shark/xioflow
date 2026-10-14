@@ -32,6 +32,22 @@ export interface ExecuteProcessOptions {
   onStreamChunk?: (stream: 'stdout' | 'stderr', chunk: Buffer) => void;
 }
 
+export interface ExecuteWorkspaceCommandOptions extends Omit<ExecuteProcessOptions, 'opId' | 'inputFingerprint'> {
+  /**
+   * 工作区或事务分叉根目录：以该目录的内容树哈希（treeFingerprint）作为跨分叉命令去重锚点。
+   */
+  workspaceRoot: string;
+  /** 可选：调用方已计算的目录树哈希；省略时由 snapshotDriver.fingerprint([workspaceRoot]) 计算。 */
+  treeFingerprint?: string;
+  /** 可选操作 ID 前缀（默认 `tree-cmd`）。 */
+  opIdPrefix?: string;
+}
+
+export type WorkspaceCommandExecutionResult = ProcessExecutionResult & {
+  treeFingerprint: string;
+  treeCommandFingerprint: string;
+};
+
 export interface CaptureSnapshotOptions {
   runId: string;
   opId: string;

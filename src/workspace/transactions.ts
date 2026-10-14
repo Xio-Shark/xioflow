@@ -67,14 +67,36 @@ export interface ObservationEntry {
    * （例如编辑后附带的引用列表），同样带上，重放时一样比较。
    */
   resultHash?: string;
+  /**
+   * 可选：语义/关键依赖投影哈希（Early Cutoff）。
+   * 当原始 resultHash 因无关行号偏移、非目标函数注释或增量目录发现改变，但下游步骤实际依赖的投影未变时，
+   * 若重放计算的 cutoffHash 与此值一致，则触发 Early Cutoff 继续验证后续步骤。
+   */
+  cutoffHash?: string;
+}
+
+export interface ObservationStepOutcome {
+  resultHash?: string;
+  cutoffHash?: string;
+  /** 宿主显式证明该步的关键依赖仍成立，允许 Early Cutoff。 */
+  cutoff?: boolean;
 }
 
 export interface ObservationValidation {
   log: ObservationEntry[];
   /** 宿主声明：agent 在分叉里的所有读取都在 log 里。内核仍会核对分叉里有没有跑过进程。 */
   closedWorld: true;
-  /** 在 root 里重新执行一步并返回结果哈希（没有 resultHash 的 mutate 可以不返回）；改动无法应用则抛错。 */
-  replay(entry: ObservationEntry, root: string): Promise<string | void>;
+  /** 在 root 里重新执行一步并返回结果哈希或带 cutoff 证据的结果；改动无法应用则抛错。 */
+  replay(entry: ObservationEntry, root: string): Promise<string | void | ObservationStepOutcome>;
+  /**
+   * 可选 Early Cutoff 判定（Salsa/Adapton 风格）：
+   * 当某一步未抛错但原始 resultHash 变化时调用；返回 true 表示下游步骤所依赖的实质内容未变，可跳过级联失效。
+   */
+  canCutoff?(
+    entry: ObservationEntry,
+    replayed: { resultHash?: string; cutoffHash?: string; index: number },
+    root: string
+  ): boolean | Promise<boolean>;
 }
 
 /** 「无冲突」凭的是什么证据：重放的观测、文件级读写集，还是只有写集（读集观测不到）。 */

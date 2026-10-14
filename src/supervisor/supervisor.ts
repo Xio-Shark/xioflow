@@ -27,7 +27,7 @@ import {
   assertRunAcceptsOperations,
   resolveConfinementDriver,
 } from './admission.js';
-import { computeInputFingerprint } from './fingerprint.js';
+import { computeInputFingerprint, computeTreeCommandFingerprint } from './fingerprint.js';
 import { finalizeOperation, indeterminateResult } from './finalize.js';
 import { joinInFlight, replayRecorded } from './replay.js';
 import { runProcess, ProcessRunContext } from './process-run.js';
@@ -47,12 +47,20 @@ import {
   ActiveOperationState,
   CaptureSnapshotOptions,
   ExecuteProcessOptions,
+  ExecuteWorkspaceCommandOptions,
   RollbackOptions,
   StreamSubscriber,
+  WorkspaceCommandExecutionResult,
 } from './types.js';
 
-export type { ExecuteProcessOptions, CaptureSnapshotOptions, RollbackOptions } from './types.js';
-export { normalizeResourceName, computeInputFingerprint } from './fingerprint.js';
+export type {
+  ExecuteProcessOptions,
+  ExecuteWorkspaceCommandOptions,
+  WorkspaceCommandExecutionResult,
+  CaptureSnapshotOptions,
+  RollbackOptions,
+} from './types.js';
+export { normalizeResourceName, computeInputFingerprint, computeTreeCommandFingerprint } from './fingerprint.js';
 
 export class ProcessSupervisor {
   private readonly activeOperations: Map<string, ActiveOperationState>;
@@ -216,6 +224,37 @@ export class ProcessSupervisor {
     });
     coordinator.workspaceTransactions = { snapshotDriver, manager };
     return manager;
+  }
+
+  /**
+   * 基于工作区目录树哈希（treeFingerprint）的内容寻址跨分叉命令执行。
+   * 当不同事务分叉（如 /tmp/fork-a 与 /tmp/fork-b）处于相同文件树状态并运行相同验证命令（如 tsc、vitest、node --check）时，
+   * 自动生成与物理分叉路径无关的确定性操作 ID 与输入指纹，直接走 joinInFlight（在飞合并）或 replayRecorded（已完成毫秒级重放）。
+   */
+  public async executeWorkspaceCommand(
+    options: ExecuteWorkspaceCommandOptions
+  ): Promise<WorkspaceCommandExecutionResult> {
+    const { workspaceRoot, treeFingerprint: precomputedTree, opIdPrefix, ...rest } = options;
+    const treeFingerprint = precomputedTree ?? (await this.snapshotDriver.fingerprint([workspaceRoot]));
+    const treeCommandFingerprint = computeTreeCommandFingerprint({
+      treeFingerprint,
+      command: rest.command,
+      workspaceRoot,
+      timeoutMs: rest.timeoutMs,
+      resourceBudget: rest.resourceBudget,
+      capabilityId: rest.capabilityId,
+    });
+    const opId = `${opIdPrefix ?? 'tree-cmd'}:${treeCommandFingerprint.slice(0, 24)}`;
+    const result = await this.executeProcess({
+      ...rest,
+      opId,
+      inputFingerprint: treeCommandFingerprint,
+    });
+    return {
+      ...result,
+      treeFingerprint,
+      treeCommandFingerprint,
+    };
   }
 
   /**
