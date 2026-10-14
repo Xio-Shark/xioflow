@@ -67,6 +67,44 @@ with unchanged restored data across all 61 checkpoint boundaries. These are
 logical JSON bytes, not filesystem/WAL traffic; timings are small-sample local
 measurements and must not be extrapolated.
 
+## Early Cutoff and tree-fingerprint command dedup (E10)
+
+Deterministic and scripted (no model calls). `audit/observation/e10.mjs`, raw
+output in `audit/results/e10.json`. Part A uses the E8 fixtures with a scripted
+agent (one tool call per step: `glob`, then `read` + `edit` per file); a step
+stands in for one model request. The linear baseline is credited with a
+checkpoint after every step, its best case.
+
+| Scenario | Mode | Recorded | Reused | Cutoffs | Steps to redo | Hidden check |
+|---|---|---:|---:|---:|---:|---|
+| new-caller | linear | 17 | 0 | 0 | 19 | pass |
+| new-caller | early cutoff | 17 | 17 | 1 (`glob`) | 2 | pass |
+| comment | linear | 7 | 1 | 0 | 6 | pass |
+| comment | early cutoff | 7 | 7 | 1 (`read`) | 0 | pass |
+
+Cutoff rules used by the host: `glob` may cut off only if the new listing is a
+strict superset of the recorded one, and the added files are handed to the
+resumed agent as its remaining work; `read` may cut off when the comment-free,
+whitespace-normalized slice mentioning `foo` is unchanged. Without the delta
+hand-off the new-caller cutoff would be unsound (the new file would stay
+unrenamed). The kernel only enforces that mutations still apply; the soundness
+of each cutoff rule is the host's claim.
+
+Part B: K=4 transaction forks of one 60-file TypeScript fixture run the real
+`tsc --noEmit` concurrently, then again with no change (median of 3 trials,
+macOS, multi-core):
+
+| Mode | Round 1 wall | Round 1 spawned | Round 2 wall | Round 2 spawned |
+|---|---:|---:|---:|---:|
+| naive (`executeProcess`, distinct opIds) | 295 ms | 4 | 293 ms | 4 |
+| dedup (`executeWorkspaceCommand`) | 282 ms | 1 | 64 ms | 0 |
+
+Round 1 wall time barely moves because the naive runs execute in parallel on
+separate cores; the saving there is 3 of 4 processes (CPU, memory). Round 2 is
+the repeated-verification case: no process is spawned and the remaining 64 ms
+is tree fingerprinting plus journal reads. `tsc` on this fixture takes ~250 ms;
+larger projects were not measured.
+
 ## What these results do not establish
 
 - Production correctness, novelty, or general task performance;

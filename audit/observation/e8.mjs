@@ -77,9 +77,14 @@ if (process.argv.includes('--probe')) {
   const supervisor = new ProcessSupervisor(domain);
   let initial = true;
   let phase = 'initial';
+  const earlyCutoff = !process.argv.includes('--no-early-cutoff');
+  const discoveryDelta = new Set();
   const instruction = 'Rename the exported function foo in util.mjs to bar and update every use across this small repository. Preserve all other behavior and comments. Inspect files before editing. Use only relative paths. Do not create new files. No terminal is available. Make exactly one tool call per response. Once finished, briefly summarize.';
   const agents = new AgentRuntime(domain, { maxConcurrentAgents: 1, step: async (agent) => {
-    const result = await runXiocodeQuantum(agent, clientFor(agent.id === 'baseline' ? 'baseline' : phase));
+    const systemPromptNote = agent.id === 'a' && phase === 'resumed' && discoveryDelta.size > 0
+      ? `Concurrent workspace update: new file(s) added since your initial scan: ${[...discoveryDelta].sort().join(', ')}. Inspect and update them before finishing.`
+      : undefined;
+    const result = await runXiocodeQuantum(agent, clientFor(agent.id === 'baseline' ? 'baseline' : phase), { systemPromptNote });
     if (agent.id === 'a' && initial && result.checkpoint.log.some((entry) => entry.kind === 'mutate')) {
       initial = false; agents.pause('a');
     }
@@ -88,7 +93,7 @@ if (process.argv.includes('--probe')) {
   const timings = {};
   const resumeFirst = process.argv.includes('--resume-first');
   const record = { experiment: 'e8-real-model-pilot', trial, provider: 'opencodego', model: modelId,
-    scenario, adapter: 'tool-errors-returned-v1', order: resumeFirst ? 'resumed-first' : 'baseline-first', status: 'running' };
+    scenario, adapter: earlyCutoff ? 'early-cutoff-v2' : 'tool-errors-returned-v1', order: resumeFirst ? 'resumed-first' : 'baseline-first', status: 'running' };
 
   function check(workspace) {
     return checkRenameFixture(workspace, scenario, temp);
@@ -129,12 +134,20 @@ if (process.argv.includes('--probe')) {
     const start = performance.now();
     const recovered = await recoverAgentWorkspace(agents, supervisor, {
       agentId: 'a', recoveryId: 'recovery', root, forkPath: path.join(temp, 'recovery'), replayPolicy: 'deterministic',
-      observations: (checkpoint) => observationValidation(checkpoint.log),
+      observations: (checkpoint) => {
+        discoveryDelta.clear();
+        return observationValidation(checkpoint.log, {
+          earlyCutoff,
+          onDiscoveryDelta: (added) => { for (const f of added) discoveryDelta.add(f); },
+        });
+      },
     });
     timings.reconstruction = performance.now() - start;
     assert.equal(recovered.status, 'restored');
     record.recovery = { attempts: recovered.attempts, replayedTools: recovered.replayedSteps, skippedCheckpoints: recovered.skippedCheckpoints,
-      reusedObservations: agents.get('a').checkpoint.log.length, rejected: recovered.rejections.map(({ replay }) => ({ index: replay.divergedAt, reason: replay.reason })) };
+      reusedObservations: agents.get('a').checkpoint.log.length, cutoffSteps: recovered.cutoffSteps ?? 0,
+      discoveryDelta: [...discoveryDelta].sort(),
+      rejected: recovered.rejections.map(({ replay }) => ({ index: replay.divergedAt, reason: replay.reason })) };
     await supervisor.abortWorkspaceTransaction(old.txId);
     phase = 'resumed'; agents.resume('a'); await drain('resumed');
     const resumed = requireState('a', 'completed');

@@ -10,7 +10,7 @@ const { WorkspacePathPolicy } = await loadXiocode('src/runtime/workspace-path-po
 const { toObservationEntry } = await loadXiocode('src/runtime/parallel-observations.ts');
 
 /** One real runner quantum; fixtures use relative tool paths and no external hooks. */
-export async function runXiocodeQuantum(agent, client) {
+export async function runXiocodeQuantum(agent, client, options = {}) {
   const root = agent.workspace?.forkRoot ?? agent.input.root;
   const readSet = new FileReadSet();
   for (const entry of agent.checkpoint.log) {
@@ -24,8 +24,10 @@ export async function runXiocodeQuantum(agent, client) {
     if (['read', 'write', 'edit', 'grep', 'glob'].includes(tool.name)) host.registerTool(tool);
   }
   const log = [...agent.checkpoint.log];
+  const basePrompt = 'Follow the assigned file task.';
+  const systemPrompt = options.systemPromptNote ? `${basePrompt} ${options.systemPromptNote}` : basePrompt;
   const result = await runAgentLoop(agent.input.instruction, {
-    host, client, model: 'fixture', systemPrompt: 'Follow the assigned file task.', maxTurns: 1,
+    host, client, model: 'fixture', systemPrompt, maxTurns: 1,
     parallelToolCalls: false,
     ...(agent.checkpoint.snapshot ? { resumeFrom: agent.checkpoint.snapshot } : {}),
     onToolEnd(call, output) {

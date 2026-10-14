@@ -6,7 +6,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export const XIOCODE_ROOT = process.env.XIOCODE_ROOT ?? path.join(os.homedir(), 'code/xiocode');
+const defaultXiocodeRoot = fs.existsSync(path.join(os.homedir(), 'code/projects/xiocode'))
+  ? path.join(os.homedir(), 'code/projects/xiocode')
+  : path.join(os.homedir(), 'code/xiocode');
+export const XIOCODE_ROOT = process.env.XIOCODE_ROOT ?? defaultXiocodeRoot;
 export const loadXiocode = (rel) => import(pathToFileURL(path.join(XIOCODE_ROOT, rel)).href);
 
 /** `provider` defaults to the configured default; `model` defaults to that provider's configured model. */
