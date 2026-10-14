@@ -350,16 +350,25 @@ export class NodePlatformDriver implements PlatformDriver {
     }
 
     // 第一阶段：SIGINT 中断信号至整组
-    this.sendSignalToGroup(pid, 'SIGINT');
+    let groupSignalRejected = false;
+    try {
+      this.sendSignalToGroup(pid, 'SIGINT');
+    } catch (err: any) {
+      // 整组信号被拒（macOS 对刚退出、尚待回收的组 leader 返回 EPERM）：不抛给停止
+      // 流水线，也不退回向单 PID 发信号（N5 / 契约 #42）。后续阶段同样发不出去，
+      // 改为按原宽限观察自行退场，结论交给下面的残留扫描按事实给出。
+      if (!err || err.code !== 'EPERM') throw err;
+      groupSignalRejected = true;
+    }
     let exited = await this.waitForGroupAndPids(pid, initialTree.inGroupDescendants, graceMs);
 
-    if (!exited) {
+    if (!exited && !groupSignalRejected) {
       // 第二阶段：SIGTERM 终止信号至整组
       this.sendSignalToGroup(pid, 'SIGTERM');
       exited = await this.waitForGroupAndPids(pid, initialTree.inGroupDescendants, 1000);
     }
 
-    if (!exited) {
+    if (!exited && !groupSignalRejected) {
       // 第三阶段：SIGKILL 强制终止至整组
       this.sendSignalToGroup(pid, 'SIGKILL');
       exited = await this.waitForGroupAndPids(pid, initialTree.inGroupDescendants, 1000);
