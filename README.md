@@ -381,19 +381,37 @@ if (res.status === 'conflict') {
 ```js
 const res = await supervisor.commitWorkspaceTransaction('agent-a-1', {
   observations: {
-    // in order: { kind: 'observe', call, resultHash } for reads and searches, { kind: 'mutate', call } for edits
+    // in order: { kind: 'observe', call, resultHash, cutoffHash? } for reads and searches,
+    //           { kind: 'mutate', call } for edits
     // (a mutation whose return value also showed the agent other content carries a resultHash too)
     log,
     closedWorld: true, // the log is everything the agent saw of the fork
-    // re-run one step in `root` and return its result hash; throw if a mutation cannot be applied
+    // re-run one step in `root` and return its result hash (or { resultHash, cutoffHash });
+    // throw if a mutation cannot be applied
     replay: async (entry, root) => myTools.run(entry.call, root),
+    // optional Early Cutoff predicate when raw resultHash differs but semantic projection still matches
+    canCutoff: (entry, replayed) => Boolean(entry.cutoffHash && entry.cutoffHash === replayed.cutoffHash),
   },
 });
 // committed: res.validation === 'observations' when the log was what cleared the conflict
 // conflict:  res.observation says where the replay first differed, or why it was not tried
 ```
 
-The kernel uses the log only after file-level validation has reported a conflict. It forks the current workspace, asks the host to replay the steps in order, and commits from that fork when every observation returns the recorded hash and every change still applies. If the workspace was changed again while the replay ran, nothing is applied (`observation.reason: 'workspace_changed'`). It does not try when both sides wrote the same file, and it does not trust `closedWorld` when a process ran inside the fork (`TX_VALIDATION_DOWNGRADED`): a process can read what the log does not show. Whether the log is complete and the hashes are reproducible is the host's responsibility; like file-level validation, this checks that the agent's inputs are unchanged, not that the merged code is correct.
+The kernel uses the log only after file-level validation has reported a conflict. It forks the current workspace, asks the host to replay the steps in order, and commits from that fork when every observation returns the recorded hash (or satisfies Early Cutoff via `cutoffHash` / `canCutoff`, e.g. `computeSymbolSliceCutoffHash` for comment/line-number-insensitive symbol slices or `computeDiscoverySetCutoff` for additive file discovery deltas) and every change still applies. If the workspace was changed again while the replay ran, nothing is applied (`observation.reason: 'workspace_changed'`). It does not try when both sides wrote the same file, and it does not trust `closedWorld` when a process ran inside the fork (`TX_VALIDATION_DOWNGRADED`): a process can read what the log does not show. Whether the log is complete and the hashes are reproducible is the host's responsibility; like file-level validation, this checks that the agent's inputs are unchanged, not that the merged code is correct.
+
+### Deduplicating verification across forks: `executeWorkspaceCommand`
+
+When multiple concurrent agents run the same read-only verification command (`tsc --noEmit`, `pytest`, `eslint`) in separate workspace forks whose relevant file trees are byte-identical, `executeProcess` normally treats them as distinct because `cwd` differs (`fork-a` vs `fork-b`). `executeWorkspaceCommand` anchors `opId` and `inputFingerprint` to the workspace tree hash (`computeTreeCommandFingerprint`) instead of the fork directory path, so concurrent forks join a single in-flight process (`reused: 'joined_in_flight'`) and subsequent forks on the same tree reuse the recorded terminal result (`reused: 'replayed_recorded'`):
+
+```js
+const verify = await supervisor.executeWorkspaceCommand({
+  runId: 'run-a',
+  workspaceRoot: tx.forkRoot,
+  name: 'typecheck',
+  command: { execPath: 'npx', args: ['tsc', '--noEmit'] },
+});
+// verify.reused: 'executed' | 'joined_in_flight' | 'replayed_recorded'
+```
 
 ## Evidence with dependencies: is this test result still true?
 
@@ -459,7 +477,7 @@ Reading order after the 5-minute path:
 3. [ARCHITECTURE.md](./ARCHITECTURE.md) / [ARCHITECTURE.en.md](./ARCHITECTURE.en.md) — the full protocol: domain model, run/operation lifecycles, drivers, stop pipeline, transactions, ABI and the 67 numbered contracts.
 4. [ROADMAP.md](./ROADMAP.md) — phase plan, decision log, implementation-status table, the abandoned directions (appendix A) and the 1.0 ABI freeze criteria.
 5. [`spec/`](./spec/) — the experimental runtime contract, and the current-contract annexes.
-6. [`audit/`](./audit/README.md) — the fault-injection bench: how the execution layer is audited, and the [recovery comparison report](audit/reports/recovery-comparison.md) (E4–E9 deterministic results plus the labelled real-model pilot).
+6. [`audit/`](./audit/README.md) — the fault-injection bench: how the execution layer is audited, and the [recovery comparison report](audit/reports/recovery-comparison.md) (E4–E10 deterministic results plus the labelled real-model pilot).
 
 ## Status
 
