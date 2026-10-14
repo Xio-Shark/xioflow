@@ -4,6 +4,13 @@ All notable changes to `@xioflow/kernel`. The format follows [Keep a Changelog](
 
 > Release note: 0.1.0 – 0.1.4 were uploaded from a local npm bypass-2FA token. From the next tag-based release on, `.github/workflows/release.yml` publishes through npm Trusted Publishing (OIDC) with a provenance attestation, so the published artifact is verifiable back to this repository.
 
+## [Unreleased]
+
+### Fixed
+- The reaper driver no longer reports `cannot_determine` when the native helper proves the process tree empty and closes its control channel while a stop request is in flight. A self-exited root reaches the stop pipeline through `settleTree('residual')` because the empty proof has not been observed yet; the helper then exits after reporting `empty`, the in-flight request is answered with `null`, and the supervisor treated that as an unconfirmed tree — recording the instance as `indeterminate` and skipping the restart policy. A null reply on a proven-empty tree now answers `confirmed_stopped`, matching what `terminate` already returns when `treeEmpty` is observed on entry. Contract 51 additionally asserts every self-exited service instance records its real exit code.
+- The Node driver no longer lets a rejected group signal escape the stop pipeline. On macOS, `kill(-pgid)` answers `EPERM` for an orphaned process group whose leader has already exited, where Linux answers `ESRCH`; the raw error previously failed the whole operation instead of producing an honest stop conclusion. A rejected group signal keeps observing for the original grace period and lets the existing residual scan decide: nothing alive → `confirmed_stopped`, survivors → `cannot_determine` with residual pids. Signalling still never degrades to per-PID delivery.
+- Contract 9's residual assertion now uses the suite's `waitUntilGone` helper: a SIGKILLed descendant lingers as a zombie until init reaps it, and a one-shot `kill(pid, 0)` snapshot mistook that pending reap for a leak on slower hosts.
+
 ## [0.8.0] - 2026-10-14
 
 ### Fixed
