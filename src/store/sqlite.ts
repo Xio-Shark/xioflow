@@ -815,13 +815,19 @@ export class SqliteStore {
     return this.recordEventAndTransitionState(event);
   }
 
-  public getJournalEvents(domainId: string, fromSeq: number = 0): JournalEvent[] {
+  public getJournalEvents(
+    domainId: string,
+    fromSeq: number = 0,
+    toSeq: number = Number.MAX_SAFE_INTEGER,
+    types?: readonly string[]
+  ): JournalEvent[] {
     const stmt = this.db.prepare(`
-      SELECT * FROM journal_events
-      WHERE domain_id = ? AND seq >= ?
+      SELECT * FROM journal_events ${types?.length ? 'INDEXED BY idx_journal_events_domain_type_seq' : ''}
+      WHERE domain_id = ? AND seq >= ? AND seq <= ?
+        ${types === undefined ? '' : types.length === 0 ? 'AND 0' : `AND type IN (${types.map(() => '?').join(',')})`}
       ORDER BY seq ASC
     `);
-    const rows = stmt.all(domainId, fromSeq) as any[];
+    const rows = stmt.all(domainId, fromSeq, toSeq, ...(types ?? [])) as any[];
     return rows.map((row) => this.mapJournalEvent(row));
   }
 

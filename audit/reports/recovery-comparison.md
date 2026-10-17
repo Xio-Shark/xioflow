@@ -105,6 +105,16 @@ the repeated-verification case: no process is spawned and the remaining 64 ms
 is tree fingerprinting plus journal reads. `tsc` on this fixture takes ~250 ms;
 larger projects were not measured.
 
+## Protocol-Layer HTTP-304 Causal Fast-Forward & Virtual Workspace Benchmark (`wrap-cure-benchmark`)
+
+Recorded in `audit/results/wrap-cure-benchmark.json` via [`audit/observation/wrap-cure-benchmark.mjs`](../observation/wrap-cure-benchmark.mjs) (see also [`wrap-before-after.md`](./wrap-before-after.md)). Unlike E4–E7 (which required explicit kernel transaction APIs), this benchmark runs an unmodified black-box OpenAI SSE agent through `xio wrap` on an 8-file TypeScript refactoring task (`computeLegacySubtotal` $\rightarrow$ `computeAuditedSubtotal` across 10 turns):
+
+| Scenario | Baseline (Raw / Linear SHA) | `xio wrap` (`HTTP-304` + Early Cutoff) | Savings / Outcome |
+|---|---|---|---|
+| Mid-refactoring crash recovery (Turn 7/10) | `10` requests, `23,500` tokens, `6,022 ms` | `3` requests (`7` local `304` hits), `7,750` tokens, `2,845 ms` | **67.0% fewer tokens, 52.8% lower recovery wall time** |
+| Concurrent doc-comment edit on `src/discount-engine.ts` | `8` requests, `20,250` tokens (invalidated at Turn 2) | `3` requests (`7` local `304` hits), `7,750` tokens, `2,833 ms` | **61.7% fewer tokens vs linear SHA cache** |
+| Virtual Workspace `--shadow --gate "tsc"` + `xio race` | Faulty edit pollutes working tree | `gate_rejected` leaves **0 dirty files**; `xio race --mode merge` commits both `agent-a` and `agent-b` (`REFACTOR_VERIFIED_OK`) | **0 host workspace pollution** |
+
 ## What these results do not establish
 
 - Production correctness, novelty, or general task performance;
@@ -124,5 +134,6 @@ node audit/observation/e5.mjs
 node audit/observation/e6.mjs
 node audit/observation/e7.mjs
 node audit/observation/e9.mjs
+node audit/observation/wrap-cure-benchmark.mjs
 # E8 requires the real-model authorization and endpoint; see REAL-MODEL.md
 ```

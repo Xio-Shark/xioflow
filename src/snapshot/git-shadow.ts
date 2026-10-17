@@ -101,17 +101,64 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
   public async assertGitRepo(cwd: string): Promise<{ repoRoot: string; commonDir: string }> {
     try {
       const realCwd = await resolveRealPath(cwd);
-      const { stdout: rootOut } = await this.git(realCwd, ['rev-parse', '--show-toplevel']);
-      const repoRoot = await resolveRealPath(rootOut.trim());
-      const { stdout: commonOut } = await this.git(realCwd, ['rev-parse', '--git-common-dir']);
-      const rawCommon = commonOut.trim();
+      const { stdout } = await this.git(realCwd, ['rev-parse', '--show-toplevel', '--git-common-dir']);
+      const fields = stdout.replace(/\r?\n$/, '').split(/\r?\n/);
+      if (fields.length !== 2 || fields.some((field) => !field)) {
+        throw new Error('Ambiguous Git repository paths');
+      }
+      const [rawRoot, rawCommon] = fields as [string, string];
+      const repoRoot = await resolveRealPath(rawRoot.trim());
       const commonDir = path.isAbsolute(rawCommon)
         ? await resolveRealPath(rawCommon)
-        : await resolveRealPath(path.resolve(repoRoot, rawCommon));
+        : await resolveRealPath(path.resolve(realCwd, rawCommon));
       return { repoRoot, commonDir };
     } catch {
       throw new UnsupportedCapabilityError('snapshot:git-shadow', process.platform);
     }
+  }
+
+  /**
+   * Read multiple blobs from a tree in a single `git cat-file --batch` invocation.
+   */
+  public async batchReadBlobs(
+    cwd: string,
+    treeOrCommit: string,
+    relPaths: readonly string[]
+  ): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    if (relPaths.length === 0) return out;
+    const { repoRoot } = await this.assertGitRepo(cwd);
+    const specs = relPaths.map((p) => `${treeOrCommit}:${p}`).join('\n') + '\n';
+    const res = await new Promise<Buffer>((resolve, reject) => {
+      const child = execFile(
+        'git',
+        ['cat-file', '--batch'],
+        { cwd: repoRoot, maxBuffer: 50 * 1024 * 1024, encoding: 'buffer' },
+        (err, stdout) => {
+          if (err) reject(err);
+          else resolve(stdout as unknown as Buffer);
+        }
+      );
+      child.stdin?.end(specs);
+    });
+
+    let offset = 0;
+    for (const rel of relPaths) {
+      const nl = res.indexOf(0x0a, offset);
+      if (nl < 0) break;
+      const header = res.subarray(offset, nl).toString('utf8');
+      offset = nl + 1;
+      if (header.endsWith(' missing')) {
+        continue;
+      }
+      const parts = header.trim().split(' ');
+      const size = Number(parts[2] ?? 0);
+      if (Number.isFinite(size) && size >= 0 && offset + size <= res.length) {
+        out.set(rel, res.subarray(offset, offset + size).toString('utf8'));
+        offset += size + 1; // trailing LF after blob payload
+      }
+    }
+    return out;
   }
 
   public async capture(

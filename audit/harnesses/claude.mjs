@@ -10,7 +10,7 @@ function environment({ home, baseUrl }) {
   };
 }
 function flags({ home, mcp }) {
-  const base = ['--output-format', 'json', '--allowedTools', 'Bash'];
+  const base = ['--output-format', 'json', '--permission-mode', 'bypassPermissions', '--allowedTools', 'Bash'];
   if (!mcp) return base;
   const config = path.join(home, 'mcp.json');
   fs.writeFileSync(config, JSON.stringify({ mcpServers: { [mcp.name]: { command: mcp.command, args: mcp.args } } }));

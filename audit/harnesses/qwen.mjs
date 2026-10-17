@@ -13,9 +13,11 @@ function configure({ home, baseUrl, mcp }) {
 }
 const flags = ['--approval-mode', 'yolo'];
 
+const defaultQwenBin = '/tmp/xf-qwen/node_modules/.bin/qwen';
+
 export default {
   name: 'qwen',
-  bin: process.env.XF_QWEN_BIN ?? 'qwen',
+  bin: process.env.XF_QWEN_BIN ?? (fs.existsSync(defaultQwenBin) ? defaultQwenBin : 'qwen'),
   versionArgs: ['--version'],
   launch: (ctx) => ({ args: ['-p', ctx.prompt, ...flags], env: configure(ctx) }),
   resume: (ctx) => ({ args: ['--continue', '-p', ctx.prompt, ...flags], env: configure(ctx) }),

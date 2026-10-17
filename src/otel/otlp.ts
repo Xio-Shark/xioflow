@@ -175,6 +175,67 @@ function transactionSpan(domainId: string, events: JournalEvent[]): OtlpSpan | u
   };
 }
 
+function gatewayTurnSpan(domainId: string, events: JournalEvent[]): OtlpSpan | undefined {
+  const completed = events.find((e) => e.type === 'GATEWAY_TURN_COMPLETED');
+  if (!completed) return undefined;
+  const started = events.find((e) => e.type === 'GATEWAY_TURN_STARTED') ?? completed;
+  const lastEvent = events[events.length - 1] ?? completed;
+  const runId = completed.runId ?? started.runId ?? '';
+  const turnIndex = Number(completed.payload.turnIndex ?? started.payload.turnIndex ?? 0);
+  const toolOpIds = events
+    .filter((e) => e.type === 'GATEWAY_TURN_TOOL_EXECUTED' && typeof e.payload.opId === 'string')
+    .map((e) => String(e.payload.opId));
+  const payloadOpIds = Array.isArray(completed.payload.opIds)
+    ? completed.payload.opIds.map((x) => String(x))
+    : [];
+  const opIds = [...new Set([...payloadOpIds, ...toolOpIds])];
+  const snapshotId = (completed.payload.snapshotId ?? started.payload.snapshotId) as string | undefined;
+  const treeFingerprint = (completed.payload.treeFingerprint ?? started.payload.treeFingerprint) as string | undefined;
+  const snapshotJournalSeq = (completed.payload.snapshotJournalSeq ?? started.payload.snapshotJournalSeq) as
+    | number
+    | undefined;
+  const cacheStatus = String(completed.payload.cacheStatus ?? 'MISS');
+
+  return {
+    traceId: hexId(16, domainId, runId),
+    spanId: hexId(8, domainId, 'turn', runId, String(turnIndex)),
+    name: `xioflow.gateway.turn ${turnIndex}`,
+    kind: SPAN_KIND_INTERNAL,
+    startTimeUnixNano: nanos(started.timestamp),
+    endTimeUnixNano: nanos(lastEvent.timestamp),
+    attributes: attributes({
+      'xioflow.domain.id': domainId,
+      'xioflow.run.id': runId,
+      'xioflow.turn.id': `${runId}:turn:${turnIndex}`,
+      'xioflow.turn.index': turnIndex,
+      'xioflow.turn.step': turnIndex + 1,
+      'xioflow.wire.protocol': completed.payload.wire ? String(completed.payload.wire) : undefined,
+      'xioflow.llm.model': completed.payload.model ? String(completed.payload.model) : undefined,
+      'xioflow.cache.status': cacheStatus,
+      'xioflow.cache.etag': completed.payload.etag ? String(completed.payload.etag) : undefined,
+      'xioflow.cache.early_cutoff':
+        typeof completed.payload.cutoffUsed === 'boolean' ? completed.payload.cutoffUsed : undefined,
+      'xioflow.snapshot.id': snapshotId ? String(snapshotId) : undefined,
+      'xioflow.snapshot.journal_seq': typeof snapshotJournalSeq === 'number' ? snapshotJournalSeq : undefined,
+      'xioflow.workspace.tree_sha': treeFingerprint ? String(treeFingerprint) : undefined,
+      'xioflow.journal.seq': completed.seq,
+      'xioflow.turn.op_ids': opIds.length > 0 ? opIds.join(',') : undefined,
+    }),
+    events: events
+      .filter((e) => e.type === 'GATEWAY_TOOL_CALL' || e.type === 'GATEWAY_TURN_TOOL_EXECUTED')
+      .map((e) => ({
+        timeUnixNano: nanos(e.timestamp),
+        name: e.type === 'GATEWAY_TOOL_CALL' ? 'tool.call' : 'tool.executed',
+        attributes: attributes({
+          'xioflow.journal.seq': e.seq,
+          'xioflow.op.id': typeof e.payload.opId === 'string' ? e.payload.opId : undefined,
+          'xioflow.tool.name': typeof e.payload.name === 'string' ? e.payload.name : undefined,
+        }),
+      })),
+    status: { code: STATUS_OK },
+  };
+}
+
 export interface OtlpTraces {
   /** ExportTraceServiceRequest 的 JSON 编码，可直接 POST 到 `<endpoint>/v1/traces`。 */
   payload: { resourceSpans: unknown[] };
@@ -197,11 +258,15 @@ export function journalToOtlpTraces(options: {
   const fromSeq = options.fromSeq ?? 0;
   const byOp = new Map<string, JournalEvent[]>();
   const byTx = new Map<string, JournalEvent[]>();
+  const byTurn = new Map<string, JournalEvent[]>();
   let lastSeq = fromSeq - 1;
   for (const e of options.events) {
     lastSeq = Math.max(lastSeq, e.seq);
     if (e.operationId) push(byOp, e.operationId, e);
     if (e.type.startsWith('TX_') && typeof e.payload.txId === 'string') push(byTx, e.payload.txId, e);
+    if (e.type.startsWith('GATEWAY_') && typeof e.payload.turnIndex === 'number') {
+      push(byTurn, `${e.runId ?? ''}:${e.payload.turnIndex}`, e);
+    }
   }
 
   const endedAfter = (events: JournalEvent[], types: string[]) =>
@@ -216,6 +281,11 @@ export function journalToOtlpTraces(options: {
   for (const events of byTx.values()) {
     if (!endedAfter(events, ['TX_COMMITTED', 'TX_CONFLICTED', 'TX_ABORTED'])) continue;
     const span = transactionSpan(options.domainId, events);
+    if (span) spans.push(span);
+  }
+  for (const events of byTurn.values()) {
+    if (!endedAfter(events, ['GATEWAY_TURN_COMPLETED'])) continue;
+    const span = gatewayTurnSpan(options.domainId, events);
     if (span) spans.push(span);
   }
 

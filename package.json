@@ -10,7 +10,8 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "xioflow": "./dist/cli.js"
+    "xioflow": "./dist/cli.js",
+    "xio": "./dist/cli.js"
   },
   "exports": {
     ".": {

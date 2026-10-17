@@ -105,6 +105,7 @@ CREATE INDEX IF NOT EXISTS idx_operations_run_id ON operations(run_id);
 CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status);
 CREATE INDEX IF NOT EXISTS idx_resource_leases_op ON resource_leases(operation_id);
 CREATE INDEX IF NOT EXISTS idx_journal_events_domain ON journal_events(domain_id);
+CREATE INDEX IF NOT EXISTS idx_journal_events_domain_type_seq ON journal_events(domain_id, type, seq);
 CREATE INDEX IF NOT EXISTS idx_snapshots_domain ON snapshots(domain_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_journal_seq ON snapshots(journal_seq);
 CREATE INDEX IF NOT EXISTS idx_capabilities_domain ON capabilities(domain_id);

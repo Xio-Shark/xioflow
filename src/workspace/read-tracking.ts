@@ -30,8 +30,13 @@ export function wasAccessed(st: fs.BigIntStats): boolean {
   return st.atimeNs >= st.mtimeNs;
 }
 
-function walk(dir: string, visit: (abs: string, rel: string, st: fs.BigIntStats) => void, rel = ''): void {
-  const st = fs.lstatSync(dir, { bigint: true });
+function walk(
+  dir: string,
+  visit: (abs: string, rel: string, st: fs.BigIntStats) => void,
+  rel = '',
+  dirStat?: fs.BigIntStats
+): void {
+  const st = dirStat ?? fs.lstatSync(dir, { bigint: true });
   if (!st.isDirectory()) throw new Error(`Read tracking root is not a real directory: ${dir}`);
   visit(dir, rel, st);
   for (const name of fs.readdirSync(dir)) {
@@ -39,7 +44,7 @@ function walk(dir: string, visit: (abs: string, rel: string, st: fs.BigIntStats)
     const abs = path.join(dir, name);
     const childRel = rel ? `${rel}/${name}` : name;
     const childStat = fs.lstatSync(abs, { bigint: true });
-    if (childStat.isDirectory()) walk(abs, visit, childRel);
+    if (childStat.isDirectory()) walk(abs, visit, childRel, childStat);
     else visit(abs, childRel, childStat);
   }
 }

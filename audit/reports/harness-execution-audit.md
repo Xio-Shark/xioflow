@@ -234,11 +234,30 @@ and budget decision before it runs.
 - They do not establish that any violation is reachable in a user's ordinary
   session; the fixtures are deliberate faults underneath a tool call.
 
+## Recorded round: 2026-10-18 (`xio wrap` dual-boundary cure verification)
+
+Recorded on darwin arm64 27.0.0, Node v26.10.0 (`audit/results/2026-10-18`). All six harnesses (`claude:wrap`, `codex:wrap`, `gemini:wrap`, `opencode:wrap`, `qwen:wrap`, `xio:wrap`) were run through the `xio wrap` dual-boundary gateway (`audit/harnesses/wrap-bin.mjs`), which intercepts upstream LLM wire protocols (`src/gateway/wire-proxy.ts`) and routes tool subprocesses through `ProcessSupervisor` + `ReaperPlatformDriver` (`src/gateway/shell-shim.ts`). Every cell that violated in the 2026-09-30 raw round was verified across 5 trials (`holds 5/5`); see [`wrap-before-after.md`](./wrap-before-after.md) for full mechanism breakdown.
+
+| scenario | `claude-wrap` | `codex-wrap` | `gemini-wrap` | `opencode-wrap` | `qwen-wrap` | `xio-wrap` |
+|---|---|---|---|---|---|---|
+| baseline | holds 1/1 | holds 1/1 | holds 1/1 | holds 1/1 | holds 1/1 | holds 1/1 |
+| pipe-hold | holds 5/5 | holds 1/1 | holds 5/5 | holds 1/1 | holds 5/5 | holds 1/1 |
+| orphan-at-exit | holds 5/5 | holds 5/5 | holds 5/5 | holds 5/5 | holds 5/5 | holds 5/5 |
+| unconfirmed-stop | holds 5/5 | holds 1/1 | n/a 1/1 | holds 1/1 | holds 1/1 | n/a 1/1 |
+| kill-mid-tool | holds 5/5 | holds 5/5 | holds 5/5 | holds 5/5 | holds 5/5 | holds 1/1 |
+| kill-before-report | holds 1/1 | holds 1/1 | holds 1/1 | holds 1/1 | holds 1/1 | holds 1/1 |
+| output-flood | holds 1/1 | holds 1/1 | holds 1/1 | holds 1/1 | holds 1/1 | holds 1/1 |
+| cancel-tree | holds 1/1 | holds 1/1 | holds 5/5 | holds 1/1 | holds 1/1 | holds 1/1 |
+| mcp-orphan-exit | holds 1/1 | holds 1/1 | holds 1/1 | holds 1/1 | holds 5/5 | holds 1/1 |
+| mcp-orphan-kill | holds 5/5 | holds 1/1 | holds 5/5 | holds 5/5 | holds 5/5 | holds 5/5 |
+| spawn-failure | holds 1/1 | holds 1/1 | holds 1/1 | holds 1/1 | holds 1/1 | holds 1/1 |
+
 ## How the round was produced
 
 ```bash
 node audit/run.mjs --scenario baseline --harness xio,codex,opencode,gemini,claude --trials 5
 node audit/run.mjs --scenario pipe-hold --harness codex --trials 5
+node audit/run.mjs --scenario orphan-at-exit --harness gemini:wrap,codex:wrap,opencode:wrap,claude:wrap,qwen:wrap,xio:wrap --trials 5
 node audit/matrix.mjs audit/results/<date> > matrix.md
 node audit/repro/generate.mjs audit/results/<date>
 ```
