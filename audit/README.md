@@ -101,6 +101,8 @@ Each writes `run/<name>.started` (pid and time) so a scenario can align on it.
 
 `xio` has variants that change only the execution layer: `xio:reaper` (`XIOCODE_KERNEL_DRIVER=reaper`), `xio:node` (`XIOCODE_KERNEL_DRIVER=node`), `xio:builtin` (`XIOCODE_PROCESS_KERNEL=0`).
 
+Every harness also supports a `:wrap` variant (`claude:wrap`, `codex:wrap`, `gemini:wrap`, `opencode:wrap`, `qwen:wrap`, `xio:wrap`), which runs the unmodified harness through `xio wrap` (`harnesses/wrap-bin.mjs`). See [`reports/wrap-before-after.md`](reports/wrap-before-after.md) for the raw vs `:wrap` comparison across all 11 scenarios.
+
 ## Known limits
 
 - **A fake endpoint is not a real model.** Timing, helper calls and retry paths can differ. Every violation found here should be reproduced once with a real model before it is reported.
@@ -130,6 +132,7 @@ Each writes `run/<name>.started` (pid and time) so a scenario can align on it.
 ## Other experiments in this directory
 
 - [Observation-aware recovery](observation/RECOVERY.md): prior art and E4, a deterministic comparison of whole-task restart with valid-prefix reuse. Includes reconstruction costs; no real-model savings claim.
+- [`observation/wrap-cure-benchmark.mjs`](observation/wrap-cure-benchmark.mjs): deterministic 10-turn multi-file refactoring recovery and `--shadow --gate` / `xio race` benchmark through `xio wrap` (results in [`reports/wrap-before-after.md`](reports/wrap-before-after.md)).
 - `observation/` measures how many of xiocode's parallel-edit conflicts are false conflicts, by replaying a worker's recorded observations on the workspace as it is when its commit is refused.
 - `behavior/` is the experiment on what a model does after a tool call with an unknown outcome. It gives a **real** model a shell, so every command runs inside a deny-by-default `sandbox-exec` profile (`sandboxProfile` in `behavior/environment.mjs`): no reads outside the run's own directories, no view of other processes, no network except the run's local service. `node audit/behavior/selftest.mjs` asserts each of those denials and must pass before any model is called.
 - `freshness/` is the prototype and the experiments for evidence with observed dependencies.

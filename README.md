@@ -21,6 +21,23 @@ Agent runtimes usually call `spawn()` (or `exec()`) and hope for the best. When 
 
 Besides one-shot commands, the kernel supervises long-running services (MCP stdio servers, dev servers), makes operations idempotent by `opId` for durable engines (Temporal, LangGraph), and snapshots, rolls back and forks the workspace so an agent's file changes can be undone per step.
 
+You can use the kernel either as a library (`quickRun`, `ProcessSupervisor`) or directly from the CLI via `xio wrap` to supervise existing coding agents (`claude`, `codex`, `gemini`, `opencode`, `qwen`, `xio`) without modifying their code:
+
+```bash
+# Supervise an existing agent's child processes and cache LLM turns locally
+npx @xioflow/kernel wrap -- claude -p "Refactor subtotal helpers"
+
+# Run inside an isolated git-shadow worktree and apply only if the test gate passes
+npx @xioflow/kernel wrap --shadow --gate "pnpm test" -- codex exec "Fix failing parser test"
+
+# Run multiple agents in parallel worktrees and merge non-conflicting changes
+npx @xioflow/kernel race --mode merge --gate "pnpm test" -- "claude -p 'task A'" "codex exec 'task B'"
+
+# Inspect recorded turns, snapshots, and processes, or branch from step N
+npx @xioflow/kernel trace <runId>
+npx @xioflow/kernel fork <runId> --at-step 4 -- gemini -p "Continue from step 4"
+```
+
 The package also includes an **experimental `AgentRuntime`**: kernel-owned agent lifecycle, cooperative scheduling, evidence-gated dispatch and persistent checkpoint/step budgets. Adapters can submit commands through a per-step context; the kernel tracks their ownership and waits for the batch before checkpointing. It accepts existing runner adapters rather than replacing their models or tools. See the [runtime contract](spec/agent-runtime.md) and [recovery experiments](audit/observation/RECOVERY.md). It is experimental: its API may change in any release.
 
 ## 5-minute path
@@ -49,7 +66,7 @@ Then pick the integration that matches what you are building:
 | [`langgraph-node`](./examples/langgraph-node) | A LangGraph.js graph whose nodes run commands | Checkpoint resume without re-executing a command node |
 | [`mcp-stdio-transport`](./examples/mcp-stdio-transport) | An MCP client supervising stdio servers | `startService` with a `Transport` implementation over the kernel |
 
-Prerequisites: Node.js >= 22.13 and a built kernel checkout (`pnpm install && pnpm build` at the repository root). All four were verified passing on Linux on 2026-10-13 (Node 22.23.3, kernel 0.7.0); the recorded onboarding path — install plus first run — takes minutes, inside the one-day target. See [examples/README.md](./examples/README.md) for per-example contract mappings and the verification record.
+Prerequisites: Node.js >= 22.13 and a built kernel checkout (`pnpm install && pnpm build` at the repository root). All four were verified passing on Linux on 2026-10-13 (Node 22.23.3, kernel 0.8.0); the recorded onboarding path — install plus first run — takes minutes, inside the one-day target. See [examples/README.md](./examples/README.md) for per-example contract mappings and the verification record.
 
 ## Guarantees
 
@@ -203,6 +220,21 @@ await supervisor.executeProcess({ /* ... */, resourceBudget: { enforcement: 'har
 - `hard` budgets become `memory.max` (no swap; an OOM kill takes the whole tree and ends as `memory_exceeded`) and `pids.max` (a hit stops the tree with `pids_exceeded`).
 - The cgroup path is stored with the process identity before the process runs. After a host crash, recovery reaps whatever is left in it, escapees included, before it releases the leases.
 - It needs a cgroup delegated to the host; otherwise the constructor throws `CgroupUnavailableError` with the reason (`CgroupPlatformDriver.unavailableReason()` checks without side effects). It moves the processes of that cgroup into a `xioflow-host` leaf, because cgroup v2 only lets a cgroup without processes hand controllers to its children.
+
+## Wrap existing CLI agents (`xio wrap`)
+
+To supervise an existing coding agent without modifying its source code, `xio wrap` intercepts two boundaries:
+
+1. **LLM HTTP Proxy (`src/gateway/wire-proxy.ts`)**: Rewrites `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`, `OPENCODE_CONFIG`, `XIO_CONFIG`, or inline `codex -c` provider flags to route traffic through a local proxy supporting OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, and Google Gemini SSE streams.
+2. **Subprocess Supervision (`src/gateway/shell-shim.ts`)**: Prepends a `bash`/`sh`/`zsh` shim to `PATH` and routes tool commands through `ProcessSupervisor` (`ReaperPlatformDriver`) plus an out-of-tree watchdog. Escaped `setsid` descendants, background pipe holders, and orphaned stdio MCP servers are terminated when a command finishes or when the agent process is killed with `SIGKILL`.
+
+Built on these two boundaries:
+
+- **Local `304` prefix cache & Early Cutoff**: Records the files read in each turn along with symbol-slice and directory-listing hashes (`computeSymbolSliceCutoffHash`, `computeDiscoverySetCutoff`). When resuming after a crash or after non-semantic file edits (e.g., comments), unchanged prefix turns are served directly from local cache (`X-Xio-Cache: HIT-304`) before forwarding the first invalidated turn upstream. If a previously read file is modified mid-session, the proxy appends a `[xioflow stale-read notice]` to the next tool result.
+- **Shadow worktree & test gate (`--shadow --gate "<cmd>"`, `xio race`)**: Materializes an isolated `git-shadow` worktree, runs the gate command (deduplicated across identical trees via `computeTreeCommandFingerprint`), and commits changes back to the real workspace via `commitWorkspaceTransaction` only when both the gate and conflict checks pass.
+- **Trace & step fork (`xio trace`, `xio fork --at-step N`)**: Links each turn's LLM request/response, `git-shadow` snapshot (`SnapshotRef.journalSeq`), and supervised `opId`s in SQLite and OTLP spans. `xio fork <runId> --at-step N -- <agent>` restores the workspace tree to step `N` and replays steps `1..N-1` from the local `304` cache.
+
+See [`audit/reports/wrap-before-after.md`](./audit/reports/wrap-before-after.md) for the 11-scenario × 6-harness fault-injection results (`claude`, `codex`, `gemini`, `opencode`, `qwen`, `xio`) and the multi-file refactoring recovery benchmark.
 
 ## Use it from any agent: MCP server
 
@@ -477,11 +509,11 @@ Reading order after the 5-minute path:
 3. [ARCHITECTURE.md](./ARCHITECTURE.md) / [ARCHITECTURE.en.md](./ARCHITECTURE.en.md) — the full protocol: domain model, run/operation lifecycles, drivers, stop pipeline, transactions, ABI and the 67 numbered contracts.
 4. [ROADMAP.md](./ROADMAP.md) — phase plan, decision log, implementation-status table, the abandoned directions (appendix A) and the 1.0 ABI freeze criteria.
 5. [`spec/`](./spec/) — the experimental runtime contract, and the current-contract annexes.
-6. [`audit/`](./audit/README.md) — the fault-injection bench: how the execution layer is audited, and the [recovery comparison report](audit/reports/recovery-comparison.md) (E4–E10 deterministic results plus the labelled real-model pilot).
+6. [`audit/`](./audit/README.md) — the fault-injection bench: how the execution layer is audited ([`harness-execution-audit.md`](audit/reports/harness-execution-audit.md)), the raw vs `xio wrap` comparison ([`wrap-before-after.md`](audit/reports/wrap-before-after.md)), and the [recovery comparison report](audit/reports/recovery-comparison.md) (E4–E10 deterministic results plus the labelled real-model pilot).
 
 ## Status
 
-0.7.0 on npm (Linux cgroup v2 driver with hard memory and process limits, tree settlement after root exit, native tree-holding reaper, workspace transactions validated by file sets or replayed observations, read evidence for results, honest rollback coverage for ignored files, experimental AgentRuntime, MCP server, OpenTelemetry export, crash-point matrix and TLA+ model; see [`CHANGELOG.md`](./CHANGELOG.md)), pre-1.0: the API may change until the [ABI v1 freeze criteria](./ROADMAP.md#11-abi-v10-冻结判据) are met. Not implemented yet: hard CPU limits, enforced domain-wide memory budgets, artifact retrieval helpers, and schema migration (contract #27). The daemon mode and non-TypeScript bindings are **abandoned directions** (2026-10-13 ruling, appendix A of the roadmap), not pending work. Remaining gaps are tracked in [`ROADMAP.md`](./ROADMAP.md).
+0.8.0 on npm (`xio wrap` CLI gateway for black-box agents, local HTTP-304 prefix cache with Early Cutoff, `--shadow --gate` worktree isolation and `xio race` multi-agent reconciliation, `xio trace` / `xio fork --at-step N`, Linux cgroup v2 driver with hard memory and process limits, native tree-holding reaper, workspace transactions validated by file sets or replayed observations, read evidence for results, honest rollback coverage for ignored files, experimental AgentRuntime, MCP server, OpenTelemetry export, crash-point matrix and TLA+ model; see [`CHANGELOG.md`](./CHANGELOG.md)), pre-1.0: the API may change until the [ABI v1 freeze criteria](./ROADMAP.md#11-abi-v10-冻结判据) are met. Not implemented yet: hard CPU limits, enforced domain-wide memory budgets, artifact retrieval helpers, and schema migration (contract #27). The daemon mode and non-TypeScript bindings are **abandoned directions** (2026-10-13 ruling, appendix A of the roadmap), not pending work. Remaining gaps are tracked in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Releasing
 
