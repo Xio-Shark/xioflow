@@ -234,6 +234,7 @@ describe('P3: Virtual Workspace Shadow Execution, Gate Deduplication & Multi-Age
       ],
     });
 
+    console.error('RACE-DEBUG ' + JSON.stringify({committed:raceRes.committedCandidateIds, rejected:raceRes.rejectedCandidateIds, res:raceRes.results.map(r=>({id:r.id,status:r.status,read:r.readSet,write:r.writeSet.map(w=>w.path+':'+w.status),exit:r.agentResult&&r.agentResult.exitCode,stderr:(r.agentResult&&r.agentResult.stderr||'').slice(0,200),conf:r.commitResult&&r.commitResult.conflicts}))}));
     // Candidate 1 and Candidate 2 both commit; Candidate 3 conflicts because helperA's AST slice changed!
     expect(raceRes.committedCandidateIds).toEqual(['cand-1', 'cand-2']);
     expect(raceRes.rejectedCandidateIds).toEqual([{ id: 'cand-3', reason: 'conflict' }]);
