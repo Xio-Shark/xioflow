@@ -217,8 +217,10 @@ async function scanProcessTable() {
       if (r.pid === process.pid || r.pid === hostPid) continue;
       if (trackedPids.has(r.pid)) continue;
       if (
+        // 只跟踪显式 watch 过的 root 及其后代：同一宿主进程里可能并发跑着多个被包裹的
+        // 运行（xio race 的候选就是这样），若把宿主的每个 detached 子进程都算进来，
+        // 先结束的那个运行的 watchdog 收场时会把它兄弟一并 SIGKILL。
         rootPids.has(r.pid) ||
-        (hostPid > 1 && r.ppid === hostPid && (hostPgid === 0 || r.pgid !== hostPgid)) ||
         (r.ppid > 1 && trackedPids.has(r.ppid)) ||
         (r.pgid > 1 && r.pgid !== hostPgid && trackedPgids.has(r.pgid))
       ) {
