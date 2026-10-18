@@ -29,6 +29,11 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      # The gateway suite spawns the packaged CLI (dist/cli.js) and the process-tree
+      # assertions require the native reaper helper; both live under dist/, which is
+      # gitignored, so build both before testing.
+      - run: pnpm build
+      - run: pnpm build:native
       - run: pnpm test
         env:
           XIOFLOW_EXPECT_READ_TRACKING: atime
