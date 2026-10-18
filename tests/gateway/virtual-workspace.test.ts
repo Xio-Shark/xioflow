@@ -38,7 +38,7 @@ describe('P3: Virtual Workspace Shadow Execution, Gate Deduplication & Multi-Age
 
   it('isolates broken agent edits when --gate fails and atomically commits when --gate passes', async () => {
     const workspaceRoot = initGitWorkspace({
-      'src/math.ts': 'export const add = (a: number, b: number) => a + b;\n',
+      'src/math.js': 'export const add = (a, b) => a + b;\n',
     });
     const domainDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xio-vw-domain-'));
     tempDirs.push(workspaceRoot, domainDir);
@@ -49,7 +49,7 @@ describe('P3: Virtual Workspace Shadow Execution, Gate Deduplication & Multi-Age
       badScript,
       `
       import fs from 'node:fs';
-      fs.writeFileSync('src/math.ts', 'export const add = (a, b) => a - b; // bug\\n');
+      fs.writeFileSync('src/math.js', 'export const add = (a, b) => a - b; // bug\\n');
       fs.writeFileSync('src/untracked-garbage.tmp', 'dirty');
       `
     );
@@ -59,14 +59,14 @@ describe('P3: Virtual Workspace Shadow Execution, Gate Deduplication & Multi-Age
       domainPath: path.join(domainDir, 'kernel'),
       command: process.execPath,
       args: [badScript],
-      gateCommand: `node -e "import('./src/math.ts').then(m => process.exit(m.add(2, 3) === 5 ? 0 : 1))"`,
+      gateCommand: `node -e "import('./src/math.js').then(m => process.exit(m.add(2, 3) === 5 ? 0 : 1))"`,
     });
 
     expect(rejected.status).toBe('gate_rejected');
     expect(rejected.gateResult?.passed).toBe(false);
     // Host workspace must have ZERO dirty modifications!
-    expect(fs.readFileSync(path.join(workspaceRoot, 'src/math.ts'), 'utf8')).toBe(
-      'export const add = (a: number, b: number) => a + b;\n'
+    expect(fs.readFileSync(path.join(workspaceRoot, 'src/math.js'), 'utf8')).toBe(
+      'export const add = (a, b) => a + b;\n'
     );
     expect(fs.existsSync(path.join(workspaceRoot, 'src/untracked-garbage.tmp'))).toBe(false);
 
@@ -76,7 +76,7 @@ describe('P3: Virtual Workspace Shadow Execution, Gate Deduplication & Multi-Age
       goodScript,
       `
       import fs from 'node:fs';
-      fs.writeFileSync('src/math.ts', 'export const add = (a, b) => a + b;\\nexport const mul = (a, b) => a * b;\\n');
+      fs.writeFileSync('src/math.js', 'export const add = (a, b) => a + b;\\nexport const mul = (a, b) => a * b;\\n');
       `
     );
 
@@ -85,12 +85,12 @@ describe('P3: Virtual Workspace Shadow Execution, Gate Deduplication & Multi-Age
       domainPath: path.join(domainDir, 'kernel'),
       command: process.execPath,
       args: [goodScript],
-      gateCommand: `node -e "import('./src/math.ts').then(m => process.exit(m.add(2, 3) === 5 && m.mul(2, 3) === 6 ? 0 : 1))"`,
+      gateCommand: `node -e "import('./src/math.js').then(m => process.exit(m.add(2, 3) === 5 && m.mul(2, 3) === 6 ? 0 : 1))"`,
     });
 
     expect(committed.status).toBe('committed');
     expect(committed.gateResult?.passed).toBe(true);
-    expect(fs.readFileSync(path.join(workspaceRoot, 'src/math.ts'), 'utf8')).toContain('export const mul');
+    expect(fs.readFileSync(path.join(workspaceRoot, 'src/math.js'), 'utf8')).toContain('export const mul');
   });
 
   it('deduplicates identical --gate executions across parallel shadow worktrees via treeCommandFingerprint', async () => {
