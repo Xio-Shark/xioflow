@@ -652,6 +652,9 @@ function parseSyscallTraceFile(
  * - Lower Boundary: OS Process & Shell Shim (`ProcessSupervisor` + `ReaperPlatformDriver` + crash watchdog)
  */
 export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentResult> {
+  // Landlock capability is on the sync hot path (driver capabilities, kernel status),
+  // so resolve its ABI version before any driver is constructed.
+  await LandlockConfinementDriver.probe();
   const cwd = path.resolve(options.cwd ?? process.cwd());
   const ownsDomain = !options.domain;
   const domainPath = path.resolve(options.domain?.domainPath ?? options.domainPath ?? path.join(cwd, '.xioflow-kernel'));

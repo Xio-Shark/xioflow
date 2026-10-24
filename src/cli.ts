@@ -6,6 +6,7 @@ import { SqliteStore } from './store/sqlite.js';
 import { KernelMcpServer } from './mcp/server.js';
 import { exportJournalToOtlp } from './otel/otlp.js';
 import { wrapAgent } from './gateway/shell-shim.js';
+import { LandlockConfinementDriver } from './confinement/landlock.js';
 import { raceAgentsInVirtualWorkspaces, runInVirtualWorkspace } from './gateway/virtual-workspace.js';
 import { forkGatewayRunAtStep, formatGatewayRunTrace, traceGatewayRun } from './gateway/time-fork.js';
 
@@ -88,6 +89,7 @@ function splitWrapArgs(args: string[]): { wrapArgs: string[]; agentArgv: string[
 
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
+  await LandlockConfinementDriver.probe();
 
   if (command === 'wrap') {
     const { wrapArgs, agentArgv } = splitWrapArgs(rest);

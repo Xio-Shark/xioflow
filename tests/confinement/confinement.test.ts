@@ -25,7 +25,8 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
   let supervisor: ProcessSupervisor;
   let platformDriver: NodePlatformDriver;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await LandlockConfinementDriver.probe();
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xio-confinement-test-'));
     const domainPath = path.join(tempDir, 'domain');
     domain = ExecutionDomain.acquire(domainPath, 'confine-domain');
