@@ -9,6 +9,7 @@ import { ExecutionDomain } from '../../src/domain.js';
 import { ProcessSupervisor } from '../../src/supervisor/supervisor.js';
 import { NodePlatformDriver } from '../../src/driver/node-driver.js';
 import { SandboxExecConfinementDriver } from '../../src/confinement/sandbox-exec.js';
+import { LandlockConfinementDriver } from '../../src/confinement/landlock.js';
 import { BubblewrapConfinementDriver } from '../../src/confinement/bubblewrap.js';
 import { SrtConfinementDriver } from '../../src/confinement/srt.js';
 import { ConfinementDriver } from '../../src/types.js';
@@ -72,6 +73,9 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
     if (process.platform === 'darwin' && fs.existsSync('/usr/bin/sandbox-exec')) {
       expect(platformDriver.capabilities.confinement).toContain('sandbox-exec');
     }
+    if (process.platform === 'linux' && LandlockConfinementDriver.isAvailable()) {
+      expect(platformDriver.capabilities.confinement).toContain('landlock');
+    }
   });
 
   it('4.2 驱动不可用时抛错，从不返回未受限命令', () => {
@@ -79,6 +83,14 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
       const bwrap = new BubblewrapConfinementDriver();
       expect(() =>
         bwrap.wrap(
+          { execPath: '/bin/echo', args: ['hi'], cwd: tempDir },
+          [tempDir]
+        )
+      ).toThrow(/not available on this platform/);
+
+      const landlock = new LandlockConfinementDriver();
+      expect(() =>
+        landlock.wrap(
           { execPath: '/bin/echo', args: ['hi'], cwd: tempDir },
           [tempDir]
         )
@@ -174,6 +186,87 @@ describe('ConfinementDriver & Coverage Deduction (Steps 4 & 5)', () => {
 
     expect(successOp.status).toBe('succeeded');
     expect(successOp.confined).toBe(true);
+    expect(successOp.stdout).toContain('WRITE_OK');
+    expect(fs.existsSync(insideFile)).toBe(true);
+  });
+
+  it('4.3b Linux Landlock LSM: 写入 scope 内部成功，写入 scope 外部被内核阻断 (EACCES)', async () => {
+    if (process.platform !== 'linux' || !LandlockConfinementDriver.isAvailable()) {
+      return;
+    }
+
+    ensureTaskAndRun('run-landlock');
+
+    const allowedDir = path.join(tempDir, 'allowed_dir_ll');
+    const deniedDir = path.join(tempDir, 'denied_dir_ll');
+    fs.mkdirSync(allowedDir, { recursive: true });
+    fs.mkdirSync(deniedDir, { recursive: true });
+
+    const cap = domain.issueCapability(
+      {
+        write: [allowedDir],
+        exclusive: ['res:allowed-ll'],
+      },
+      'tester',
+      60000
+    );
+
+    const outsideFile = path.join(deniedDir, 'leak.txt');
+    const writeOutsideScript = `
+      const fs = require('fs');
+      try {
+        fs.writeFileSync(${JSON.stringify(outsideFile)}, 'leak');
+        console.log('WRITE_SUCCESS');
+      } catch (err) {
+        console.error('BLOCKED:' + err.code);
+        process.exit(1);
+      }
+    `;
+
+    const failOp = await supervisor.executeProcess({
+      runId: 'run-landlock',
+      opId: 'op-ll-write-outside',
+      name: 'test-ll-write-outside',
+      capabilityId: cap.id,
+      confinement: 'landlock',
+      command: {
+        execPath: process.execPath,
+        args: ['-e', writeOutsideScript],
+        cwd: allowedDir,
+      },
+    });
+    assert(failOp.kind === 'process');
+
+    expect(failOp.status).toBe('failed');
+    expect(failOp.confined).toBe(true);
+    expect(failOp.confinementDriver).toBe('landlock');
+    expect(failOp.stderr).toMatch(/BLOCKED:E(ACCES|PERM)/);
+    expect(fs.existsSync(outsideFile)).toBe(false);
+
+    const insideFile = path.join(allowedDir, 'ok.txt');
+    const writeInsideScript = `
+      const fs = require('fs');
+      fs.writeFileSync(${JSON.stringify(insideFile)}, 'ok content');
+      console.log('WRITE_OK');
+    `;
+
+    const successOp = await supervisor.executeProcess({
+      runId: 'run-landlock',
+      opId: 'op-ll-write-inside',
+      name: 'test-ll-write-inside',
+      capabilityId: cap.id,
+      confinement: 'landlock',
+      command: {
+        execPath: process.execPath,
+        args: ['-e', writeInsideScript],
+        cwd: allowedDir,
+      },
+    });
+    assert(successOp.kind === 'process');
+
+    expect(successOp.status).toBe('succeeded');
+    expect(successOp.confined).toBe(true);
+    expect(successOp.confinementDriver).toBe('landlock');
     expect(successOp.stdout).toContain('WRITE_OK');
     expect(fs.existsSync(insideFile)).toBe(true);
   });

@@ -1,6 +1,7 @@
 import { ConfinementDriver } from '../types.js';
 import { SandboxExecConfinementDriver } from './sandbox-exec.js';
 import { BubblewrapConfinementDriver } from './bubblewrap.js';
+import { LandlockConfinementDriver } from './landlock.js';
 import { SrtConfinementDriver } from './srt.js';
 
 export function detectAvailableConfinementDrivers(): string[] {
@@ -11,6 +12,9 @@ export function detectAvailableConfinementDrivers(): string[] {
   if (SandboxExecConfinementDriver.isAvailable()) {
     drivers.push('sandbox-exec');
   }
+  if (LandlockConfinementDriver.isAvailable()) {
+    drivers.push('landlock');
+  }
   if (BubblewrapConfinementDriver.isAvailable()) {
     drivers.push('bubblewrap');
   }
@@ -19,11 +23,13 @@ export function detectAvailableConfinementDrivers(): string[] {
 
 export function createConfinementDriver(name?: string): ConfinementDriver | null {
   if (name === 'sandbox-exec') return new SandboxExecConfinementDriver();
+  if (name === 'landlock') return new LandlockConfinementDriver();
   if (name === 'bubblewrap') return new BubblewrapConfinementDriver();
   if (name === 'srt') return new SrtConfinementDriver();
 
   if (!name) {
     if (SandboxExecConfinementDriver.isAvailable()) return new SandboxExecConfinementDriver();
+    if (LandlockConfinementDriver.isAvailable()) return new LandlockConfinementDriver();
     if (BubblewrapConfinementDriver.isAvailable()) return new BubblewrapConfinementDriver();
     if (SrtConfinementDriver.isAvailable()) return new SrtConfinementDriver();
     return null;

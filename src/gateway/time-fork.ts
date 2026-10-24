@@ -28,6 +28,9 @@ export interface GatewayTraceStep {
   toolExecutions: RecordedToolExecution[];
   opIds: string[];
   readFiles: string[];
+  writeFiles?: string[];
+  deletedFiles?: string[];
+  deniedFiles?: string[];
   snapshotId?: string;
   snapshotJournalSeq?: number;
   treeFingerprint?: string;
@@ -219,6 +222,9 @@ export async function traceGatewayRun(options: TraceGatewayRunOptions): Promise<
         toolExecutions: t.toolExecutions ?? [],
         opIds: t.opIds ?? [],
         readFiles: t.readFiles ?? [],
+        writeFiles: t.writeFiles ?? [],
+        deletedFiles: t.deletedFiles ?? [],
+        deniedFiles: t.deniedFiles ?? [],
         snapshotId: t.snapshotId,
         snapshotJournalSeq: t.snapshotJournalSeq ?? snap?.journalSeq,
         treeFingerprint: t.treeFingerprint ?? snap?.treeFingerprint,
@@ -259,7 +265,10 @@ export function formatGatewayRunTrace(trace: GatewayRunTrace): string {
       `[Step ${s.step}] wire=${s.wire} model=${s.model} cache=${badge} tree=${treeSha} snap=${s.snapshotId ?? 'n/a'} seq=${s.journalSeq ?? 'n/a'}`,
       `  Prompt : ${s.promptSummary}`,
       `  Tools  : ${tools}`,
-      `  OpIds  : ${s.opIds.join(', ') || 'none'}`
+      `  OpIds  : ${s.opIds.join(', ') || 'none'}`,
+      `  VFS    : read=[${s.readFiles.join(', ')}] write=[${(s.writeFiles ?? []).join(', ')}]${
+        s.deniedFiles && s.deniedFiles.length > 0 ? ` denied=[${s.deniedFiles.join(', ')}]` : ''
+      }`
     );
   }
   return lines.join('\n');

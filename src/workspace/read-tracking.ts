@@ -17,7 +17,11 @@ import path from 'node:path';
  */
 export type ReadTracking = 'atime' | 'unobserved';
 
-const SKIP = new Set(['.git']);
+export interface ReadTrackingWalkOptions {
+  skip?: Iterable<string>;
+}
+
+const DEFAULT_SKIP = new Set(['.git', '.xioflow-kernel', '.xioflow']);
 const ATIME_MARGIN_S = 2;
 
 export function resetAccessTime(abs: string, st: fs.BigIntStats): void {
@@ -30,9 +34,17 @@ export function wasAccessed(st: fs.BigIntStats): boolean {
   return st.atimeNs >= st.mtimeNs;
 }
 
+function buildSkipSet(options?: ReadTrackingWalkOptions): Set<string> {
+  if (!options?.skip) return DEFAULT_SKIP;
+  const s = new Set(DEFAULT_SKIP);
+  for (const item of options.skip) s.add(item);
+  return s;
+}
+
 function walk(
   dir: string,
   visit: (abs: string, rel: string, st: fs.BigIntStats) => void,
+  skipSet: Set<string>,
   rel = '',
   dirStat?: fs.BigIntStats
 ): void {
@@ -40,46 +52,59 @@ function walk(
   if (!st.isDirectory()) throw new Error(`Read tracking root is not a real directory: ${dir}`);
   visit(dir, rel, st);
   for (const name of fs.readdirSync(dir)) {
-    if (!rel && SKIP.has(name)) continue;
+    if (!rel && skipSet.has(name)) continue;
     const abs = path.join(dir, name);
     const childRel = rel ? `${rel}/${name}` : name;
     const childStat = fs.lstatSync(abs, { bigint: true });
-    if (childStat.isDirectory()) walk(abs, visit, childRel, childStat);
+    if (childStat.isDirectory()) walk(abs, visit, skipSet, childRel, childStat);
     else visit(abs, childRel, childStat);
   }
 }
 
 /** 归一真实条目的 atime，返回跳过的链接路径；目录在列举之后再归一，顶层 .git 不参与。 */
-export function normalizeAccessTimes(root: string): string[] {
+export function normalizeAccessTimes(root: string, options?: ReadTrackingWalkOptions): string[] {
   const dirs: Array<[string, fs.BigIntStats]> = [];
   const pathDependencies: string[] = [];
-  walk(root, (abs, rel, st) => {
-    if (st.isSymbolicLink()) {
-      pathDependencies.push(rel);
-      return; // utimes 会跟随链接，改到链接目标上
-    }
-    if (st.isDirectory()) dirs.push([abs, st]);
-    else resetAccessTime(abs, st);
-  });
+  const skipSet = buildSkipSet(options);
+  walk(
+    root,
+    (abs, rel, st) => {
+      if (st.isSymbolicLink()) {
+        pathDependencies.push(rel);
+        return; // utimes 会跟随链接，改到链接目标上
+      }
+      if (st.isDirectory()) dirs.push([abs, st]);
+      else resetAccessTime(abs, st);
+    },
+    skipSet
+  );
   // 深的目录先归一：父目录的 mtime 不受子目录 atime 变化影响
   for (const [abs, st] of dirs.reverse()) resetAccessTime(abs, st);
   return pathDependencies.sort();
 }
 
 /** 一趟遍历分别收集 atime 读集和无法通过 atime 判断是否被使用的链接路径。 */
-export function collectReadTracking(root: string): { readSet: string[]; pathDependencies: string[] } {
+export function collectReadTracking(
+  root: string,
+  options?: ReadTrackingWalkOptions
+): { readSet: string[]; pathDependencies: string[] } {
   const readSet: string[] = [];
   const pathDependencies: string[] = [];
-  walk(root, (_abs, rel, st) => {
-    if (st.isSymbolicLink()) pathDependencies.push(rel);
-    else if (wasAccessed(st)) readSet.push(st.isDirectory() ? `${rel || '.'}/` : rel);
-  });
+  const skipSet = buildSkipSet(options);
+  walk(
+    root,
+    (_abs, rel, st) => {
+      if (st.isSymbolicLink()) pathDependencies.push(rel);
+      else if (wasAccessed(st)) readSet.push(st.isDirectory() ? `${rel || '.'}/` : rel);
+    },
+    skipSet
+  );
   return { readSet: readSet.sort(), pathDependencies: pathDependencies.sort() };
 }
 
 /** 读过的条目（相对 root，目录以 `/` 结尾，root 本身为 `./`）：atime 不早于 mtime。 */
-export function collectReadSet(root: string): string[] {
-  return collectReadTracking(root).readSet;
+export function collectReadSet(root: string, options?: ReadTrackingWalkOptions): string[] {
+  return collectReadTracking(root, options).readSet;
 }
 
 /** 在 dir 所在文件系统上实测一次「读取会推进 atime」。探针文件放在 dir 下并立即删除。 */

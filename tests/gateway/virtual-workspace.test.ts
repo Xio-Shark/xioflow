@@ -251,4 +251,41 @@ describe('P3: Virtual Workspace Shadow Execution, Gate Deduplication & Multi-Age
     expect(fs.existsSync(path.join(workspaceRoot, 'src/featureC.ts'))).toBe(false);
     expect(fs.readFileSync(path.join(workspaceRoot, 'src/shared.ts'), 'utf8')).toContain('return 100;');
   });
+
+  it('grafts untracked node_modules into virtual shadow worktrees for agent and --gate without polluting writeSet', async () => {
+    const workspaceRoot = initGitWorkspace({
+      '.gitignore': '.xioflow-kernel/\nnode_modules/\n',
+      'src/app.mjs': 'import { factor } from "fake-dep";\nexport const compute = (x) => x * factor;\n',
+    });
+    const domainDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xio-vw-deps-'));
+    tempDirs.push(workspaceRoot, domainDir);
+
+    // Create untracked git-ignored node_modules in host workspace
+    const pkgDir = path.join(workspaceRoot, 'node_modules', 'fake-dep');
+    fs.mkdirSync(pkgDir, { recursive: true });
+    fs.writeFileSync(path.join(pkgDir, 'package.json'), JSON.stringify({ name: 'fake-dep', type: 'module', main: 'index.js' }));
+    fs.writeFileSync(path.join(pkgDir, 'index.js'), 'export const factor = 7;\n');
+
+    const agentScript = path.join(domainDir, 'dep-agent.mjs');
+    fs.writeFileSync(
+      agentScript,
+      `
+      import fs from 'node:fs';
+      fs.writeFileSync('src/app.mjs', 'import { factor } from "fake-dep";\\nexport const compute = (x) => x * factor + 1;\\n');
+      `
+    );
+
+    const res = await runInVirtualWorkspace({
+      workspaceRoot,
+      domainPath: path.join(domainDir, 'kernel'),
+      command: process.execPath,
+      args: [agentScript],
+      gateCommand: `${JSON.stringify(process.execPath)} -e "import('./src/app.mjs').then(m => process.exit(m.compute(6) === 43 ? 0 : 1))"`,
+    });
+
+    expect(res.status).toBe('committed');
+    expect(res.gateResult?.passed).toBe(true);
+    expect(res.writeSet).toEqual([{ status: 'M', path: 'src/app.mjs' }]);
+    expect(fs.readFileSync(path.join(workspaceRoot, 'src/app.mjs'), 'utf8')).toContain('x * factor + 1');
+  });
 });

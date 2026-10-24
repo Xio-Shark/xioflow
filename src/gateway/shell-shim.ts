@@ -2,12 +2,15 @@ import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ExecutionDomain } from '../domain.js';
+import { detectAvailableConfinementDrivers } from '../confinement/detector.js';
+import { LandlockConfinementDriver } from '../confinement/landlock.js';
 import { CgroupPlatformDriver } from '../driver/cgroup-driver.js';
 import { NodePlatformDriver } from '../driver/node-driver.js';
-import { locateReaperHelper, ReaperPlatformDriver } from '../driver/reaper-driver.js';
+import { locateNativeShimLibrary, locateReaperHelper, ReaperPlatformDriver } from '../driver/reaper-driver.js';
 import { PlatformDriver, StructuredCommand } from '../driver/types.js';
 import { resolveExecutable } from '../driver/spawn-support.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
@@ -53,6 +56,10 @@ export interface WrapAgentOptions {
   inheritStdio?: boolean;
   timeoutMs?: number;
   maxOutputBytes?: number;
+  /** Optional OS filesystem confinement for tool executions (e.g.true or 'landlock' / 'sandbox-exec'). */
+  confinement?: boolean | string;
+  /** Writable roots when `confinement` is enabled (defaults to `[cwd, os.tmpdir()]`). */
+  writableRoots?: string[];
 }
 
 export interface WrapAgentResult {
@@ -187,24 +194,54 @@ let handled = false;
 let scanning = false;
 
 async function scanProcessTable() {
-  let out = '';
-  try {
-    const res = await execFileAsync('ps', ['-A', '-o', 'pid=,ppid=,pgid=,lstart='], {
-      encoding: 'utf8',
-      maxBuffer: 16 * 1024 * 1024,
-    });
-    out = res.stdout || '';
-  } catch {
-    return new Map();
-  }
   const rows = [];
   const byPid = new Map();
-  for (const line of out.split('\\n')) {
-    const m = /^\\s*(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+\\S+)\\s*$/.exec(line);
-    if (!m) continue;
-    const entry = { pid: Number(m[1]), ppid: Number(m[2]), pgid: Number(m[3]), start: m[4] };
-    rows.push(entry);
-    byPid.set(entry.pid, entry);
+  if (process.platform === 'linux') {
+    let names = [];
+    try {
+      names = fs.readdirSync('/proc');
+    } catch {
+      return byPid;
+    }
+    for (const name of names) {
+      const c0 = name.charCodeAt(0);
+      if (c0 < 48 || c0 > 57) continue;
+      const pid = Number(name);
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      try {
+        const stat = fs.readFileSync('/proc/' + pid + '/stat', 'utf8');
+        const rparen = stat.lastIndexOf(')');
+        if (rparen < 0) continue;
+        const fields = stat.slice(rparen + 2).trim().split(/\\s+/);
+        const state = fields[0];
+        if (state === 'Z' || state === 'X') continue;
+        const ppid = Number(fields[1]);
+        const pgid = Number(fields[2]);
+        const start = fields[19];
+        if (!start) continue;
+        const entry = { pid, ppid, pgid, start };
+        rows.push(entry);
+        byPid.set(pid, entry);
+      } catch {}
+    }
+  } else {
+    let out = '';
+    try {
+      const res = await execFileAsync('ps', ['-A', '-o', 'pid=,ppid=,pgid=,lstart='], {
+        encoding: 'utf8',
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      out = res.stdout || '';
+    } catch {
+      return byPid;
+    }
+    for (const line of out.split('\\n')) {
+      const m = /^\\s*(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\S+\\s+\\S+\\s+\\S+\\s+\\S+\\s+\\S+)\\s*$/.exec(line);
+      if (!m) continue;
+      const entry = { pid: Number(m[1]), ppid: Number(m[2]), pgid: Number(m[3]), start: m[4] };
+      rows.push(entry);
+      byPid.set(entry.pid, entry);
+    }
   }
   const hostRow = byPid.get(hostPid);
   if (hostRow && hostRow.pgid > 1) {
@@ -349,18 +386,18 @@ if [ "\${XIO_SHIM_BYPASS:-}" = "1" ]; then
   exec ${realShell} "$@"
 fi
 if [ "$1" = "-c" ] && [ $# -eq 2 ]; then
-  exec "${process.execPath}" "${clientPath}" "${realShell}" "$2"
+  XIO_SHIM_BYPASS=1 XIO_TRACE_BYPASS=1 exec "${process.execPath}" "${clientPath}" "${realShell}" "$2"
 fi
 if [ "$1" = "-lc" ] && [ $# -eq 2 ]; then
-  exec "${process.execPath}" "${clientPath}" "${realShell}" "$2"
+  XIO_SHIM_BYPASS=1 XIO_TRACE_BYPASS=1 exec "${process.execPath}" "${clientPath}" "${realShell}" "$2"
 fi
 if [ "$1" = "-c" ] && [ "$2" = "-l" ] && [ $# -eq 3 ]; then
-  exec "${process.execPath}" "${clientPath}" "${realShell}" "$3"
+  XIO_SHIM_BYPASS=1 XIO_TRACE_BYPASS=1 exec "${process.execPath}" "${clientPath}" "${realShell}" "$3"
 fi
 if [ "$1" = "-l" ] && [ "$2" = "-c" ] && [ $# -eq 3 ]; then
-  exec "${process.execPath}" "${clientPath}" "${realShell}" "$3"
+  XIO_SHIM_BYPASS=1 XIO_TRACE_BYPASS=1 exec "${process.execPath}" "${clientPath}" "${realShell}" "$3"
 fi
-exec ${realShell} "$@"
+XIO_SHIM_BYPASS=1 exec ${realShell} "$@"
 `;
     fs.writeFileSync(file, script, { mode: 0o755 });
     return file;
@@ -368,6 +405,7 @@ exec ${realShell} "$@"
 
   const bashPath = writeShellWrapper('bash', '/bin/bash');
   const shPath = writeShellWrapper('sh', '/bin/sh');
+  writeShellWrapper('dash', fs.existsSync('/bin/dash') ? '/bin/dash' : '/bin/sh');
   const zshPath = writeShellWrapper('zsh', '/bin/zsh');
   return { shimDir, bashPath, shPath, zshPath };
 }
@@ -523,6 +561,91 @@ export function interceptAgentUpstream(params: {
   };
 }
 
+const SHELL_READ_TRACK_SKIP = ['node_modules', '.venv', 'venv', 'vendor', '.next', 'dist'];
+
+function parseSyscallTraceFile(
+  traceFile: string,
+  workspaceRoot: string
+): { readSet: string[]; writeSet: string[]; deleteSet: string[]; deniedSet: string[] } {
+  const reads = new Set<string>();
+  const writes = new Set<string>();
+  const deletes = new Set<string>();
+  const denied = new Set<string>();
+  if (!fs.existsSync(traceFile)) {
+    return { readSet: [], writeSet: [], deleteSet: [], deniedSet: [] };
+  }
+  let raw = '';
+  try {
+    raw = fs.readFileSync(traceFile, 'utf8');
+    fs.writeFileSync(traceFile, '');
+  } catch {
+    return { readSet: [], writeSet: [], deleteSet: [], deniedSet: [] };
+  }
+  if (!raw) {
+    return { readSet: [], writeSet: [], deleteSet: [], deniedSet: [] };
+  }
+  const absRoot = path.resolve(workspaceRoot);
+  let realRoot = absRoot;
+  try {
+    realRoot = fs.realpathSync(absRoot);
+  } catch {}
+
+  const isIgnoredSegment = (rel: string): boolean => {
+    const first = rel.split('/')[0] ?? '';
+    return (
+      !rel ||
+      rel === '.' ||
+      first === '.git' ||
+      first === '.xioflow-kernel' ||
+      first === '.xioflow' ||
+      first === 'node_modules' ||
+      first === '.venv' ||
+      first === 'venv'
+    );
+  };
+
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    const tab = line.indexOf('\t');
+    if (tab < 1) continue;
+    const op = line.slice(0, tab);
+    const rawPath = line.slice(tab + 1).trim();
+    if (!rawPath) continue;
+    const resolved = path.resolve(rawPath);
+    let rel = path.relative(absRoot, resolved);
+    if (rel.startsWith('..') && realRoot !== absRoot) {
+      const relReal = path.relative(realRoot, resolved);
+      if (!relReal.startsWith('..')) rel = relReal;
+    }
+    const inWorkspace = !rel.startsWith('..') && !path.isAbsolute(rel);
+    if (inWorkspace) {
+      if (isIgnoredSegment(rel)) continue;
+      if (op === 'R') {
+        try {
+          if (fs.statSync(path.join(absRoot, rel)).isDirectory()) continue;
+        } catch {}
+        reads.add(rel);
+      } else if (op === 'W') {
+        writes.add(rel);
+        deletes.delete(rel);
+      } else if (op === 'D') {
+        deletes.add(rel);
+        writes.delete(rel);
+      } else if (op === 'E') {
+        denied.add(rel);
+      }
+    } else if (op === 'E') {
+      denied.add(resolved);
+    }
+  }
+  return {
+    readSet: [...reads].sort(),
+    writeSet: [...writes].sort(),
+    deleteSet: [...deletes].sort(),
+    deniedSet: [...denied].sort(),
+  };
+}
+
 /**
  * Dual-boundary transparent agent wrapper (`xio wrap <agent>`):
  * - Upper Boundary: Four-protocol LLM Wire Proxy (`startWireProxy`)
@@ -595,6 +718,17 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
       : (options.http304Cache ?? new Http304CausalCache({ domain, domainPath, workspaceRoot: cwd }));
 
   const traceDir = path.join(domainPath, 'gateway-traces');
+  const syscallTraceDir = path.join(domainPath, 'syscall-traces');
+  try {
+    fs.mkdirSync(syscallTraceDir, { recursive: true });
+  } catch {}
+  const agentSyscallTracePath = path.join(syscallTraceDir, `${runId}-agent.trace`);
+  const shimSoPath = locateNativeShimLibrary();
+  let totalReadFiles = 0;
+  let totalWriteFiles = 0;
+  let totalDeletedFiles = 0;
+  let totalDeniedFiles = 0;
+
   const saveTraceBundle = (turns: RecordedGatewayTurn[]) => {
     try {
       fs.mkdirSync(traceDir, { recursive: true });
@@ -616,7 +750,60 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
     } catch {}
   };
 
+  const drainAgentDirectSyscalls = (targetTurn?: RecordedGatewayTurn) => {
+    const lastTurn = targetTurn ?? proxy?.state.turns.at(-1);
+    if (!lastTurn) return;
+    const traced = parseSyscallTraceFile(agentSyscallTracePath, cwd);
+    if (
+      traced.readSet.length === 0 &&
+      traced.writeSet.length === 0 &&
+      traced.deleteSet.length === 0 &&
+      traced.deniedSet.length === 0
+    ) {
+      return;
+    }
+    const turnIdx = lastTurn.turnIndex ?? 0;
+    for (const r of traced.readSet) {
+      if (!lastTurn.readFiles.includes(r)) {
+        lastTurn.readFiles.push(r);
+        totalReadFiles++;
+      }
+    }
+    lastTurn.writeFiles ??= [];
+    for (const w of traced.writeSet) {
+      if (!lastTurn.writeFiles.includes(w)) {
+        lastTurn.writeFiles.push(w);
+        totalWriteFiles++;
+      }
+    }
+    lastTurn.deletedFiles ??= [];
+    for (const d of traced.deleteSet) {
+      if (!lastTurn.deletedFiles.includes(d)) {
+        lastTurn.deletedFiles.push(d);
+        totalDeletedFiles++;
+      }
+    }
+    lastTurn.deniedFiles ??= [];
+    for (const e of traced.deniedSet) {
+      if (!lastTurn.deniedFiles.includes(e)) {
+        lastTurn.deniedFiles.push(e);
+        totalDeniedFiles++;
+      }
+    }
+    saveTraceBundle(proxy.state.turns);
+    if (traced.readSet.length > 0 || traced.writeSet.length > 0 || traced.deleteSet.length > 0) {
+      http304Cache?.recordToolExecution?.({
+        turnIndex: turnIdx,
+        command: '[native-vfs-io]',
+        readFiles: traced.readSet,
+        writeFiles: [...traced.writeSet, ...traced.deleteSet],
+        output: '',
+      });
+    }
+  };
+
   const cancelActiveTools = async () => {
+    drainAgentDirectSyscalls();
     await Promise.all(
       [...activeToolOpIds].map((id) => supervisor.cancelOperation(id, 200).catch(() => {}))
     );
@@ -633,6 +820,20 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
     tape: options.tape,
     http304Cache,
     onBeforeMainRequest: cancelActiveTools,
+    getKernelStatus: () => ({
+      driver: driver.name,
+      capabilities: driver.capabilities,
+      confinementDrivers: detectAvailableConfinementDrivers(),
+      landlockAbiVersion: LandlockConfinementDriver.getAbiVersion(),
+      ldPreloadShimActive: Boolean(shimSoPath),
+      activeToolOpIds: [...activeToolOpIds],
+      vfsStats: {
+        readFiles: totalReadFiles,
+        writeFiles: totalWriteFiles,
+        deletedFiles: totalDeletedFiles,
+        deniedFiles: totalDeniedFiles,
+      },
+    }),
     async captureTurnSnapshot(turnIndex: number) {
       if (isGitRepo === undefined) {
         try {
@@ -660,6 +861,7 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
       return undefined;
     },
     async onTurnCompleted(turn) {
+      drainAgentDirectSyscalls(turn);
       saveTraceBundle(proxy.state.turns);
       await options.onTurnCompleted?.(turn);
     },
@@ -669,11 +871,30 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
 
       const defaultExec = async (): Promise<ShellExecResponse> => {
         const opId = `${runId}-tool-${++subOpCounter}`;
+        const opTraceFile = path.join(syscallTraceDir, `${opId}.trace`);
         const cleanEnv: Record<string, string> = {};
         for (const [k, v] of Object.entries(req.env)) {
           if (v !== undefined) cleanEnv[k] = v;
         }
         cleanEnv.XIO_SHIM_BYPASS = '1';
+        delete cleanEnv.XIO_TRACE_BYPASS;
+        cleanEnv.XIO_SYSCALL_TRACE_PATH = opTraceFile;
+        if (shimSoPath) {
+          const existingPreload = cleanEnv.LD_PRELOAD ?? '';
+          if (!existingPreload.split(/[:\s]+/).includes(shimSoPath)) {
+            cleanEnv.LD_PRELOAD = existingPreload ? `${shimSoPath}:${existingPreload}` : shimSoPath;
+          }
+        }
+        if (options.confinement && process.platform === 'linux' && LandlockConfinementDriver.isAvailable()) {
+          const roots = (options.writableRoots ?? [cwd, os.tmpdir()]).map((r) => {
+            try {
+              return fs.realpathSync(r);
+            } catch {
+              return path.resolve(r);
+            }
+          });
+          cleanEnv.XIOFLOW_LANDLOCK_WRITE_ROOTS = roots.join(':');
+        }
         if (cleanEnv.PATH) {
           cleanEnv.PATH = cleanEnv.PATH.split(path.delimiter)
             .filter((p) => path.resolve(p) !== path.resolve(shimDir))
@@ -696,7 +917,7 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
         const canTrackReads = probeReadTracking(execCwd) === 'atime';
         if (canTrackReads) {
           try {
-            normalizeAccessTimes(execCwd);
+            normalizeAccessTimes(execCwd, { skip: SHELL_READ_TRACK_SKIP });
           } catch {}
         }
 
@@ -721,16 +942,28 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
           activeToolOpIds.delete(opId);
         }
 
-        let readSet: string[] = [];
+        let atimeReads: string[] = [];
         if (canTrackReads) {
           try {
-            readSet = collectReadSet(execCwd).filter((p) => !p.endsWith('/'));
+            atimeReads = collectReadSet(execCwd, { skip: SHELL_READ_TRACK_SKIP }).filter((p) => !p.endsWith('/'));
           } catch {}
         }
+        const syscallTrace = parseSyscallTraceFile(opTraceFile, execCwd);
+        try {
+          fs.rmSync(opTraceFile, { force: true });
+        } catch {}
+        const readSet = [...new Set([...atimeReads, ...syscallTrace.readSet])].sort();
+        const writeSet = syscallTrace.writeSet;
+        const deleteSet = syscallTrace.deleteSet;
+        const deniedSet = syscallTrace.deniedSet;
 
         let stdout = res.status === 'indeterminate' ? '' : res.stdout;
         let stderr = res.status === 'indeterminate' ? res.reason : res.stderr;
         let exitCode = res.status === 'indeterminate' ? 137 : res.exitCode;
+
+        if (deniedSet.length > 0) {
+          stderr = `${stderr ? `${stderr.replace(/\n$/, '')}\n` : ''}[xioflow kernel trap: blocked unauthorized write to ${deniedSet.join(', ')}]\n`;
+        }
 
         if (res.status !== 'indeterminate' && res.terminationReason === 'timed_out') {
           stderr = `${stderr ? `${stderr}\n` : ''}[xioflow: command timed out and process tree was confirmed stopped]\n`;
@@ -759,6 +992,9 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
           stderr,
           residualProcessesReaped: res.status !== 'indeterminate' ? res.residualProcessesReaped : true,
           readSet,
+          writeSet,
+          deleteSet,
+          deniedSet,
           opId,
         };
       };
@@ -774,11 +1010,31 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
 
       const opId = execOut.opId ?? `${runId}-tool-${++subOpCounter}`;
       const readSet = execOut.readSet ?? [];
+      const writeSet = execOut.writeSet ?? [];
+      const deleteSet = execOut.deleteSet ?? [];
+      const deniedSet = execOut.deniedSet ?? [];
+
+      totalReadFiles += readSet.length;
+      totalWriteFiles += writeSet.length;
+      totalDeletedFiles += deleteSet.length;
+      totalDeniedFiles += deniedSet.length;
 
       if (lastTurn) {
         if (!lastTurn.opIds.includes(opId)) lastTurn.opIds.push(opId);
         for (const r of readSet) {
           if (!lastTurn.readFiles.includes(r)) lastTurn.readFiles.push(r);
+        }
+        lastTurn.writeFiles ??= [];
+        for (const w of writeSet) {
+          if (!lastTurn.writeFiles.includes(w)) lastTurn.writeFiles.push(w);
+        }
+        lastTurn.deletedFiles ??= [];
+        for (const d of deleteSet) {
+          if (!lastTurn.deletedFiles.includes(d)) lastTurn.deletedFiles.push(d);
+        }
+        lastTurn.deniedFiles ??= [];
+        for (const e of deniedSet) {
+          if (!lastTurn.deniedFiles.includes(e)) lastTurn.deniedFiles.push(e);
         }
         lastTurn.toolExecutions ??= [];
         lastTurn.toolExecutions.push({
@@ -790,6 +1046,9 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
           stdout: execOut.stdout,
           stderr: execOut.stderr,
           readSet,
+          writeSet,
+          deleteSet,
+          deniedSet,
         });
         saveTraceBundle(proxy.state.turns);
       }
@@ -799,11 +1058,11 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
         callId: activeToolCall?.id,
         command: req.command,
         readFiles: readSet,
-        writeFiles: [],
+        writeFiles: [...writeSet, ...deleteSet],
         output: `${execOut.stdout}${execOut.stderr}`,
       });
 
-      return { ...execOut, opId, readSet };
+      return { ...execOut, opId, readSet, writeSet, deleteSet, deniedSet };
     },
   });
   proxy.events.on('request', () => {
@@ -857,6 +1116,24 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
   }
   childEnv.PATH = `${shimDir}${path.delimiter}${originalPath}`;
   childEnv.SHELL = bashPath;
+  childEnv.XIO_SHIM_DIR = shimDir;
+  childEnv.XIO_SYSCALL_TRACE_PATH = agentSyscallTracePath;
+  if (shimSoPath) {
+    const existingPreload = childEnv.LD_PRELOAD ?? '';
+    if (!existingPreload.split(/[:\s]+/).includes(shimSoPath)) {
+      childEnv.LD_PRELOAD = existingPreload ? `${shimSoPath}:${existingPreload}` : shimSoPath;
+    }
+  }
+  if (options.confinement && process.platform === 'linux' && LandlockConfinementDriver.isAvailable()) {
+    const roots = (options.writableRoots ?? [cwd, os.tmpdir()]).map((r) => {
+      try {
+        return fs.realpathSync(r);
+      } catch {
+        return path.resolve(r);
+      }
+    });
+    childEnv.XIOFLOW_LANDLOCK_WRITE_ROOTS = roots.join(':');
+  }
 
   const agentCommand: StructuredCommand = {
     execPath: resolvedExec,
@@ -916,6 +1193,9 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
 
     const rootExit = await (handle.onRootExit ?? handle.onExit);
     await cancelActiveTools();
+    try {
+      fs.rmSync(agentSyscallTracePath, { force: true });
+    } catch {}
 
     // Ensure all descendants (escaped setsid processes, MCP servers, pipe holders) are reaped on exit
     const settlement = driver.settleTree ? await driver.settleTree(handle.identity, 200) : 'non_empty';

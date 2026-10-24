@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const source = path.join(repoRoot, 'native/reaper/xioflow-reaper.c');
+const shimSource = path.join(repoRoot, 'native/shim/xioflow-ld-shim.c');
 
 function arg(name) {
   const i = process.argv.indexOf(name);
@@ -51,3 +52,11 @@ if (crossArch) flags.push('-arch', crossArch);
 execFileSync(cc, [...flags, '-o', output, source], { stdio: ['ignore', 2, 2] });
 fs.chmodSync(output, 0o755);
 console.error(`built ${path.relative(repoRoot, output)}`);
+
+if (process.platform === 'linux' && fs.existsSync(shimSource)) {
+  const shimOutput = path.join(outDir, 'libxioflow-shim.so');
+  const shimFlags = ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC'];
+  execFileSync(cc, [...shimFlags, '-o', shimOutput, shimSource, '-ldl'], { stdio: ['ignore', 2, 2] });
+  fs.chmodSync(shimOutput, 0o755);
+  console.error(`built ${path.relative(repoRoot, shimOutput)}`);
+}

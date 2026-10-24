@@ -27,14 +27,46 @@ const HELPER_NAME = 'xioflow-reaper';
  * `dist/native/<platform>-<arch>/xioflow-reaper`。找不到或不可执行时返回 null。
  */
 export function locateReaperHelper(): string | null {
+  if (process.env.XIOFLOW_REAPER_PATH) {
+    try {
+      fs.accessSync(process.env.XIOFLOW_REAPER_PATH, fs.constants.X_OK);
+      return process.env.XIOFLOW_REAPER_PATH;
+    } catch {
+      return null;
+    }
+  }
+  const here = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
-    process.env.XIOFLOW_REAPER_PATH,
-    path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../native', `${process.platform}-${process.arch}`, HELPER_NAME),
+    path.resolve(here, '../native', `${process.platform}-${process.arch}`, HELPER_NAME),
+    path.resolve(here, '../../dist/native', `${process.platform}-${process.arch}`, HELPER_NAME),
   ];
   for (const candidate of candidates) {
-    if (!candidate) continue;
     try {
       fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {}
+  }
+  return null;
+}
+
+export function locateNativeShimLibrary(): string | null {
+  if (process.platform !== 'linux') return null;
+  if (process.env.XIOFLOW_SHIM_SO_PATH) {
+    try {
+      fs.accessSync(process.env.XIOFLOW_SHIM_SO_PATH, fs.constants.R_OK);
+      return process.env.XIOFLOW_SHIM_SO_PATH;
+    } catch {
+      return null;
+    }
+  }
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(here, '../native', `${process.platform}-${process.arch}`, 'libxioflow-shim.so'),
+    path.resolve(here, '../../dist/native', `${process.platform}-${process.arch}`, 'libxioflow-shim.so'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.R_OK);
       return candidate;
     } catch {}
   }
@@ -67,6 +99,7 @@ interface ReaperSession {
   onStopReply?: (line: string | null) => void;
   stopPromise?: Promise<StopProcessResult>;
   lastError?: string;
+  rusage?: { rssBytes: number; cpuTimeMs: number };
 }
 
 /**
@@ -89,7 +122,10 @@ export class ReaperPlatformDriver implements PlatformDriver {
   private readonly facts = new NodePlatformDriver();
   private readonly sessions = new Map<number, ReaperSession>();
   // A completed identity needs only its terminal fact, never its streams/helper.
-  private readonly terminalFacts = new WeakMap<ProcessIdentity, { pid: number; startTimeMonotonic?: number }>();
+  private readonly terminalFacts = new WeakMap<
+    ProcessIdentity,
+    { pid: number; startTimeMonotonic?: number; rusage?: { rssBytes: number; cpuTimeMs: number } }
+  >();
 
   public static isAvailable(): boolean {
     return (process.platform === 'linux' || process.platform === 'darwin') && locateReaperHelper() !== null;
@@ -129,7 +165,26 @@ export class ReaperPlatformDriver implements PlatformDriver {
   }
 
   public async sampleMetrics(identity: ProcessIdentity) {
-    return this.facts.sampleMetrics(identity);
+    const session = this.sessions.get(identity.pid);
+    const rusage =
+      (session && this.matchesSession(session, identity) ? session.rusage : undefined) ??
+      this.terminalFacts.get(identity)?.rusage;
+    try {
+      const m = await this.facts.sampleMetrics(identity);
+      if (rusage) {
+        return {
+          rssBytes: Math.max(m.rssBytes, rusage.rssBytes),
+          cpuTimeMs: Math.max(m.cpuTimeMs, rusage.cpuTimeMs),
+          pidsCount: m.pidsCount,
+        };
+      }
+      return m;
+    } catch (err) {
+      if (rusage) {
+        return { rssBytes: rusage.rssBytes, cpuTimeMs: rusage.cpuTimeMs, pidsCount: 0 };
+      }
+      throw err;
+    }
   }
 
   public async spawn(command: StructuredCommand): Promise<ManagedProcessHandle> {
@@ -285,7 +340,11 @@ export class ReaperPlatformDriver implements PlatformDriver {
 
   private rememberTerminal(session: ReaperSession): void {
     if (session.treeEmpty && session.identity) {
-      this.terminalFacts.set(session.identity, { pid: session.rootPid, startTimeMonotonic: session.identity.startTimeMonotonic });
+      this.terminalFacts.set(session.identity, {
+        pid: session.rootPid,
+        startTimeMonotonic: session.identity.startTimeMonotonic,
+        rusage: session.rusage,
+      });
     }
   }
 
@@ -416,6 +475,16 @@ export class ReaperPlatformDriver implements PlatformDriver {
       markTreeEmpty(session);
     } else if (line === 'stopped' || line.startsWith('residual ')) {
       session.onStopReply?.(line);
+    } else if (line.startsWith('rusage ')) {
+      const match = /^rusage (\d+) (\d+)$/.exec(line);
+      if (match) {
+        const rssBytes = Number(match[1]);
+        const cpuTimeMs = Number(match[2]);
+        session.rusage = {
+          rssBytes: Math.max(session.rusage?.rssBytes ?? 0, rssBytes),
+          cpuTimeMs: Math.max(session.rusage?.cpuTimeMs ?? 0, cpuTimeMs),
+        };
+      }
     } else if (line.startsWith('error ')) {
       session.lastError = line.slice('error '.length);
     }

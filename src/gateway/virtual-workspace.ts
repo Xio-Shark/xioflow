@@ -6,7 +6,7 @@ import { ExecutionDomain } from '../domain.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
 import { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { computeSymbolSliceCutoffHash } from '../workspace/observation-replay.js';
-import { normalizeAccessTimes } from '../workspace/read-tracking.js';
+import { normalizeAccessTimes, resetAccessTime, wasAccessed } from '../workspace/read-tracking.js';
 import type {
   CommitResult,
   ObservationEntry,
@@ -82,6 +82,48 @@ export interface RaceAgentsResult {
 
 function sha256Hex(content: string | Buffer): string {
   return crypto.createHash('sha256').update(content).digest('hex');
+}
+
+const GRAFTABLE_DEPENDENCY_DIRS = ['node_modules', '.venv', 'venv', 'vendor'] as const;
+
+function graftUntrackedDependencies(workspaceRoot: string, forkRoot: string): string[] {
+  const grafted: string[] = [];
+  for (const name of GRAFTABLE_DEPENDENCY_DIRS) {
+    const src = path.join(workspaceRoot, name);
+    const dst = path.join(forkRoot, name);
+    try {
+      if (fs.existsSync(src) && !fs.existsSync(dst)) {
+        fs.symlinkSync(src, dst, 'dir');
+        grafted.push(dst);
+      }
+    } catch {}
+  }
+  if (grafted.length > 0) {
+    try {
+      resetAccessTime(forkRoot, fs.lstatSync(forkRoot, { bigint: true }));
+    } catch {}
+  }
+  return grafted;
+}
+
+function ungraftDependencies(forkRoot: string, grafted: string[]): void {
+  if (grafted.length === 0) return;
+  let rootWasRead = false;
+  try {
+    rootWasRead = wasAccessed(fs.lstatSync(forkRoot, { bigint: true }));
+  } catch {}
+  for (const dst of grafted) {
+    try {
+      if (fs.lstatSync(dst).isSymbolicLink()) {
+        fs.unlinkSync(dst);
+      }
+    } catch {}
+  }
+  if (!rootWasRead) {
+    try {
+      resetAccessTime(forkRoot, fs.lstatSync(forkRoot, { bigint: true }));
+    } catch {}
+  }
 }
 
 /**
@@ -255,14 +297,20 @@ export async function runInVirtualWorkspace(
     // Use an isolated sub-domain for the inner wrapAgent's tool process journal so that
     // tool executions inside tx.forkRoot do not taint `processInFork(tx)` in the outer transaction manager.
     const innerDomainPath = path.join(domainPath, 'shadow-runs', runId);
-    const agentResult = await wrapAgent({
-      ...options,
-      cwd: tx.forkRoot,
-      domain: undefined,
-      domainPath: innerDomainPath,
-      domainId: `${domainId}:${runId}`,
-      runId,
-    });
+    const graftedAgentDeps = graftUntrackedDependencies(workspaceRoot, tx.forkRoot);
+    let agentResult: WrapAgentResult;
+    try {
+      agentResult = await wrapAgent({
+        ...options,
+        cwd: tx.forkRoot,
+        domain: undefined,
+        domainPath: innerDomainPath,
+        domainId: `${domainId}:${runId}`,
+        runId,
+      });
+    } finally {
+      ungraftDependencies(tx.forkRoot, graftedAgentDeps);
+    }
 
     const inspected = await supervisor.inspectWorkspaceTransaction(txId);
 
@@ -284,20 +332,26 @@ export async function runInVirtualWorkspace(
     let gateResult: VirtualWorkspaceResult['gateResult'];
     if (options.gateCommand) {
       const treeFingerprint = await snapshotDriver.fingerprint([tx.forkRoot], { against: baseSnap });
-      const gateRes = await supervisor.executeWorkspaceCommand({
-        runId,
-        opIdPrefix: 'shadow-gate',
-        name: `gate:${options.gateCommand}`,
-        workspaceRoot: tx.forkRoot,
-        treeFingerprint,
-        command: {
-          execPath: '/bin/sh',
-          args: ['-c', options.gateCommand],
-          cwd: tx.forkRoot,
-          envWhiteList: { ...(process.env as Record<string, string>) },
-        },
-        timeoutMs: options.gateTimeoutMs ?? 30_000,
-      });
+      const graftedGateDeps = graftUntrackedDependencies(workspaceRoot, tx.forkRoot);
+      let gateRes: Awaited<ReturnType<ProcessSupervisor['executeWorkspaceCommand']>>;
+      try {
+        gateRes = await supervisor.executeWorkspaceCommand({
+          runId,
+          opIdPrefix: 'shadow-gate',
+          name: `gate:${options.gateCommand}`,
+          workspaceRoot: tx.forkRoot,
+          treeFingerprint,
+          command: {
+            execPath: '/bin/sh',
+            args: ['-c', options.gateCommand],
+            cwd: tx.forkRoot,
+            envWhiteList: { ...(process.env as Record<string, string>) },
+          },
+          timeoutMs: options.gateTimeoutMs ?? 30_000,
+        });
+      } finally {
+        ungraftDependencies(tx.forkRoot, graftedGateDeps);
+      }
 
       const deduplicated = sharedSeenGateFingerprints
         ? sharedSeenGateFingerprints.has(gateRes.treeCommandFingerprint)
@@ -481,15 +535,21 @@ export async function raceAgentsInVirtualWorkspaces(options: RaceAgentsOptions):
     const executed = await Promise.all(
       prepared.map(async (item) => {
         const innerDomainPath = path.join(domainPath, 'race-runs', item.runId);
-        const agentResult = await wrapAgent({
-          command: item.cand.command,
-          args: item.cand.args,
-          env: item.cand.env,
-          cwd: item.tx.forkRoot,
-          domainPath: innerDomainPath,
-          domainId: `${domainId}:${item.runId}`,
-          runId: item.runId,
-        });
+        const graftedAgentDeps = graftUntrackedDependencies(workspaceRoot, item.tx.forkRoot);
+        let agentResult: WrapAgentResult;
+        try {
+          agentResult = await wrapAgent({
+            command: item.cand.command,
+            args: item.cand.args,
+            env: item.cand.env,
+            cwd: item.tx.forkRoot,
+            domainPath: innerDomainPath,
+            domainId: `${domainId}:${item.runId}`,
+            runId: item.runId,
+          });
+        } finally {
+          ungraftDependencies(item.tx.forkRoot, graftedAgentDeps);
+        }
         const inspected = await supervisor.inspectWorkspaceTransaction(item.txId);
 
         let gateResult: VirtualWorkspaceResult['gateResult'];
@@ -497,20 +557,26 @@ export async function raceAgentsInVirtualWorkspaces(options: RaceAgentsOptions):
           const treeFingerprint = await snapshotDriver.fingerprint([item.tx.forkRoot], {
             against: baseSnapRes.snapshot!,
           });
-          const gateRes = await supervisor.executeWorkspaceCommand({
-            runId: coordRunId,
-            opIdPrefix: 'race-gate',
-            name: `gate:${options.gateCommand}`,
-            workspaceRoot: item.tx.forkRoot,
-            treeFingerprint,
-            command: {
-              execPath: '/bin/sh',
-              args: ['-c', options.gateCommand],
-              cwd: item.tx.forkRoot,
-              envWhiteList: { ...(process.env as Record<string, string>) },
-            },
-            timeoutMs: options.gateTimeoutMs ?? 30_000,
-          });
+          const graftedGateDeps = graftUntrackedDependencies(workspaceRoot, item.tx.forkRoot);
+          let gateRes: Awaited<ReturnType<ProcessSupervisor['executeWorkspaceCommand']>>;
+          try {
+            gateRes = await supervisor.executeWorkspaceCommand({
+              runId: coordRunId,
+              opIdPrefix: 'race-gate',
+              name: `gate:${options.gateCommand}`,
+              workspaceRoot: item.tx.forkRoot,
+              treeFingerprint,
+              command: {
+                execPath: '/bin/sh',
+                args: ['-c', options.gateCommand],
+                cwd: item.tx.forkRoot,
+                envWhiteList: { ...(process.env as Record<string, string>) },
+              },
+              timeoutMs: options.gateTimeoutMs ?? 30_000,
+            });
+          } finally {
+            ungraftDependencies(item.tx.forkRoot, graftedGateDeps);
+          }
           const deduplicated = seenGateFingerprints.has(gateRes.treeCommandFingerprint);
           if (deduplicated) gateExecutionsSaved++;
           seenGateFingerprints.add(gateRes.treeCommandFingerprint);

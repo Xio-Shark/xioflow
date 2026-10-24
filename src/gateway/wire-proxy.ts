@@ -73,6 +73,9 @@ export interface ShellExecResponse {
   stderr: string;
   residualProcessesReaped?: boolean;
   readSet?: string[];
+  writeSet?: string[];
+  deleteSet?: string[];
+  deniedSet?: string[];
   opId?: string;
 }
 
@@ -85,6 +88,9 @@ export interface RecordedToolExecution {
   stdout: string;
   stderr: string;
   readSet: string[];
+  writeSet?: string[];
+  deleteSet?: string[];
+  deniedSet?: string[];
 }
 
 export interface RecordedGatewayTurn {
@@ -107,6 +113,9 @@ export interface RecordedGatewayTurn {
   treeFingerprint?: string;
   opIds: string[];
   readFiles: string[];
+  writeFiles?: string[];
+  deletedFiles?: string[];
+  deniedFiles?: string[];
   toolExecutions?: RecordedToolExecution[];
   timestamp: string;
 }
@@ -173,6 +182,7 @@ export interface WireProxyOptions {
   onTurnCompleted?: (turn: RecordedGatewayTurn) => Promise<void> | void;
   onBeforeMainRequest?: () => Promise<void> | void;
   onShellExec?: (req: ShellExecRequest, activeToolCall?: ParsedToolCall) => Promise<ShellExecResponse>;
+  getKernelStatus?: () => Record<string, unknown>;
 }
 
 export interface WireProxyHandle {
@@ -1485,6 +1495,26 @@ export async function startWireProxy(options: WireProxyOptions = {}): Promise<Wi
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
 
+    // Virtual kernel introspection endpoint (/proc equivalent for wrapped agents)
+    if (req.method === 'GET' && url.pathname === '/__xio_proc') {
+      sendJson(res, 200, {
+        kernel: '@xioflow/kernel',
+        runId: options.runId ?? 'default',
+        domainId: options.domain?.domainId ?? options.domainId ?? 'default',
+        workspaceRoot,
+        gateway: {
+          requests: state.requests,
+          mainRequests: state.mainRequests,
+          upstreamRequests: state.upstreamRequests,
+          cacheHits304: state.cacheHits304,
+          turns: state.turns.length,
+        },
+        activeToolCall: activeToolCall ?? null,
+        ...(options.getKernelStatus?.() ?? {}),
+      });
+      return;
+    }
+
     // Internal shell-shim IPC endpoint
     if (req.method === 'POST' && url.pathname === '/__xio_exec') {
       try {
@@ -1530,6 +1560,9 @@ export async function startWireProxy(options: WireProxyOptions = {}): Promise<Wi
             command: execReq.command,
             exitCode: execRes.exitCode,
             readFiles: execRes.readSet ?? [],
+            writeFiles: execRes.writeSet ?? [],
+            deletedFiles: execRes.deleteSet ?? [],
+            deniedFiles: execRes.deniedSet ?? [],
           });
         }
         sendJson(res, 200, execRes);
@@ -1817,6 +1850,9 @@ export async function startWireProxy(options: WireProxyOptions = {}): Promise<Wi
         treeFingerprint: turnSnap?.treeFingerprint,
         opIds: [],
         readFiles: [],
+        writeFiles: [],
+        deletedFiles: [],
+        deniedFiles: [],
         toolExecutions: [],
         timestamp: new Date().toISOString(),
       };

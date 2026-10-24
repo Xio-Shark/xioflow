@@ -56,6 +56,7 @@ export class CgroupPlatformDriver implements PlatformDriver {
   /** 带硬限制的 cgroup：删除前把限制命中事实留下，供结果读取。 */
   private readonly limitedDirs = new Set<string>();
   private readonly retiredLimitEvents = new Map<string, LimitEvents>();
+  private readonly retiredMetrics = new Map<string, { rssBytes: number; pidsCount: number; cpuTimeMs: number }>();
 
   /** 不做任何修改地检查前提；可用时返回 null，否则返回原因。 */
   public static unavailableReason(options: CgroupDriverOptions = {}): string | null {
@@ -178,7 +179,8 @@ export class CgroupPlatformDriver implements PlatformDriver {
     const dir = identity.cgroupPath;
     if (!dir) return this.inner.sampleMetrics(identity);
     try {
-      const memory = await fs.promises.readFile(path.join(dir, 'memory.current'), 'utf8');
+      const memFile = fs.existsSync(path.join(dir, 'memory.peak')) ? 'memory.peak' : 'memory.current';
+      const memory = await fs.promises.readFile(path.join(dir, memFile), 'utf8');
       const pids = await fs.promises.readFile(path.join(dir, 'pids.current'), 'utf8');
       const cpu = await cg.readKeyValues(path.join(dir, 'cpu.stat'));
       return {
@@ -187,6 +189,8 @@ export class CgroupPlatformDriver implements PlatformDriver {
         cpuTimeMs: Math.round((cpu?.usage_usec ?? 0) / 1000),
       };
     } catch {
+      const retired = this.retiredMetrics.get(dir);
+      if (retired) return retired;
       // 控制器未启用或 cgroup 已删除：退回进程树采样
       return this.inner.sampleMetrics(identity);
     }
@@ -217,6 +221,18 @@ export class CgroupPlatformDriver implements PlatformDriver {
 
   /** 已空的 cgroup：留下限制命中事实后删除。删除失败不影响已证明的停止，只作为说明返回。 */
   private async retire(dir: string): Promise<string | undefined> {
+    try {
+      const memFile = fs.existsSync(path.join(dir, 'memory.peak')) ? 'memory.peak' : 'memory.current';
+      const pidsFile = fs.existsSync(path.join(dir, 'pids.peak')) ? 'pids.peak' : 'pids.current';
+      const memory = await fs.promises.readFile(path.join(dir, memFile), 'utf8');
+      const pids = await fs.promises.readFile(path.join(dir, pidsFile), 'utf8');
+      const cpu = await cg.readKeyValues(path.join(dir, 'cpu.stat'));
+      this.retiredMetrics.set(dir, {
+        rssBytes: Number(memory.trim()),
+        pidsCount: Number(pids.trim()),
+        cpuTimeMs: Math.round((cpu?.usage_usec ?? 0) / 1000),
+      });
+    } catch {}
     if (this.limitedDirs.delete(dir)) {
       const events = await readLimitEventsFrom(dir).catch(() => null);
       if (events) this.retiredLimitEvents.set(dir, events);

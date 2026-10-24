@@ -482,4 +482,96 @@ if (mode === 'first') {
       upstream.close();
     }
   });
+
+  it('exposes /__xio_proc virtual kernel introspection and intercepts absolute /bin/sh + VFS syscalls on Linux', async () => {
+    const dir = makeTempDir();
+    fs.writeFileSync(path.join(dir, 'input.txt'), 'kernel-input\n', 'utf8');
+
+    const upstream = http.createServer(async (req, res) => {
+      for await (const _ of req) {
+        // drain
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          id: 'chatcmpl-proc',
+          choices: [
+            {
+              message: {
+                role: 'assistant',
+                content: 'ok',
+                tool_calls: [
+                  {
+                    id: 'call_proc_1',
+                    type: 'function',
+                    function: { name: 'bash', arguments: '{"command":"cat input.txt > output.txt"}' },
+                  },
+                ],
+              },
+            },
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+        })
+      );
+    });
+    await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', () => r()));
+    const upstreamPort = (upstream.address() as { port: number }).port;
+
+    const agentScript = path.join(dir, 'proc-agent.mjs');
+    fs.writeFileSync(
+      agentScript,
+      `
+import { execSync, execFileSync } from 'node:child_process';
+
+const baseUrl = process.env.OPENAI_BASE_URL;
+const gatewayUrl = process.env.XIO_GATEWAY_URL;
+const resp = await fetch(\`\${baseUrl}/chat/completions\`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({
+    model: 'gpt-4o',
+    tools: [{ type: 'function', function: { name: 'bash', parameters: { properties: { command: { type: 'string' } } } } }],
+    messages: [{ role: 'user', content: 'inspect kernel' }],
+  }),
+});
+await resp.json();
+
+// On Linux, execSync invokes /bin/sh directly by absolute path; on macOS, use bash via PATH
+if (process.platform === 'linux') {
+  execSync('cat input.txt > output.txt');
+} else {
+  execFileSync('bash', ['-c', 'cat input.txt > output.txt']);
+}
+
+const procResp = await fetch(\`\${gatewayUrl}/__xio_proc\`);
+const procJson = await procResp.json();
+console.log(JSON.stringify(procJson));
+`
+    );
+
+    try {
+      const res = await wrapAgent({
+        command: process.execPath,
+        args: [agentScript],
+        cwd: dir,
+        env: {
+          ...process.env,
+          OPENAI_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
+        },
+      });
+      expect(res.exitCode).toBe(0);
+      const procInfo = JSON.parse(res.stdout.trim());
+      expect(procInfo.kernel).toBe('@xioflow/kernel');
+      expect(procInfo.gateway.mainRequests).toBe(1);
+      expect(res.proxyStats.turns[0].opIds.length).toBeGreaterThanOrEqual(1);
+      expect(res.proxyStats.turns[0].readFiles).toContain('input.txt');
+      if (process.platform === 'linux') {
+        expect(procInfo.ldPreloadShimActive).toBe(true);
+        expect(procInfo.confinementDrivers).toContain('landlock');
+        expect(res.proxyStats.turns[0].writeFiles).toContain('output.txt');
+      }
+    } finally {
+      upstream.close();
+    }
+  });
 });

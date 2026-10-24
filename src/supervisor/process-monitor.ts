@@ -107,7 +107,24 @@ function startBudgetSampler(ctx: ProcessRunContext, plan: ProcessRunPlan, handle
     peakMemoryBytes: observed && !samplingError ? peakMemoryBytes : undefined,
     peakCpuTimeMs: observed && !samplingError ? peakCpuTimeMs : undefined,
   });
-  const settle = async () => { await pending; };
+  const settle = async () => {
+    await pending;
+    if (!samplingError && ctx.driver.sampleMetrics && budget) {
+      try {
+        const finalMetrics = await ctx.driver.sampleMetrics(handle.identity);
+        if (finalMetrics.rssBytes > 0 || finalMetrics.cpuTimeMs > 0) {
+          observed = true;
+          peakMemoryBytes = Math.max(peakMemoryBytes, finalMetrics.rssBytes);
+          peakCpuTimeMs = Math.max(peakCpuTimeMs, finalMetrics.cpuTimeMs);
+        }
+      } catch (failure) {
+        if (!observed) {
+          samplingError ??= failure instanceof Error ? failure.message : String(failure);
+          opState.resourceSamplingError = samplingError;
+        }
+      }
+    }
+  };
   const error = () => samplingError;
 
   if (!ctx.driver.sampleMetrics || !budget) {

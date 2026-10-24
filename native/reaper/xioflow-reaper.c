@@ -34,6 +34,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -41,9 +43,52 @@
 
 #ifdef __linux__
 #include <dirent.h>
+#include <linux/types.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
 #define TREE_SCOPE "subreaper_tree"
+
+#ifndef LANDLOCK_CREATE_RULESET_VERSION
+#define LANDLOCK_CREATE_RULESET_VERSION (1U << 0)
+#endif
+#ifndef LANDLOCK_RULE_PATH_BENEATH
+#define LANDLOCK_RULE_PATH_BENEATH 1
+#endif
+#ifndef LANDLOCK_ACCESS_FS_EXECUTE
+#define LANDLOCK_ACCESS_FS_EXECUTE (1ULL << 0)
+#define LANDLOCK_ACCESS_FS_WRITE_FILE (1ULL << 1)
+#define LANDLOCK_ACCESS_FS_READ_FILE (1ULL << 2)
+#define LANDLOCK_ACCESS_FS_READ_DIR (1ULL << 3)
+#define LANDLOCK_ACCESS_FS_REMOVE_DIR (1ULL << 4)
+#define LANDLOCK_ACCESS_FS_REMOVE_FILE (1ULL << 5)
+#define LANDLOCK_ACCESS_FS_MAKE_CHAR (1ULL << 6)
+#define LANDLOCK_ACCESS_FS_MAKE_DIR (1ULL << 7)
+#define LANDLOCK_ACCESS_FS_MAKE_REG (1ULL << 8)
+#define LANDLOCK_ACCESS_FS_MAKE_SOCK (1ULL << 9)
+#define LANDLOCK_ACCESS_FS_MAKE_FIFO (1ULL << 10)
+#define LANDLOCK_ACCESS_FS_MAKE_BLOCK (1ULL << 11)
+#define LANDLOCK_ACCESS_FS_MAKE_SYM (1ULL << 12)
+#define LANDLOCK_ACCESS_FS_REFER (1ULL << 13)
+#define LANDLOCK_ACCESS_FS_TRUNCATE (1ULL << 14)
+#endif
+#ifndef SYS_landlock_create_ruleset
+#define SYS_landlock_create_ruleset 444
+#endif
+#ifndef SYS_landlock_add_rule
+#define SYS_landlock_add_rule 445
+#endif
+#ifndef SYS_landlock_restrict_self
+#define SYS_landlock_restrict_self 446
+#endif
+
+struct xio_landlock_ruleset_attr {
+  __u64 handled_access_fs;
+};
+
+struct xio_landlock_path_beneath_attr {
+  __u64 allowed_access;
+  __s32 parent_fd;
+} __attribute__((packed));
 #elif defined(__APPLE__)
 #include <libproc.h>
 #include <sys/event.h>
@@ -73,11 +118,105 @@ typedef struct {
 static pid_t self_pid;
 static pid_t root_pid = -1;
 static int root_reaped = 0;
+static unsigned long long max_rss_bytes = 0;
+static unsigned long long total_cpu_us = 0;
 static int sig_pipe[2] = {-1, -1};
 static int gate_pipe[2] = {-1, -1};
 static volatile sig_atomic_t stop_requested = 0;
 #ifdef __APPLE__
 static proc_list known; /* every descendant ever observed */
+#endif
+
+#ifdef __linux__
+static int landlock_abi_version(void) {
+  return (int)syscall(SYS_landlock_create_ruleset, NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
+}
+
+static int add_landlock_path(int ruleset_fd, const char *path, __u64 dir_access, __u64 file_access) {
+  int fd = open(path, O_PATH | O_CLOEXEC);
+  if (fd < 0) return -1;
+  struct stat st;
+  __u64 access = dir_access;
+  if (fstat(fd, &st) == 0 && !S_ISDIR(st.st_mode)) {
+    access = file_access;
+  }
+  struct xio_landlock_path_beneath_attr pb;
+  memset(&pb, 0, sizeof(pb));
+  pb.allowed_access = access;
+  pb.parent_fd = fd;
+  int ret = (int)syscall(SYS_landlock_add_rule, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &pb, 0);
+  int saved = errno;
+  close(fd);
+  errno = saved;
+  return ret;
+}
+
+static int apply_landlock(const char *colon_writable_roots) {
+  int abi = landlock_abi_version();
+  if (abi < 1) return -1;
+
+  __u64 read_access = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+  __u64 dir_write_access = LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_REMOVE_DIR |
+                           LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_MAKE_CHAR |
+                           LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG |
+                           LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO |
+                           LANDLOCK_ACCESS_FS_MAKE_BLOCK | LANDLOCK_ACCESS_FS_MAKE_SYM;
+  __u64 file_write_access = LANDLOCK_ACCESS_FS_WRITE_FILE;
+  if (abi >= 2) dir_write_access |= LANDLOCK_ACCESS_FS_REFER;
+  if (abi >= 3) {
+    dir_write_access |= LANDLOCK_ACCESS_FS_TRUNCATE;
+    file_write_access |= LANDLOCK_ACCESS_FS_TRUNCATE;
+  }
+
+  struct xio_landlock_ruleset_attr attr;
+  memset(&attr, 0, sizeof(attr));
+  attr.handled_access_fs = read_access | dir_write_access;
+
+  int ruleset_fd = (int)syscall(SYS_landlock_create_ruleset, &attr, sizeof(attr), 0);
+  if (ruleset_fd < 0) return -1;
+
+  if (add_landlock_path(ruleset_fd, "/", read_access, read_access) < 0) {
+    int saved = errno;
+    close(ruleset_fd);
+    errno = saved;
+    return -1;
+  }
+  /* Always allow /dev/null and /dev/tty writes for standard shell redirects. */
+  (void)add_landlock_path(ruleset_fd, "/dev/null", read_access | dir_write_access, read_access | file_write_access);
+  (void)add_landlock_path(ruleset_fd, "/dev/zero", read_access | dir_write_access, read_access | file_write_access);
+  (void)add_landlock_path(ruleset_fd, "/dev/tty", read_access | dir_write_access, read_access | file_write_access);
+
+  if (colon_writable_roots && *colon_writable_roots) {
+    char *copy = strdup(colon_writable_roots);
+    if (!copy) {
+      close(ruleset_fd);
+      errno = ENOMEM;
+      return -1;
+    }
+    char *saveptr = NULL;
+    for (char *tok = strtok_r(copy, ":", &saveptr); tok != NULL; tok = strtok_r(NULL, ":", &saveptr)) {
+      if (!*tok) continue;
+      /* Best-effort rule addition for existing roots; missing optional roots are ignored. */
+      (void)add_landlock_path(ruleset_fd, tok, read_access | dir_write_access, read_access | file_write_access);
+    }
+    free(copy);
+  }
+
+  if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
+    int saved = errno;
+    close(ruleset_fd);
+    errno = saved;
+    return -1;
+  }
+  if (syscall(SYS_landlock_restrict_self, ruleset_fd, 0) < 0) {
+    int saved = errno;
+    close(ruleset_fd);
+    errno = saved;
+    return -1;
+  }
+  close(ruleset_fd);
+  return 0;
+}
 #endif
 
 /* ------------------------------------------------------------------ utils */
@@ -295,12 +434,30 @@ static void safe_kill(proc_ent *e, int sig) {
   if (read_stat(e->pid, &now) == 0 && now.start == e->start) (void)kill(e->pid, sig);
 }
 
+static void send_rusage(void) {
+  if (max_rss_bytes > 0 || total_cpu_us > 0) {
+    ctl_send("rusage %llu %llu", max_rss_bytes, total_cpu_us / 1000ULL);
+  }
+}
+
 static void reap_children(void) {
   int status;
   pid_t p;
-  while ((p = waitpid(-1, &status, WNOHANG)) > 0) {
+  struct rusage ru;
+  memset(&ru, 0, sizeof(ru));
+  while ((p = wait4(-1, &status, WNOHANG, &ru)) > 0) {
+#ifdef __APPLE__
+    unsigned long long rss = (unsigned long long)(ru.ru_maxrss > 0 ? ru.ru_maxrss : 0);
+#else
+    unsigned long long rss = (unsigned long long)(ru.ru_maxrss > 0 ? ru.ru_maxrss : 0) * 1024ULL;
+#endif
+    if (rss > max_rss_bytes) max_rss_bytes = rss;
+    total_cpu_us += (unsigned long long)ru.ru_utime.tv_sec * 1000000ULL + (unsigned long long)ru.ru_utime.tv_usec +
+                    (unsigned long long)ru.ru_stime.tv_sec * 1000000ULL + (unsigned long long)ru.ru_stime.tv_usec;
+    memset(&ru, 0, sizeof(ru));
     if (p != root_pid) continue;
     root_reaped = 1;
+    send_rusage();
     if (WIFEXITED(status))
       ctl_send("exit %d -", WEXITSTATUS(status));
     else if (WIFSIGNALED(status))
@@ -342,6 +499,7 @@ static int stop_tree(long grace_ms, proc_list *table, proc_list *tree) {
 }
 
 static void report_stop(int empty, proc_list *tree) {
+  send_rusage();
   if (empty) {
     ctl_send("stopped");
     return;
@@ -389,6 +547,19 @@ static void run_child(char **argv) {
   }
   if (n != 1 || c != 'G') _exit(EXIT_GATE_CLOSED);
   close(gate_pipe[0]);
+#ifdef __linux__
+  const char *landlock_roots = getenv("XIOFLOW_LANDLOCK_WRITE_ROOTS");
+  if (landlock_roots) {
+    char *roots_copy = strdup(landlock_roots);
+    unsetenv("XIOFLOW_LANDLOCK_WRITE_ROOTS");
+    if (!roots_copy || apply_landlock(roots_copy) < 0) {
+      dprintf(STDERR_FILENO, "xioflow-reaper: landlock confinement failed: %s\n", strerror(errno));
+      free(roots_copy);
+      _exit(126);
+    }
+    free(roots_copy);
+  }
+#endif
   execvp(argv[0], argv);
   dprintf(STDERR_FILENO, "xioflow-reaper: %s: %s\n", argv[0], strerror(errno));
   _exit(EXIT_EXEC_FAILED);
@@ -445,6 +616,43 @@ int main(int argc, char **argv) {
     fprintf(stderr, "usage: xioflow-reaper <file> [args...]\n");
     return 64;
   }
+  if (strcmp(argv[1], "--check-landlock") == 0) {
+#ifdef __linux__
+    int abi = landlock_abi_version();
+    if (abi >= 1) {
+      printf("landlock-abi %d\n", abi);
+      return 0;
+    }
+#endif
+    return 1;
+  }
+  if (strcmp(argv[1], "--landlock-exec") == 0) {
+#ifdef __linux__
+    if (argc < 4) {
+      fprintf(stderr, "usage: xioflow-reaper --landlock-exec <colon_roots> [--] <file> [args...]\n");
+      return 64;
+    }
+    const char *roots = argv[2];
+    char **target = argv + 3;
+    if (strcmp(target[0], "--") == 0) {
+      if (argc < 5) {
+        fprintf(stderr, "usage: xioflow-reaper --landlock-exec <colon_roots> -- <file> [args...]\n");
+        return 64;
+      }
+      target = argv + 4;
+    }
+    if (apply_landlock(roots) < 0) {
+      fprintf(stderr, "xioflow-reaper: landlock confinement failed: %s\n", strerror(errno));
+      return 126;
+    }
+    execvp(target[0], target);
+    fprintf(stderr, "xioflow-reaper: %s: %s\n", target[0], strerror(errno));
+    return EXIT_EXEC_FAILED;
+#else
+    fprintf(stderr, "xioflow-reaper: landlock is only supported on Linux\n");
+    return 126;
+#endif
+  }
   if (fcntl(CTL_FD, F_GETFD) < 0) {
     fprintf(stderr, "xioflow-reaper: fd 3 must be the control socket\n");
     return 64;
@@ -493,6 +701,7 @@ int main(int argc, char **argv) {
       break;
     }
     if (root_reaped && tree_empty(&table, &tree)) {
+      send_rusage();
       ctl_send("empty");
       break;
     }
