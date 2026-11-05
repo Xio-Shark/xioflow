@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { OwnedArtifact, removeOwnedArtifact } from '../artifacts.js';
+import { OwnedArtifact, recordArtifactCreated, recordArtifactDeleted, removeOwnedArtifact } from '../artifacts.js';
 import { ExecutionDomain } from '../domain.js';
 import { Operation, ResourceConflictError, SnapshotDriver, SnapshotOperationResult } from '../types.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
@@ -9,6 +9,8 @@ import { collectIgnoredEntries, ignoredManifestPath, resolveIgnoredManifest, wri
 import { CapabilityAdmission, recordCapabilityUsed } from './admission.js';
 import { CaptureSnapshotOptions } from './types.js';
 import { domainCoordination } from './domain-coordination.js';
+import { createRequestConfigSnapshot } from '../config/snapshot.js';
+import { NodePlatformDriver } from '../driver/node-driver.js';
 
 export interface SnapshotContext {
   domain: ExecutionDomain;
@@ -26,6 +28,7 @@ export function activateInternalOperation(
   capAdmission: CapabilityAdmission | undefined
 ): void {
   domain.registerOperationIntent(op);
+  if (op.configSnapshot) domain.getStore().bindRunConfigSnapshot(op.runId, op.configSnapshot);
   domain.getStore().updateOperationStatus(op.id, 'active');
   domain.getStore().recordEventAndTransitionState({
     domainId: domain.domainId,
@@ -36,7 +39,12 @@ export function activateInternalOperation(
     timestamp: new Date().toISOString(),
   });
   if (op.capabilityId && capAdmission) {
-    recordCapabilityUsed(domain, { runId: op.runId, opId: op.id, capabilityId: op.capabilityId }, capAdmission);
+    recordCapabilityUsed(domain, {
+      runId: op.runId,
+      opId: op.id,
+      capabilityId: op.capabilityId,
+      opcode: op.kind === 'snapshot' ? 'workspace.snapshot' : op.kind === 'rollback' ? 'workspace.rollback' : undefined,
+    }, capAdmission);
   }
 }
 
@@ -56,6 +64,8 @@ export async function captureSnapshot(
     capAdmission = domain.checkCapabilityAdmission({
       capabilityId: options.capabilityId,
       mutationRoots: targetRoots,
+      opcode: 'workspace.snapshot',
+      workspace: options.capabilityWorkspace,
       runId: options.runId,
       opId: options.opId,
     });
@@ -94,6 +104,20 @@ export async function captureSnapshot(
     requiredResources,
     mutationRoots: realRoots,
     capabilityId: options.capabilityId,
+    configSnapshot: createRequestConfigSnapshot({
+      driver: domain.getDriver() ?? new NodePlatformDriver(),
+      capabilityId: options.capabilityId,
+      capabilityPolicyVersion: capAdmission?.capability.policyVersion,
+      config: {
+        kind: 'workspace.snapshot',
+        roots: realRoots,
+        includeIgnored: !!options.includeIgnored,
+        trackIgnored: options.trackIgnored,
+        maxTreeSizeBytes: options.maxTreeSizeBytes,
+        timeoutMs: options.timeoutMs,
+        snapshotDriver: snapshotDriver.name,
+      },
+    }),
     timeoutMs: options.timeoutMs,
     status: 'intent_registered',
   };
@@ -115,6 +139,12 @@ export async function captureSnapshot(
       const entries = collectIgnoredEntries(await snapshotDriver.listIgnored(realRoots));
       const written = writeIgnoredManifest(manifestFile, entries);
       manifestArtifact = written.artifact;
+      recordArtifactCreated(domain, options.opId, manifestArtifact, {
+        creatingInstructionId: options.opId,
+        sha256: written.digest,
+        sizeBytes: fs.statSync(manifestArtifact.path).size,
+        sensitivity: 'internal',
+      });
       ignoredManifest = { digest: written.digest, entries: entries.length };
     }
 
@@ -157,21 +187,13 @@ export async function captureSnapshot(
       };
 
       store.recordOperationResult(options.opId, result);
-      store.updateOperationStatus(options.opId, 'done');
-      store.recordEventAndTransitionState({
-        domainId: domain.domainId,
-        runId: options.runId,
-        operationId: options.opId,
-        type: 'OPERATION_RESULT_RECORDED',
-        payload: { status: 'succeeded', snapshotId: snapRef.id },
-        timestamp: new Date().toISOString(),
-      });
     });
 
   } catch (err: any) {
     if (manifestArtifact) {
       try {
         removeOwnedArtifact(manifestArtifact);
+        recordArtifactDeleted(domain, manifestArtifact, 'snapshot_failed');
       } catch (cleanupError) {
         err = new AggregateError([err, cleanupError], `${err.message}; ignored manifest cleanup failed: ${cleanupError}`);
       }
@@ -195,7 +217,6 @@ function recordFailedSnapshot(domain: ExecutionDomain, opId: string, err: any, s
   let recordError: unknown;
   try {
     domain.getStore().recordOperationResult(opId, failResult);
-    domain.getStore().updateOperationStatus(opId, 'done');
   } catch (recErr) {
     recordError = recErr;
   }
@@ -323,7 +344,10 @@ export async function pruneSnapshots(
       if (manifest.state === 'found') manifestToRemove = manifest.artifact;
     }
     await snapshotDriver.prune([id], { repoRoot });
-    if (manifestToRemove) removeOwnedArtifact(manifestToRemove);
+    if (manifestToRemove) {
+      removeOwnedArtifact(manifestToRemove);
+      recordArtifactDeleted(domain, manifestToRemove, 'snapshot_pruned');
+    }
     store.transaction(() => {
       store.deleteSnapshot(id);
       store.recordEventAndTransitionState({

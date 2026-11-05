@@ -97,17 +97,20 @@ describe('内核 0.2.0 批次 3 (B3): 输出与产物诚实 [P0-9, P0-10, P0-12,
       }
     });
 
-    it('1.1b [P0-9] writeSync 失败时：不返回 outputRef，结果带 spillError', async () => {
+    it('1.1b [P0-9] asynchronous writer fails：不返回 outputRef，结果带 spillError', async () => {
       const opId = 'op-spill-write-fail';
-      const originalWrite = fs.writeSync;
+      const originalWrite = fs.write;
 
       let injected = false;
-      (fs as any).writeSync = (fd: number, buffer: any, ...args: any[]) => {
+      (fs as any).write = (...args: any[]) => {
+        const fd = args[0];
+        const callback = args[args.length - 1] as (error: Error | null, written?: number, buffer?: Buffer) => void;
         if (!injected && typeof fd === 'number') {
           injected = true;
-          throw new Error('Injected writeSync failure during stream spill');
+          callback(new Error('Injected asynchronous writer failure during stream spill'));
+          return;
         }
-        return (originalWrite as any)(fd, buffer, ...args);
+        return (originalWrite as any)(...args);
       };
 
       try {
@@ -127,9 +130,9 @@ describe('内核 0.2.0 批次 3 (B3): 输出与产物诚实 [P0-9, P0-10, P0-12,
 
         expect(result.outputRef).toBeUndefined();
         expect(result.spillError).toBeDefined();
-        expect(result.spillError).toContain('Injected writeSync failure');
+        expect(result.spillError).toContain('Injected asynchronous writer failure');
       } finally {
-        fs.writeSync = originalWrite;
+        fs.write = originalWrite;
       }
     });
 

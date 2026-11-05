@@ -1,0 +1,129 @@
+{
+  "schemaVersion": "xio/capability-matrix/1",
+  "generatedAt": "2026-11-02",
+  "entries": [
+    {
+      "platform": "linux",
+      "environment": "default",
+      "driver": "node",
+      "status": "supported",
+      "capabilities": {
+        "processGroupKill": true,
+        "accurateStartTime": true,
+        "memoryHardLimit": false,
+        "pidsLimit": false,
+        "cpuLimit": false,
+        "descendantEnumeration": "full",
+        "gatedSpawn": true
+      },
+      "evidence": ["src/driver/node-driver.ts", "tests/driver/identity-evidence.test.ts", "tests/supervisor/recovery-evidence.test.ts"]
+    },
+    {
+      "platform": "linux",
+      "environment": "default",
+      "driver": "reaper",
+      "status": "conditional",
+      "precondition": "xioflow-reaper helper is available",
+      "capabilities": {
+        "processGroupKill": true,
+        "accurateStartTime": true,
+        "memoryHardLimit": false,
+        "pidsLimit": false,
+        "cpuLimit": false,
+        "descendantEnumeration": "subreaper",
+        "gatedSpawn": true
+      },
+      "evidence": ["src/driver/reaper-driver.ts", "tests/driver/reaper-driver.test.ts", "tests/driver/reaper-lifecycle.test.ts"]
+    },
+    {
+      "platform": "linux",
+      "environment": "delegated-cgroup-v2",
+      "driver": "cgroup",
+      "status": "conditional",
+      "precondition": "cgroup v2 is mounted and delegated to the host process",
+      "capabilities": {
+        "processGroupKill": true,
+        "accurateStartTime": true,
+        "memoryHardLimit": "controller-dependent",
+        "pidsLimit": "controller-dependent",
+        "cpuLimit": false,
+        "descendantEnumeration": "cgroup",
+        "gatedSpawn": true
+      },
+      "evidence": ["src/driver/cgroup-driver.ts", "src/driver/cgroup-fs.ts", "tests/driver/cgroup-driver.test.ts"]
+    },
+    {
+      "platform": "linux",
+      "environment": "no-cgroup-delegation",
+      "driver": "cgroup",
+      "status": "unsupported",
+      "reason": "CgroupPlatformDriver.unavailableReason() returns a non-empty delegation/mount error; no fallback is allowed",
+      "evidence": ["src/driver/cgroup-driver.ts", "tests/driver/cgroup-driver.test.ts", "tests/support/cgroup.ts"]
+    },
+    {
+      "platform": "darwin",
+      "environment": "default",
+      "driver": "node",
+      "status": "supported",
+      "capabilities": {
+        "processGroupKill": true,
+        "accurateStartTime": true,
+        "memoryHardLimit": false,
+        "pidsLimit": false,
+        "cpuLimit": false,
+        "descendantEnumeration": "full",
+        "gatedSpawn": true
+      },
+      "evidence": ["src/driver/node-driver.ts", "tests/driver/identity-evidence.test.ts", "tests/supervisor/recovery-evidence.test.ts"]
+    },
+    {
+      "platform": "darwin",
+      "environment": "default",
+      "driver": "reaper",
+      "status": "conditional",
+      "precondition": "xioflow-reaper helper is available",
+      "capabilities": {
+        "processGroupKill": true,
+        "accurateStartTime": true,
+        "memoryHardLimit": false,
+        "pidsLimit": false,
+        "cpuLimit": false,
+        "descendantEnumeration": "full",
+        "gatedSpawn": true
+      },
+      "evidence": ["src/driver/reaper-driver.ts", "tests/driver/reaper-driver.test.ts", "tests/driver/reaper-lifecycle.test.ts"]
+    },
+    {
+      "platform": "darwin",
+      "environment": "default",
+      "driver": "cgroup",
+      "status": "unsupported",
+      "reason": "cgroup v2 driver is Linux-only",
+      "evidence": ["src/driver/cgroup-driver.ts", "tests/driver/cgroup-driver.test.ts"]
+    },
+    {
+      "platform": "windows",
+      "environment": "unsupported-platform",
+      "driver": "node",
+      "status": "unsupported",
+      "reason": "XIO-ISA v1 supported baseline excludes Windows; Node declares processGroupKill=false and descendantEnumeration=none",
+      "evidence": ["src/driver/node-driver.ts", "spec/current-contract.md"]
+    },
+    {
+      "platform": "windows",
+      "environment": "unsupported-platform",
+      "driver": "reaper",
+      "status": "unsupported",
+      "reason": "ReaperPlatformDriver supports Linux and macOS only",
+      "evidence": ["src/driver/reaper-driver.ts", "tests/driver/reaper-driver.test.ts"]
+    },
+    {
+      "platform": "windows",
+      "environment": "unsupported-platform",
+      "driver": "cgroup",
+      "status": "unsupported",
+      "reason": "cgroup v2 driver is Linux-only",
+      "evidence": ["src/driver/cgroup-driver.ts", "tests/driver/cgroup-driver.test.ts"]
+    }
+  ]
+}

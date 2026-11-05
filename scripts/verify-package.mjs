@@ -43,6 +43,8 @@ for (const required of [
   'package.json',
   'dist/index.js',
   'dist/index.d.ts',
+  'dist/isa/public.js',
+  'dist/isa/public.d.ts',
   'dist/testing/contract-suite.js',
   'dist/testing/contract-suite.d.ts',
   `dist/native/${process.platform}-${process.arch}/xioflow-reaper`,

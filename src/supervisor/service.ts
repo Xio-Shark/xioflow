@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { artifactPath, recordArtifactCreated } from '../artifacts.js';
+import { artifactPath, recordArtifactCreated, recordArtifactDeleted, recordArtifactFinalized } from '../artifacts.js';
 import { PassThrough } from 'node:stream';
 import { ExecutionDomain } from '../domain.js';
 import { PlatformDriver, ManagedProcessHandle, StopProcessResult } from '../driver/types.js';
@@ -16,6 +16,8 @@ import { ProcessSupervisor } from './supervisor.js';
 import { setupStreamDrainer, StreamDrainer } from './drainer.js';
 import { computeInputFingerprint } from './fingerprint.js';
 import { settleProcessTree } from '../driver/tree-settlement.js';
+import { createRecoveryEvidence } from '../recovery/evidence.js';
+import { createRequestConfigSnapshot } from '../config/snapshot.js';
 
 interface ServiceRuntimeState {
   owner: ServiceSupervisor;
@@ -206,6 +208,24 @@ export class ServiceSupervisor {
 
     const store = this.domain.getStore();
     const inputFingerprint = this.computeServiceFingerprint(state.spec);
+    const configSnapshot = createRequestConfigSnapshot({
+      driver: this.driver,
+      config: {
+        serviceId: state.spec.serviceId,
+        command: {
+          execPath: state.spec.command.execPath,
+          cwd: state.spec.command.cwd,
+          inheritEnv: state.spec.command.inheritEnv ?? false,
+          envKeys: state.spec.command.envWhiteList ? Object.keys(state.spec.command.envWhiteList).sort() : [],
+          secretEnvKeys: state.spec.command.secretEnv ? Object.keys(state.spec.command.secretEnv).sort() : [],
+        },
+        readiness: typeof state.spec.readiness === 'string' ? state.spec.readiness : state.spec.readiness ? { stdoutLine: state.spec.readiness.stdoutLine.source, timeoutMs: state.spec.readiness.timeoutMs } : undefined,
+        restart: state.spec.restart,
+        maxStderrBytes: state.spec.maxStderrBytes,
+        graceMs: state.spec.graceMs,
+      },
+    });
+    store.bindRunConfigSnapshot(state.runId, configSnapshot);
 
     // 1. [意图登记] SQLite 写入 Operation (status: intent_registered, kind: service)
     const op: Operation = {
@@ -216,6 +236,8 @@ export class ServiceSupervisor {
       inputFingerprint,
       requiredResources: state.spec.requiredResources ?? [],
       spawnGated: this.driver.capabilities.gatedSpawn === true,
+      recoveryEvidence: createRecoveryEvidence(this.driver),
+      configSnapshot,
       status: 'intent_registered',
     };
     this.supervisor.assertOperationIdAvailable(op.id);
@@ -281,7 +303,9 @@ export class ServiceSupervisor {
       undefined,
       undefined,
       undefined,
-      (artifact) => recordArtifactCreated(this.domain, state.currentOpId, artifact)
+      (artifact) => recordArtifactCreated(this.domain, state.currentOpId, artifact),
+      (artifact, facts) => recordArtifactFinalized(this.domain, artifact, facts),
+      (artifact, reason) => recordArtifactDeleted(this.domain, artifact, reason),
     );
     state.currentStderrDrainer = stderrDrainer;
 
@@ -346,6 +370,7 @@ export class ServiceSupervisor {
     // Drain its output while its durable indeterminate record retains the lease.
     (handle?.stdout as any)?.resume?.();
     state.currentStderrDrainer?.forceFinalize();
+    if (state.currentStderrDrainer) await state.currentStderrDrainer.finishPromise;
     state.stdinStream.end();
     state.stdoutStream.end();
     const failure = errors.length === 1 ? error : new AggregateError(errors, errors.map(String).join('; '), { cause: error });
@@ -481,6 +506,7 @@ export class ServiceSupervisor {
     }
 
     state.currentStderrDrainer?.forceFinalize();
+    if (state.currentStderrDrainer) await state.currentStderrDrainer.finishPromise;
     const stderrData = state.currentStderrDrainer?.getResult();
 
     const store = this.domain.getStore();
@@ -819,7 +845,8 @@ function journalSafeCommand(command: ServiceSpec['command']): Record<string, unk
     cwd: command.cwd,
     argCount: command.args.length,
     envKeys: command.envWhiteList ? Object.keys(command.envWhiteList).sort() : undefined,
-    inheritEnv: command.inheritEnv,
+    inheritEnv: command.inheritEnv ?? false,
+    secretEnvKeys: command.secretEnv ? Object.keys(command.secretEnv).sort() : undefined,
     hasStdin: command.stdin !== undefined,
   };
 }

@@ -26,6 +26,8 @@ export interface Run {
   startedAt: string;
   endedAt?: string;
   configSnapshotWhiteList?: Record<string, unknown>; // 白名单安全配置快照
+  /** Immutable request/config binding captured before the first operation in this run. */
+  configSnapshot?: RequestConfigSnapshot;
 }
 
 export type KernelRunStatus =
@@ -91,6 +93,10 @@ export interface Operation {
   resourceBudget?: ResourceBudget; // 显式声明的资源治理预算
   /** Recorded with the intent: the driver holds exec until identity is durable; EOF must not exec. */
   spawnGated?: boolean;
+  /** Immutable launch/recovery facts captured from the original driver at intent time. */
+  recoveryEvidence?: RecoveryEvidence;
+  /** Immutable request binding used by recovery; never reconstructed from live host configuration. */
+  configSnapshot?: RequestConfigSnapshot;
   outputRef?: string;              // 产物文件引用路径
   status: OperationStatus;
   result?: OperationResult;
@@ -107,6 +113,54 @@ export interface Operation {
     /** 专属 cgroup（CgroupPlatformDriver）：恢复时据此判断整棵树是否已空。 */
     cgroupPath?: string;
   };
+}
+
+export interface RecoveryEvidence {
+  schemaVersion: 'xio/recovery/1.0';
+  driverName: string;
+  driverCapabilities: {
+    processGroupKill: boolean;
+    accurateStartTime: boolean;
+    startTimeSource?: 'procfs' | 'ps_lstart' | 'none';
+    descendantEnumeration: 'full' | 'cgroup' | 'subreaper' | 'none';
+    gatedSpawn?: boolean;
+  };
+  identity?: Operation['processIdentity'];
+  tree?: {
+    status: 'empty' | 'residual' | 'unknown';
+    scope?: 'direct_child' | 'process_group' | 'containment_cgroup' | 'subreaper_tree' | 'tracked_tree' | 'unknown';
+    residualPids?: number[];
+    source: 'spawn' | 'natural_exit' | 'stop' | 'recovery';
+    observedAt: string;
+  };
+  pipes?: {
+    stdin: 'ignored' | 'open' | 'closed' | 'unknown';
+    stdout: 'open' | 'closed' | 'drained' | 'unknown';
+    stderr: 'open' | 'closed' | 'drained' | 'unknown';
+    source: 'spawn' | 'natural_exit' | 'stop' | 'recovery';
+    observedAt: string;
+  };
+  containment?: {
+    kind: 'cgroup' | 'process_group' | 'tracked_tree' | 'none' | 'unknown';
+    path?: string;
+    status: 'held' | 'empty' | 'residual' | 'unknown';
+    source: 'spawn' | 'natural_exit' | 'stop' | 'recovery';
+    observedAt: string;
+  };
+}
+
+export interface RequestConfigSnapshot {
+  schemaVersion: 'xio/config/1';
+  capabilityId?: string;
+  capabilityPolicyVersion?: string;
+  driverName: string;
+  driverVersion: string;
+  driverCapabilities: Record<string, boolean | string | string[]>;
+  retentionVersion: string;
+  redactionVersion: string;
+  config: Record<string, unknown>;
+  digest: string;
+  createdAt: string;
 }
 
 export type OperationStatus =
@@ -175,6 +229,8 @@ export interface ProcessOperationResult extends BaseResult {
   stdoutSpillError?: string;         // stdout 转储失败错误
   stderrSpillError?: string;         // stderr 转储失败错误
   residualPids?: number[];           // 逃逸或未完全停止的残留进程 PID 列表
+  /** OS-observed zombies; no executable work or pipe holders, but not yet collected by their parent. */
+  unreapedPids?: number[];
   identityVerification: IdentityVerificationResult;
   evidence?: 'observed' | 'unobserved';
   /** 仅在 `trackReads` 时出现：这条命令读过什么的证据摘要，详情在 `ref` 指向的文件里。 */
@@ -328,6 +384,14 @@ export interface JournalEvent {
   type: string;
   payload: Record<string, unknown>;
   timestamp: string;
+  schemaVersion?: string;
+  requestId?: string;
+  programId?: string;
+  instructionId?: string;
+  opId?: string;
+  event?: string;
+  sensitivity?: 'public' | 'internal' | 'sensitive' | 'secret';
+  createdAt?: string;
 }
 
 /**
@@ -467,8 +531,10 @@ export class RecoveryRequiredError extends Error {
 export interface AdjudicationRecord {
   operationId: string;
   verdict: 'confirmed_stopped' | 'abandon_with_residuals';
+  decision?: 'succeeded' | 'failed' | 'rolled_back' | 'partial';
   actor: string;
   note?: string;
+  evidence?: string;
   residualPids?: number[];
   decidedAt: string;
 }
@@ -558,6 +624,31 @@ export interface SnapshotOperationResult extends BaseResult {
   errorMessage?: string;
 }
 
+export type ArtifactSensitivity = 'public' | 'internal' | 'secret';
+export type ArtifactEncryptionState = 'unknown' | 'plaintext' | 'encrypted';
+export type ArtifactDeletionState = 'present' | 'deleted' | 'unknown';
+
+/** Durable ownership manifest for every artifact created by a kernel operation. */
+export interface ArtifactRecord {
+  id: string;
+  domainId: string;
+  ownerOperationId?: string;
+  creatingInstructionId?: string;
+  path: string;
+  sha256?: string;
+  sizeBytes?: number;
+  createdAt: string;
+  expiresAt?: string;
+  sensitivity: ArtifactSensitivity;
+  encryptionState: ArtifactEncryptionState;
+  deletionState: ArtifactDeletionState;
+  dev: string;
+  ino: string;
+  birthtimeNs: string;
+  deletedAt?: string;
+  deletionReason?: string;
+}
+
 export interface RollbackOperationResult extends BaseResult {
   kind: 'rollback';
   status: 'restored' | 'partial' | 'failed';
@@ -618,9 +709,43 @@ export interface SnapshotDriver {
 /**
  * 授权 Capability 契约（ARCHITECTURE §0.2 裁决 9 / 契约 #55, #56）
  */
+/** Capability v1 resource and path scope. `write`/`exclusive` remain as 0.x aliases. */
 export interface CapabilityScope {
-  write: string[];                 // 允许写入的工作区路径根列表（先 realpath 后判定包含）
-  exclusive: string[];             // 允许独占申请的受管资源列表
+  write: string[];                 // 0.x alias for paths (先 realpath 后判定包含)
+  exclusive: string[];             // 0.x alias for resource lease names
+  opcodes: string[];
+  workspaces: string[];
+  paths: string[];
+  secrets: string[];
+}
+
+/** Input accepted by the compatibility issuer and the v1 attenuation API. */
+export interface CapabilityScopeInput {
+  write?: string[];
+  exclusive?: string[];
+  opcodes?: string[];
+  workspaces?: string[];
+  paths?: string[];
+  secrets?: string[];
+}
+
+export interface CapabilityLimits {
+  cpuMs: number;
+  memoryBytes: number;
+  outputBytes: number;
+  concurrentOps: number;
+  processes: number;
+}
+
+export interface CapabilityIssueRequest {
+  scope: CapabilityScopeInput;
+  issuer: string;
+  policyVersion: string;
+  reason: string;
+  limits: CapabilityLimits;
+  ttlMs?: number;
+  expiresAt?: string;
+  parentId?: string;
 }
 
 export interface Capability {
@@ -628,6 +753,11 @@ export interface Capability {
   domainId: string;
   scope: CapabilityScope;
   issuedBy: string;
+  /** v1 spelling retained alongside `issuedBy` for 0.x callers. */
+  issuer: string;
+  policyVersion: string;
+  reason: string;
+  limits: CapabilityLimits;
   expiresAt: string;
   parentId?: string;
   epoch: number;
@@ -643,6 +773,13 @@ export class CapabilityViolationError extends Error {
       | 'epoch_mismatch'
       | 'out_of_scope_resource'
       | 'out_of_scope_path'
+      | 'out_of_scope_opcode'
+      | 'out_of_scope_workspace'
+      | 'out_of_scope_secret'
+      | 'budget_exceeded'
+      | 'concurrency_exceeded'
+      | 'policy_mismatch'
+      | 'domain_mismatch'
       | 'attenuation_widened',
     message: string
   ) {

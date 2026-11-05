@@ -1,0 +1,21 @@
+{
+  "isa": "xio/1",
+  "requestId": "golden-rollback-result",
+  "programId": "golden-rollback",
+  "status": "succeeded",
+  "results": [
+    {
+      "id": "rollback",
+      "status": "rolled_back",
+      "atomicity": "compensatable",
+      "observation": { "status": "proven", "driver": "workspace.git-shadow" },
+      "effects": { "changedPaths": ["src/app.ts"] },
+      "evidence": ["snapshot:base", "artifact:rollback-evidence"],
+      "artifactRefs": ["artifact:rollback-evidence"],
+      "replay": { "mode": "replayed" },
+      "rollback": { "status": "compensated", "coverage": "complete" },
+      "value": { "coverage": "complete" }
+    }
+  ],
+  "events": { "nextCursor": null, "omitted": 0 }
+}

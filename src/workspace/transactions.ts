@@ -4,8 +4,14 @@ import { ExecutionDomain } from '../domain.js';
 import { JournalEvent, SnapshotRef } from '../types.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
 import { isPathContained } from '../capability/index.js';
-import { collectReadTracking, normalizeAccessTimes, probeReadTracking, ReadTracking } from './read-tracking.js';
+import { collectReadTracking, collectWorkspaceObservationIndex, normalizeAccessTimes, probeReadTracking, ReadTracking } from './read-tracking.js';
 import { replayObservationLog } from './observation-replay.js';
+import {
+  buildWorkspaceIncrementalIndex,
+  mergeWorkspaceIncrementalIndex,
+  parseWorkspaceIncrementalIndex,
+  WorkspaceIncrementalIndex,
+} from './incremental-index.js';
 
 /**
  * 工作区事务：并行 agent 的乐观并发控制（ARCHITECTURE §3.9）。
@@ -56,6 +62,17 @@ export interface TransactionEffects {
   /** 无法观测是否使用过的符号链接路径，保守参与冲突校验；旧事务未记此证据时为 null。 */
   pathDependencies: string[] | null;
   writeSet: WriteEntry[];
+  /** 独立持久化各类 workspace 证据，并携带可验证 digest 与 coverage 降级原因。 */
+  workspaceIndex: WorkspaceIncrementalIndex;
+}
+
+export interface WorkspaceIndexHints {
+  /** 宿主从 glob/search 结果得到的增量发现集合；与内核扫描结果合并。 */
+  discoverySet?: string[] | null;
+  /** 宿主声明的 path#symbol -> cutoff hash 投影。 */
+  symbolSlice?: Record<string, string> | null;
+  /** 外部已持久化的 ignored manifest digest；显式 null 表示不可证明。 */
+  ignoredManifest?: string | null;
 }
 
 /** 事务里的一步：只读观测或改动。`call` 由宿主定义，内核不解释。 */
@@ -115,6 +132,7 @@ export type CommitResult =
 
 export interface CommitOptions {
   observations?: ObservationValidation;
+  workspaceIndex?: WorkspaceIndexHints;
 }
 
 /** 已通过校验、等待应用的提交：写集、从哪个目录拷贝、凭什么证据、要回收的重放分叉。 */
@@ -206,13 +224,13 @@ export class WorkspaceTransactions {
   }
 
   /** 当前读集与写集（不提交）。读集证据在计算写集前取出并落 journal，随后重新归一 atime。 */
-  public async inspect(txId: string): Promise<TransactionEffects> {
+  public async inspect(txId: string, options?: { workspaceIndex?: WorkspaceIndexHints }): Promise<TransactionEffects> {
     const tx = await this.require(txId);
     const owner = `${txId}:inspect`;
     this.host.assertOperationIdAvailable(owner);
     this.host.domain.allocateResources(owner, [`workspace:write:${tx.forkRoot}`]);
     try {
-      return await this.effects(tx);
+      return await this.effects(tx, options?.workspaceIndex);
     } finally {
       this.host.domain.internalReleaseResources(owner);
     }
@@ -291,8 +309,17 @@ export class WorkspaceTransactions {
       if (committing) {
         // 隔离从未结清的 journal 在域启动时重建，源分叉仍是受保护的重做日志。
         const p = committing.payload as Partial<CommitPlan> & { effects: TransactionEffects; isolationVersion?: number };
+        const recoveredIndex = parseWorkspaceIncrementalIndex(p.effects.workspaceIndex) ?? buildWorkspaceIncrementalIndex({
+          root: tx.root,
+          readSet: p.effects.readSet ?? null,
+          writeSet: p.effects.writeSet ?? [],
+          discoverySet: null,
+          symbolSlice: null,
+          ignoredManifest: null,
+          pathDependencies: p.effects.pathDependencies ?? null,
+        });
         plan = {
-          effects: { ...p.effects, pathDependencies: p.effects.pathDependencies ?? null },
+          effects: { ...p.effects, pathDependencies: p.effects.pathDependencies ?? null, workspaceIndex: recoveredIndex },
           sourceRoot: p.sourceRoot ?? tx.forkRoot,
           validation: p.validation ?? (p.effects.readSet === null ? 'write_only' : 'files'),
           replay: p.replay,
@@ -307,7 +334,7 @@ export class WorkspaceTransactions {
       } else {
         // effects 也会 await；源和目标在取证之前一起占用，避免读集和写集随后失效。
         acquire([tx.root, tx.forkRoot]);
-        const effects = await this.effects(tx);
+        const effects = await this.effects(tx, options?.workspaceIndex);
         const conflicts = await this.validate(tx, effects);
         plan = { effects, sourceRoot: tx.forkRoot, validation: effects.readSet === null ? 'write_only' : 'files' };
         if (conflicts.length > 0) {
@@ -344,6 +371,7 @@ export class WorkspaceTransactions {
         writeSet: effects.writeSet,
         readSet: effects.readSet,
         pathDependencies: effects.pathDependencies,
+        workspaceIndex: effects.workspaceIndex,
         validation,
       });
       committed = true;
@@ -377,7 +405,15 @@ export class WorkspaceTransactions {
     observation?: ObservationOutcome
   ): CommitResult {
     tx.status = 'conflicted';
-    this.record(tx.runId, 'TX_CONFLICTED', { txId: tx.txId, conflicts, ...(observation ? { observation } : {}) });
+    this.record(tx.runId, 'TX_CONFLICTED', {
+      txId: tx.txId,
+      conflicts,
+      readSet: effects.readSet,
+      writeSet: effects.writeSet,
+      pathDependencies: effects.pathDependencies,
+      workspaceIndex: effects.workspaceIndex,
+      ...(observation ? { observation } : {}),
+    });
     return { status: 'conflict', txId: tx.txId, conflicts, ...(observation ? { observation } : {}), ...effects };
   }
 
@@ -476,24 +512,56 @@ export class WorkspaceTransactions {
     }
   }
 
-  private async effects(tx: OpenTransaction): Promise<TransactionEffects> {
+  private async effects(tx: OpenTransaction, hints?: WorkspaceIndexHints): Promise<TransactionEffects> {
     // 必须在任何 git 读取之前取证；链接只记路径，不跟随，也不声称它们被读过。
-    const currentReads = collectReadTracking(tx.forkRoot);
+    let currentReads: ReturnType<typeof collectWorkspaceObservationIndex>;
+    let scanFailed = false;
+    try {
+      currentReads = collectWorkspaceObservationIndex(tx.forkRoot);
+    } catch {
+      // 目录在取证期间不可读时继续计算可用的写集，但把所有观测集合降级为 unknown。
+      currentReads = { readSet: [], discoverySet: [], pathDependencies: [] };
+      scanFailed = true;
+    }
     const earlier = this.journal(tx.txId).filter((e) => e.type === 'TX_READS');
+    const previousIndex = [...earlier]
+      .reverse()
+      .map((event) => parseWorkspaceIncrementalIndex(event.payload.workspaceIndex))
+      .find((index): index is WorkspaceIncrementalIndex => index !== undefined);
     let readSet: string[] | null = null;
-    if (tx.readTracking === 'atime') {
+    if (tx.readTracking === 'atime' && !scanFailed) {
       readSet = [...new Set([...earlier.flatMap((e) => (e.payload.readSet as string[] | null) ?? []), ...currentReads.readSet])].sort();
     }
-    const pathDependencies = tx.pathDependencies === null ? null : [...new Set([
+    const pathDependencies = scanFailed || tx.pathDependencies === null ? null : [...new Set([
       ...tx.pathDependencies,
       ...earlier.flatMap((e) => (e.payload.pathDependencies as string[] | null) ?? []),
       ...currentReads.pathDependencies,
     ])].sort();
-    this.record(tx.runId, 'TX_READS', { txId: tx.txId, readSet, pathDependencies });
-
-    const { snapshotDriver } = this.host;
     const base = this.host.domain.getStore().getSnapshot(tx.baseSnapshotId);
     if (!base) throw new Error(`Base snapshot ${tx.baseSnapshotId} of transaction "${tx.txId}" is missing`);
+    const hintedDiscovery = hints?.discoverySet === null
+      ? null
+      : [...currentReads.discoverySet, ...(hints?.discoverySet ?? [])];
+    const ignoredManifest = hints?.ignoredManifest !== undefined
+      ? hints.ignoredManifest
+      : base.ignoredManifestDigest ?? previousIndex?.ignoredManifest;
+    this.record(tx.runId, 'TX_READS', {
+      txId: tx.txId,
+      readSet,
+      pathDependencies,
+      workspaceIndex: buildWorkspaceIncrementalIndex({
+        root: tx.root,
+        readSet,
+        writeSet: [],
+        discoverySet: scanFailed ? null : hintedDiscovery,
+        symbolSlice: hints?.symbolSlice !== undefined ? hints.symbolSlice : previousIndex?.symbolSlice,
+        ignoredManifest,
+        pathDependencies,
+        coverageNotes: scanFailed ? ['workspace_scan_failed'] : undefined,
+      }),
+    });
+
+    const { snapshotDriver } = this.host;
     const current = await snapshotDriver.fingerprint([tx.forkRoot], { against: base });
     const forkRepo = (await snapshotDriver.assertGitRepo(tx.forkRoot)).repoRoot;
     const prefix = path.relative(forkRepo, tx.forkRoot);
@@ -501,7 +569,23 @@ export class WorkspaceTransactions {
       (c) => ({ status: c.status, path: prefix ? path.relative(prefix, c.path) : c.path })
     );
     if (tx.readTracking === 'atime') normalizeAccessTimes(tx.forkRoot); // git 读过所有文件，重新归零证据
-    return { readTracking: tx.readTracking, readSet, pathDependencies, writeSet };
+    const currentIndex = buildWorkspaceIncrementalIndex({
+      root: tx.root,
+      readSet,
+      writeSet,
+      discoverySet: scanFailed ? null : hintedDiscovery,
+      symbolSlice: hints?.symbolSlice !== undefined ? hints.symbolSlice : previousIndex?.symbolSlice,
+      ignoredManifest,
+      pathDependencies,
+      coverageNotes: scanFailed ? ['workspace_scan_failed'] : undefined,
+    });
+    return {
+      readTracking: tx.readTracking,
+      readSet,
+      pathDependencies,
+      writeSet,
+      workspaceIndex: mergeWorkspaceIncrementalIndex(previousIndex, currentIndex),
+    };
   }
 
   /** 后向校验：本事务开始后提交的事务，以及绕过事务直接写入主工作区的改动。 */

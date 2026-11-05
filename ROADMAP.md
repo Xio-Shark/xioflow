@@ -1,5 +1,22 @@
 # xioflow 路线图与优化流程
 
+## XIO-ISA v1 当前边界（Gate 0，2026-11-02）
+
+本路线图的当前主线是本地、嵌入式的 Node.js/POSIX 执行内核：参考实现
+是单个宿主进程内运行的 TypeScript 包，支持 Node.js `>=22.13` 的 Linux
+和 macOS；WSL2 只按 Linux driver 实际暴露的能力报告。Windows、远程执行
+和同一工作区的跨进程仲裁不属于 v1 关键路径，历史设计只作为复活参考。
+
+Core、stdlib、adapter、research 四层的职责和 issue 路由以
+[XIO-ISA v1 scope](spec/isa-v1/scope.md) 为准；无法归类的需求进入
+[RFC 队列](spec/rfc/README.md)，不能直接扩展稳定内核。
+
+ISA version、schema version、driver capability version 和 package version
+各自独立；`xio/1`、`xio/1.0`、`xio/1.1` 与未知 minor 的规则见
+[XIO-ISA v1 versioning](spec/isa-v1/versioning.md)。
+
+> **2026-11-03 已验证的预览增量（未发布）**：SDK `@xioflow/kernel/isa`、CLI `plan`/`execute` 和 MCP `execute` 共用入口适配；plan 不取得域，默认只作结构检查，副作用需宿主显式绑定既有 Run/capability。当前 durable opcode 仅 snapshot/rollback/status/health，其余及 transaction 保持 unsupported。MCP 取消阻止 binding 后及后续派发，不伪造已派发 snapshot 的停止。Linux 结果保留 `unreapedPids`，区分执行停止与 PID 被父进程收集。`pnpm test` 已分开 Vitest 与七个本地 Node 研究套件；conformance 报告分列可运行、目录声明和 unsupported。证据见[adapter 预览](audit/reports/isa-adapter-preview-2026-11-03.md)、[测试编排](audit/reports/test-orchestration-2026-11-03.md)与[conformance 报告](audit/reports/conformance-evidence-2026-11-03.md)。这些增量不等于 I-09、AD 全组、Q-08 或稳定发布门禁完成；24h/7d、平台与采用门仍需独立证据。
+
 > **2026-10-13 方向裁决（晚，优先于当日早间条目）**：①Rust 核心、语言绑定与 daemon/多客户端（原 P2、P4，及 P1 中的 Rust 夹具）**放弃**，归档理由与复活条件见[附录 A](#附录-a已放弃方向2026-10-13)；②P1 拆分：**P1a（协议 JSON Schema、schema v1 迁移、黑盒 conformance、TS stdio 适配器、英文规范补齐）解冻进主线**——契约是语言无关性的期权，砍实现不砍可移植契约；P1b（Rust 版 xf-fixture）删除，夹具沿用现有 TS 实现（`audit/fixture/xf-fixture.mjs`）；③AgentRuntime 以「调度 vs 策略」线为边界（ARCHITECTURE 裁决 6 修订）生长为轻量调度框架：准入/预算/取消/生命周期/checkpoint/证据门控可长，模型协议/提示词/任务分解/验收/业务编排永不进入内核；④仲裁范围如实收窄为单宿主进程（ARCHITECTURE 裁决 3 修订）：跨进程接入同一工作区显式失败（`DomainLockedError`），worktree 分域是参考模式。
 
 > **2026-10-13 主线调整：执行内核作为共同基石。** 用户要求以创新与实用价值为目标，优先建立多个上层产品可以共同依赖的内核。评价依据是契约正确性、隔离、故障恢复、可嵌入性和长期可维护性。下面保留的历史冻结、采用门和实验安排，不覆盖本条方向。

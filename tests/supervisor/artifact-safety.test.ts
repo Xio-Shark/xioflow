@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -169,6 +170,45 @@ describe('artifact ownership and path boundaries', () => {
     if (replaced) expect(fs.readFileSync(spill, 'utf8')).toBe('user replacement');
   });
 
+  it('persists artifact ownership facts and marks an expired record deleted', () => {
+    const opId = 'retention-artifact';
+    const store = domain.getStore();
+    store.registerOperationIntent({
+      id: opId, runId: 'run', kind: 'process', name: 'retention', inputFingerprint: 'test', requiredResources: [], status: 'active',
+    }, domain.domainId);
+    const body = Buffer.from('retention payload');
+    const file = artifactPath(artifacts, opId, '-payload.bin');
+    const artifact = writeArtifact(file, body);
+    const digest = crypto.createHash('sha256').update(body).digest('hex');
+    recordArtifactCreated(domain, opId, artifact, {
+      creatingInstructionId: 'instruction-retention',
+      ttlMs: 1,
+      sensitivity: 'secret',
+      encryptionState: 'encrypted',
+      sha256: digest,
+      sizeBytes: body.length,
+    });
+    store.recordOperationResult(opId, {
+      kind: 'process', status: 'failed', exitCode: 1, signal: null, stdout: '', stderr: '', isTruncated: false,
+      identityVerification: 'cannot_determine', durationMs: 0, completedAt: new Date().toISOString(),
+    });
+
+    const before = store.getArtifact(file, domain.domainId);
+    expect(before).toMatchObject({
+      ownerOperationId: opId,
+      creatingInstructionId: 'instruction-retention',
+      sha256: digest,
+      sizeBytes: body.length,
+      sensitivity: 'secret',
+      encryptionState: 'encrypted',
+      deletionState: 'present',
+    });
+    const result = supervisor.pruneArtifacts({ nowMs: Date.now() + 1000 });
+    expect(result.deleted).toContain(file);
+    expect(fs.existsSync(file)).toBe(false);
+    expect(store.getArtifact(file, domain.domainId)).toMatchObject({ deletionState: 'deleted', deletionReason: 'retention_expired' });
+  });
+
   it('cleans only the just-created spill if persisting its ownership fails', async () => {
     const store = domain.getStore();
     const record = store.recordEventAndTransitionState.bind(store);
@@ -270,14 +310,34 @@ describe('artifact ownership and path boundaries', () => {
     expect(domain.getStore().getOperation('snapshot-collision')?.result?.status).toBe('failed');
   });
 
-  it('never writes or cleans up an outside manifest for a traversal snapshot ID', async () => {
+  it('keeps an opaque traversal snapshot ID within owned artifacts through capture and prune', async () => {
     const repo = repository();
+    const opId = '../snapshot';
     const victim = path.join(domain.domainPath, 'snapshot-ignored.manifest');
-    fs.writeFileSync(victim, 'user data');
-    await expect(supervisor.captureSnapshot({ runId: 'run', opId: '../snapshot', roots: [repo], trackIgnored: 'manifest' }))
-      .rejects.toThrow(); // Git rejects traversal in a ref name; manifest handling must still remain safe.
-    expect(fs.readFileSync(victim, 'utf8')).toBe('user data');
-    expect(fs.readdirSync(artifacts)).toEqual([]);
+    const victimBytes = Buffer.from('user data\0\n');
+    fs.writeFileSync(victim, victimBytes);
+    const victimIdentity = fs.lstatSync(victim);
+    const result = await supervisor.captureSnapshot({ runId: 'run', opId, roots: [repo], trackIgnored: 'manifest' });
+    expect(result.status).toBe('succeeded');
+    expect(result.snapshot?.id).toBe(opId);
+    const manifest = ignoredManifestPath(domain.domainPath, opId);
+    expect(path.dirname(manifest)).toBe(artifacts);
+    expect(manifest).not.toBe(victim);
+    expect(fs.lstatSync(manifest).isFile()).toBe(true);
+    expect(domain.getStore().getArtifact(manifest, domain.domainId)).toMatchObject({
+      ownerOperationId: opId, creatingInstructionId: opId, path: manifest, deletionState: 'present',
+    });
+    expect(readIgnoredManifest(domain.domainPath, opId, result.snapshot!.ignoredManifestDigest!))
+      .toEqual([expect.objectContaining({ path: fs.realpathSync(path.join(repo, 'ignored.txt')) })]);
+    expect(fs.readFileSync(victim)).toEqual(victimBytes);
+    expect(supervisor.pruneArtifacts().retained).toContain(manifest);
+    expect(fs.readFileSync(victim)).toEqual(victimBytes);
+    expect(await supervisor.pruneSnapshots([opId])).toEqual([opId]);
+    expect(fs.existsSync(manifest)).toBe(false);
+    expect(domain.getStore().getArtifact(manifest, domain.domainId)?.deletionState).toBe('deleted');
+    expect(domain.getStore().getSnapshot(opId)).toBeNull();
+    expect(fs.readFileSync(victim)).toEqual(victimBytes);
+    expect(fs.lstatSync(victim).ino).toBe(victimIdentity.ino);
   });
 
   it('keeps nested snapshot IDs within artifacts through capture, retention and prune', async () => {

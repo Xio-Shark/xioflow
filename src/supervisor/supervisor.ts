@@ -23,6 +23,7 @@ import { ServiceSupervisor } from './service.js';
 import {
   admitProcessScope,
   assertBudgetSupported,
+  assertSecretResolverSupported,
   withHardLimits,
   assertRunAcceptsOperations,
   resolveConfinementDriver,
@@ -36,10 +37,13 @@ import * as snapshotOps from './snapshot-ops.js';
 import { rollback } from './rollback.js';
 import { ReadTracker, evaluateReadEvidence, readEvidencePath } from './read-evidence.js';
 import { domainCoordination } from './domain-coordination.js';
+import { createRecoveryEvidence } from '../recovery/evidence.js';
+import { createRequestConfigSnapshot } from '../config/snapshot.js';
 import {
   CommitOptions,
   CommitResult,
   TransactionEffects,
+  WorkspaceIndexHints,
   WorkspaceTransaction,
   WorkspaceTransactions,
 } from '../workspace/transactions.js';
@@ -170,8 +174,8 @@ export class ProcessSupervisor {
     return this.workspaceTransactions().begin(options);
   }
 
-  public async inspectWorkspaceTransaction(txId: string): Promise<TransactionEffects> {
-    return this.workspaceTransactions().inspect(txId);
+  public async inspectWorkspaceTransaction(txId: string, options?: { workspaceIndex?: WorkspaceIndexHints }): Promise<TransactionEffects> {
+    return this.workspaceTransactions().inspect(txId, options);
   }
 
   public async commitWorkspaceTransaction(txId: string, options?: CommitOptions): Promise<CommitResult> {
@@ -243,6 +247,9 @@ export class ProcessSupervisor {
       timeoutMs: rest.timeoutMs,
       resourceBudget: rest.resourceBudget,
       capabilityId: rest.capabilityId,
+      capabilityWorkspace: rest.capabilityWorkspace,
+      capabilitySecretRefs: rest.capabilitySecretRefs,
+      capabilityPolicyVersion: rest.capabilityPolicyVersion,
     });
     const opId = `${opIdPrefix ?? 'tree-cmd'}:${treeCommandFingerprint.slice(0, 24)}`;
     const result = await this.executeProcess({
@@ -262,6 +269,7 @@ export class ProcessSupervisor {
    */
   public async executeProcess(options: ExecuteProcessOptions): Promise<ProcessExecutionResult> {
     validateExecuteProcessOptions(options);
+    assertSecretResolverSupported(this.driver, options.command);
     // 0. 准入：capability 范围、写入限制、hard 预算能力、调用 Run 状态
     const { mutationRoots, capAdmission } = admitProcessScope(this.domain, options);
     const confinementDriver = resolveConfinementDriver(options, this.confinementDriver);
@@ -271,6 +279,28 @@ export class ProcessSupervisor {
     const command = withHardLimits(wrapped, options.resourceBudget);
     const inputFingerprint = options.inputFingerprint || computeInputFingerprint(options);
     assertRunAcceptsOperations(this.domain, options.runId, options.opId);
+    const configSnapshot = createRequestConfigSnapshot({
+      driver: this.driver,
+      capabilityId: options.capabilityId,
+      capabilityPolicyVersion: options.capabilityPolicyVersion,
+      config: {
+        command: {
+          execPath: options.command.execPath,
+          cwd: options.command.cwd,
+          inheritEnv: options.command.inheritEnv ?? false,
+          envKeys: options.command.envWhiteList ? Object.keys(options.command.envWhiteList).sort() : [],
+          secretEnvKeys: options.command.secretEnv ? Object.keys(options.command.secretEnv).sort() : [],
+        },
+        timeoutMs: options.timeoutMs,
+        maxOutputBytes: options.maxOutputBytes,
+        drainTimeoutMs: options.drainTimeoutMs,
+        waitTimeoutMs: options.waitTimeoutMs,
+        resourceBudget: options.resourceBudget,
+        confinement: typeof options.confinement === 'string' ? options.confinement : options.confinement === true ? 'default' : undefined,
+        trackReads: options.trackReads ? { roots: [...options.trackReads.roots].sort(), statCaches: options.trackReads.statCaches } : undefined,
+      },
+    });
+    this.domain.getStore().bindRunConfigSnapshot(options.runId, configSnapshot);
 
     // 1–2. 幂等重放（ARCHITECTURE §3.7）：在飞加入，已持久化原样返回
     const inFlight = this.activeOperations.get(options.opId);
@@ -295,6 +325,8 @@ export class ProcessSupervisor {
       timeoutMs: options.timeoutMs,
       resourceBudget: options.resourceBudget,
       spawnGated: this.driver.capabilities.gatedSpawn === true,
+      recoveryEvidence: createRecoveryEvidence(this.driver),
+      configSnapshot,
       status: 'pending',
     };
     const readTracking = options.trackReads ? this.readTracker.open(options.opId, options.trackReads) : undefined;
@@ -481,7 +513,7 @@ export class ProcessSupervisor {
     return evaluateReadEvidence(evidence);
   }
 
-  public pruneArtifacts(filter?: { olderThanMs?: number; prefix?: string }): {
+  public pruneArtifacts(filter?: { olderThanMs?: number; prefix?: string; nowMs?: number }): {
     deleted: string[];
     retained: string[];
   } {

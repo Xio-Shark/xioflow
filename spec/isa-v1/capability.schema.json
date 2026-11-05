@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xio://schema/isa-v1/capability",
+  "title": "XIO-ISA v1 capability",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "issuer", "policyVersion", "reason", "scope", "limits", "expiresAt", "epoch"],
+  "properties": {
+    "id": { "$ref": "#/$defs/CapabilityRef" },
+    "issuer": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "policyVersion": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "scope": { "$ref": "#/$defs/CapabilityScope" },
+    "limits": { "$ref": "#/$defs/CapabilityLimits" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "parentId": { "$ref": "#/$defs/CapabilityRef" },
+    "epoch": { "type": "integer", "minimum": 0 }
+  },
+  "$defs": {
+    "CapabilityRef": {
+      "type": "string",
+      "pattern": "^cap:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "WorkspaceRef": {
+      "type": "string",
+      "pattern": "^workspace:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "ArtifactRef": {
+      "type": "string",
+      "pattern": "^artifact:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "ProcessRef": {
+      "type": "string",
+      "pattern": "^process:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "SnapshotRef": {
+      "type": "string",
+      "pattern": "^snapshot:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "TransactionRef": {
+      "type": "string",
+      "pattern": "^transaction:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "LeaseRef": {
+      "type": "string",
+      "pattern": "^lease:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "ResumeToken": {
+      "type": "string",
+      "pattern": "^resume:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "SecretRef": {
+      "type": "string",
+      "pattern": "^secret:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "PathPattern": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "CapabilityScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["opcodes", "workspaces", "paths", "secrets"],
+      "properties": {
+        "opcodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(\\.[a-z][a-z0-9]*)+$"
+          }
+        },
+        "workspaces": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/WorkspaceRef" }
+        },
+        "paths": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/PathPattern" }
+        },
+        "secrets": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/SecretRef" }
+        }
+      }
+    },
+    "CapabilityLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpuMs", "memoryBytes", "outputBytes", "concurrentOps", "processes"],
+      "properties": {
+        "cpuMs": { "type": "integer", "minimum": 0, "maximum": 315360000000 },
+        "memoryBytes": { "type": "integer", "minimum": 0, "maximum": 1099511627776 },
+        "outputBytes": { "type": "integer", "minimum": 0, "maximum": 107374182400 },
+        "concurrentOps": { "type": "integer", "minimum": 0, "maximum": 4096 },
+        "processes": { "type": "integer", "minimum": 0, "maximum": 65536 }
+      }
+    }
+  }
+}

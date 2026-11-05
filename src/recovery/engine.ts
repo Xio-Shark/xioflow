@@ -9,6 +9,7 @@ import {
 } from '../types.js';
 import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
 import { deriveRollbackCoverage } from '../supervisor/rollback.js';
+import { assertRequestConfigSnapshot } from '../config/snapshot.js';
 
 export interface RecoveredServiceSummary {
   serviceId: string;
@@ -85,6 +86,23 @@ export class RecoveryEngine {
     };
 
     for (const op of unfinishedOps) {
+      if (op.configSnapshot) {
+        try {
+          assertRequestConfigSnapshot(op.configSnapshot);
+        } catch (error) {
+          const result: IndeterminateResult = {
+            kind: 'indeterminate',
+            status: 'indeterminate',
+            reason: `Persisted request config snapshot is invalid: ${error instanceof Error ? error.message : String(error)}`,
+            recoveryGuidance: 'Inspect the immutable request binding and adjudicate the operation before releasing its lease.',
+            durationMs: 0,
+            completedAt: new Date().toISOString(),
+          };
+          store.recordOperationResult(op.id, result, false);
+          report.recoveredOperations.push({ opId: op.id, action: 'isolated_indeterminate', resourcesReleased: false });
+          continue;
+        }
+      }
       if (op.kind === 'rollback') {
         const snapshotId = op.outputRef || op.name.replace(/^rollback:/, '');
         const snapshot = store.getSnapshot(snapshotId);
@@ -224,6 +242,7 @@ export class RecoveryEngine {
               evidence: 'unobserved',
               isTruncated: false,
               identityVerification: 'is_original_process',
+              ...(stopResult.unreapedPids?.length ? { unreapedPids: stopResult.unreapedPids } : {}),
               durationMs: calcDurationMs(),
               completedAt: new Date().toISOString(),
             };
@@ -260,9 +279,24 @@ export class RecoveryEngine {
           // 证据齐全时才按 pgid 定向清场；清不掉如实隔离。
           const pgid = op.processIdentity.pgid;
           let reapedOrphans = false;
-          if (op.processIdentity.cgroupPath && this.driver.capabilities.descendantEnumeration === 'cgroup') {
-            // 专属 cgroup 装着整棵树（含换了进程组的逃逸者），且只属于这个操作：不需要 pgid 复用核验
-            const tree = this.driver.settleTree ? await this.driver.settleTree(op.processIdentity, 0) : 'unknown';
+          let unreapedPids: number[] | undefined;
+          const originalDescendantEnumeration = op.recoveryEvidence?.driverCapabilities.descendantEnumeration;
+          if (op.processIdentity.cgroupPath && originalDescendantEnumeration === 'cgroup') {
+            // 只使用 intent 时持久化的原始 containment 能力；恢复 driver 的 capabilities 不能证明旧 intent。
+            if (!this.driver.settleTree) {
+              const indetResult: IndeterminateResult = {
+                kind: 'indeterminate',
+                status: 'indeterminate',
+                reason: 'Original intent used cgroup containment but the recovery driver cannot observe cgroup tree settlement',
+                recoveryGuidance: 'Inspect the persisted containment path and adjudicate the operation before releasing leases.',
+                durationMs: calcDurationMs(),
+                completedAt: new Date().toISOString(),
+              };
+              store.recordOperationResult(op.id, indetResult, false);
+              report.recoveredOperations.push({ opId: op.id, action: 'isolated_indeterminate', resourcesReleased: false });
+              continue;
+            }
+            const tree = await this.driver.settleTree(op.processIdentity, 0);
             if (tree !== 'empty') {
               const reaped = await this.driver.terminate(op.processIdentity, 2000);
               if (reaped.stopped !== 'confirmed_stopped') {
@@ -279,7 +313,20 @@ export class RecoveryEngine {
                 continue;
               }
               reapedOrphans = true;
+              unreapedPids = reaped.unreapedPids;
             }
+          } else if (op.processIdentity.cgroupPath && !op.recoveryEvidence) {
+            const indetResult: IndeterminateResult = {
+              kind: 'indeterminate',
+              status: 'indeterminate',
+              reason: 'Containment identity exists without original driver evidence; recovery cannot infer cgroup semantics from the replacement driver',
+              recoveryGuidance: 'Inspect the recorded containment path and adjudicate the operation before releasing leases.',
+              durationMs: calcDurationMs(),
+              completedAt: new Date().toISOString(),
+            };
+            store.recordOperationResult(op.id, indetResult, false);
+            report.recoveredOperations.push({ opId: op.id, action: 'isolated_indeterminate', resourcesReleased: false });
+            continue;
           } else if (pgid !== undefined && this.isGroupAlive(pgid)) {
             // N2 检查项 1：bootId 跨宿主重启核验
             if (op.processIdentity.bootId && this.driver.readBootId) {
@@ -361,6 +408,7 @@ export class RecoveryEngine {
               continue;
             }
             reapedOrphans = true;
+            unreapedPids = reaped.unreapedPids;
           }
           const deadResult: ProcessOperationResult = {
             kind: 'process',
@@ -368,11 +416,12 @@ export class RecoveryEngine {
             exitCode: null,
             signal: null,
             stdout: '',
-            stderr: reapedOrphans ? 'orphaned descendants were reaped during recovery' : '',
+            stderr: reapedOrphans ? 'orphaned descendants were confirmed stopped during recovery' : '',
             evidence: 'unobserved',
             // 进程已不在，但它是成功还是失败无人看见：不把「未知」写成「失败」
             terminationReason: 'exit_unobserved',
             residualProcessesReaped: reapedOrphans,
+            ...(unreapedPids?.length ? { unreapedPids } : {}),
             isTruncated: false,
             identityVerification: 'not_original_process',
             durationMs: calcDurationMs(),

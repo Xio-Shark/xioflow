@@ -3,6 +3,8 @@ import path from 'node:path';
 
 export default defineConfig({
   test: {
+    // Research fixtures under audit/interaction use node:test and run separately.
+    include: ['tests/**/*.{test,spec}.?(c|m)[jt]s?(x)'],
     environment: 'node',
     testTimeout: 20000,
     fileParallelism: false,

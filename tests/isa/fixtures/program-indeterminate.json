@@ -1,0 +1,19 @@
+{
+  "isa": "xio/1",
+  "requestId": "golden-indeterminate-request",
+  "programId": "golden-indeterminate",
+  "mode": "pipeline",
+  "capability": "cap:golden",
+  "workspace": "workspace:root",
+  "instructions": [
+    {
+      "id": "signal",
+      "op": "proc.signal",
+      "args": { "process": "process:golden-indeterminate.worker", "signals": ["SIGTERM"] },
+      "dependsOn": [],
+      "precondition": [],
+      "output": "signal-result",
+      "opId": "op:golden-indeterminate.signal"
+    }
+  ]
+}

@@ -18,6 +18,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./isa": {
+      "types": "./dist/isa/public.d.ts",
+      "default": "./dist/isa/public.js"
+    },
     "./testing": {
       "types": "./dist/testing/contract-suite.d.ts",
       "default": "./dist/testing/contract-suite.js"
@@ -57,9 +61,16 @@
     "build": "tsc -p tsconfig.build.json",
     "build:native": "node scripts/build-native.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "node scripts/test.mjs",
     "conformance": "node conformance/plain-selfcheck.mjs",
+    "conformance:report": "pnpm build && node scripts/conformance-report.mjs",
+    "check:isa-registry": "node scripts/check-isa-registry.mjs",
+    "check:isa-schemas": "node scripts/check-isa-schemas.mjs",
+    "check:capability-matrix": "node scripts/check-capability-matrix.mjs",
+    "generate:isa-opcodes": "node scripts/generate-isa-opcodes.mjs",
+    "generate:isa-registry": "node scripts/generate-isa-registry.mjs",
     "check:tla": "node scripts/check-tla.mjs",
+    "benchmark:isa": "pnpm build && node scripts/isa-benchmark.mjs",
     "verify:package": "node scripts/verify-package.mjs",
     "prepack": "npm run build && npm run build:native"
   },

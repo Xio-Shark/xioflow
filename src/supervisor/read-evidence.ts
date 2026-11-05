@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
-import { artifactPath, readArtifact, writeArtifact } from '../artifacts.js';
+import { artifactPath, readArtifact, removeOwnedArtifact, writeArtifact, type ArtifactFacts, type OwnedArtifact } from '../artifacts.js';
 import { isPathContained } from '../capability/path-utils.js';
 import { EvidenceStatus, ReadEvidence } from '../types.js';
 import { probeReadTracking, resetAccessTime, wasAccessed } from '../workspace/read-tracking.js';
@@ -121,7 +121,7 @@ export interface ReadTrackingSession {
   /** 在进程启动之前调用：归一访问时间。 */
   begin(): void;
   /** 在进程退出之后调用：收集读集、写证据文件，返回放进操作结果的摘要。不抛错。 */
-  collect(artifactsDir: string): ReadEvidence;
+  collect(artifactsDir: string, onArtifactCreated?: (artifact: OwnedArtifact, facts: ArtifactFacts) => void): ReadEvidence;
   close(): void;
 }
 
@@ -152,7 +152,7 @@ export class ReadTracker {
           if (observed.get(root)) normalizeAccessTimesOnePass(root);
         }
       },
-      collect: (artifactsDir) => {
+      collect: (artifactsDir, onArtifactCreated) => {
         try {
           const perRoot: RootEvidence[] = roots.map((root) => {
             const { reads, tree, pathDependencies } = scan(root);
@@ -162,7 +162,19 @@ export class ReadTracker {
           const file: EvidenceFile = { version: 1, opId, statCaches: base.statCaches, roots: perRoot };
           const ref = readEvidencePath(artifactsDir, opId);
           // 全树清单占了大头，路径文本压缩比高
-          writeArtifact(ref, zlib.gzipSync(JSON.stringify(file)));
+          const data = zlib.gzipSync(JSON.stringify(file));
+          const artifact = writeArtifact(ref, data);
+          try {
+            onArtifactCreated?.(artifact, {
+              sha256: sha(data),
+              sizeBytes: data.length,
+            });
+          } catch (error) {
+            try { removeOwnedArtifact(artifact); } catch (cleanupError) {
+              throw new AggregateError([error, cleanupError], 'Read evidence ownership recording and cleanup both failed', { cause: error });
+            }
+            throw error;
+          }
           const tracked = perRoot.every((r) => r.reads !== null);
           return {
             ...base,

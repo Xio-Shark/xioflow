@@ -6,6 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ExecutionDomain } from '../domain.js';
+import { createConfigOverlay, ConfigOverlay } from '../config/overlay.js';
+import { createRequestConfigSnapshot } from '../config/snapshot.js';
 import { detectAvailableConfinementDrivers } from '../confinement/detector.js';
 import { LandlockConfinementDriver } from '../confinement/landlock.js';
 import { CgroupPlatformDriver } from '../driver/cgroup-driver.js';
@@ -470,7 +472,23 @@ export function interceptAgentUpstream(params: {
       : explicitUpstream
         ? { ...explicitUpstream }
         : {};
-  const backups: Array<{ file: string; content: string }> = [];
+  const overlays: ConfigOverlay[] = [];
+
+  const overlayConfig = (file: string, content: string): string => {
+    const overlay = createConfigOverlay(file, content);
+    overlays.push(overlay);
+    return overlay.overlayPath;
+  };
+
+  const cleanupOverlays = (): void => {
+    const errors: unknown[] = [];
+    while (overlays.length > 0) {
+      const overlay = overlays.pop()!;
+      try { overlay.cleanup(); } catch (error) { errors.push(error); }
+    }
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, 'Config overlay cleanup failed');
+  };
 
   const normalizeUpstream = (rawUrl: string): string => {
     return rawUrl.replace(/\/+$/, '');
@@ -504,9 +522,9 @@ export function interceptAgentUpstream(params: {
     }
   }
 
-  // Inspect OPENCODE_CONFIG JSON file if present
-  if (rewrittenEnv.OPENCODE_CONFIG && fs.existsSync(rewrittenEnv.OPENCODE_CONFIG)) {
-    try {
+  try {
+    // Inspect OPENCODE_CONFIG JSON file if present
+    if (rewrittenEnv.OPENCODE_CONFIG && fs.existsSync(rewrittenEnv.OPENCODE_CONFIG)) {
       const file = rewrittenEnv.OPENCODE_CONFIG;
       const content = fs.readFileSync(file, 'utf8');
       const match = /"baseURL"\s*:\s*"(https?:\/\/[^"]+)"/.exec(content);
@@ -514,15 +532,12 @@ export function interceptAgentUpstream(params: {
         const extracted = normalizeUpstream(match[1]).replace(/\/v1$/, '');
         upstreamMap['chat-completions'] ??= extracted;
         upstreamMap.default ??= extracted;
-        backups.push({ file, content });
-        fs.writeFileSync(file, content.replace(match[1], `${proxyBaseUrl}/v1`));
+        rewrittenEnv.OPENCODE_CONFIG = overlayConfig(file, content.replace(match[1], `${proxyBaseUrl}/v1`));
       }
-    } catch {}
-  }
+    }
 
-  // Inspect XIO_CONFIG TOML/JSON file if present
-  if (rewrittenEnv.XIO_CONFIG && fs.existsSync(rewrittenEnv.XIO_CONFIG)) {
-    try {
+    // Inspect XIO_CONFIG TOML/JSON file if present
+    if (rewrittenEnv.XIO_CONFIG && fs.existsSync(rewrittenEnv.XIO_CONFIG)) {
       const file = rewrittenEnv.XIO_CONFIG;
       const content = fs.readFileSync(file, 'utf8');
       const match = /(?:base_url\s*=\s*|"base(?:Url|_url|URL)"\s*:\s*)"(https?:\/\/[^"]+)"/.exec(content);
@@ -530,10 +545,12 @@ export function interceptAgentUpstream(params: {
         const extracted = normalizeUpstream(match[1]).replace(/\/v1$/, '');
         upstreamMap['chat-completions'] ??= extracted;
         upstreamMap.default ??= extracted;
-        backups.push({ file, content });
-        fs.writeFileSync(file, content.replace(match[1], `${proxyBaseUrl}/v1`));
+        rewrittenEnv.XIO_CONFIG = overlayConfig(file, content.replace(match[1], `${proxyBaseUrl}/v1`));
       }
-    } catch {}
+    }
+  } catch (error) {
+    try { cleanupOverlays(); } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Config interception and overlay cleanup failed'); }
+    throw error;
   }
 
   // Default real provider endpoints if none were overridden
@@ -552,11 +569,7 @@ export function interceptAgentUpstream(params: {
     rewrittenEnv,
     upstreamMap,
     restoreConfigs() {
-      for (const b of backups) {
-        try {
-          fs.writeFileSync(b.file, b.content);
-        } catch {}
-      }
+      cleanupOverlays();
     },
   };
 }
@@ -1097,6 +1110,10 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
   await Promise.race([watchdogConnected, new Promise<void>((resolve) => setTimeout(resolve, 1500))]);
 
   const callerEnv = options.env ?? process.env;
+  const originalConfigPaths = {
+    opencode: callerEnv.OPENCODE_CONFIG,
+    xio: callerEnv.XIO_CONFIG,
+  };
   const originalPath = callerEnv.PATH ?? process.env.PATH ?? '/usr/bin:/bin';
   const resolvedExec = resolveExecutable(options.command, originalPath) ?? options.command;
 
@@ -1145,6 +1162,28 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
     envWhiteList: childEnv,
     stdinMode: 'stream',
   };
+  let requestConfigSnapshot: ReturnType<typeof createRequestConfigSnapshot>;
+  try {
+    requestConfigSnapshot = createRequestConfigSnapshot({
+      driver,
+      config: {
+        kind: 'wrap-agent',
+        command: {
+          execPath: resolvedExec,
+          cwd,
+          envKeys: Object.keys(childEnv).sort(),
+          overlayConfig: {
+            opencode: Boolean(rewrittenEnv.OPENCODE_CONFIG && rewrittenEnv.OPENCODE_CONFIG !== originalConfigPaths.opencode),
+            xio: Boolean(rewrittenEnv.XIO_CONFIG && rewrittenEnv.XIO_CONFIG !== originalConfigPaths.xio),
+          },
+        },
+        upstreamProtocols: Object.keys(upstreamMap).sort(),
+      },
+    });
+  } catch (error) {
+    try { restoreConfigs(); } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Config snapshot and overlay cleanup failed'); }
+    throw error;
+  }
 
   let handle: Awaited<ReturnType<PlatformDriver['spawn']>> | undefined;
   let stdout = '';
@@ -1163,6 +1202,7 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
   process.on('SIGTERM', onSigTerm);
 
   try {
+    store.bindRunConfigSnapshot(runId, requestConfigSnapshot);
     handle = await driver.spawn(agentCommand);
     sendToWatchdog({ type: 'watch', pid: handle.identity.pid });
     if ((handle.rawProcess as any)?.helperPid) {
@@ -1235,16 +1275,19 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
       residualProcessesReaped,
     };
   } finally {
+    const cleanupErrors: unknown[] = [];
     process.off('SIGINT', onSigInt);
     process.off('SIGTERM', onSigTerm);
-    restoreConfigs();
-    sendToWatchdog({ type: 'shutdown' });
-    await new Promise<void>((resolve) => setTimeout(resolve, 40));
-    watchdogServer.closeAllConnections();
-    await new Promise<void>((resolve) => watchdogServer.close(() => resolve()));
-    await proxy.close();
+    try { restoreConfigs(); } catch (error) { cleanupErrors.push(error); }
+    try { sendToWatchdog({ type: 'shutdown' }); } catch (error) { cleanupErrors.push(error); }
+    try { await new Promise<void>((resolve) => setTimeout(resolve, 40)); } catch (error) { cleanupErrors.push(error); }
+    try { watchdogServer.closeAllConnections(); } catch (error) { cleanupErrors.push(error); }
+    try { await new Promise<void>((resolve) => watchdogServer.close(() => resolve())); } catch (error) { cleanupErrors.push(error); }
+    try { await proxy.close(); } catch (error) { cleanupErrors.push(error); }
     if (ownsDomain) {
-      domain.close();
+      try { domain.close(); } catch (error) { cleanupErrors.push(error); }
     }
+    if (cleanupErrors.length === 1) throw cleanupErrors[0];
+    if (cleanupErrors.length > 1) throw new AggregateError(cleanupErrors, 'Wrap cleanup failed');
   }
 }

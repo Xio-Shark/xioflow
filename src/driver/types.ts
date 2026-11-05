@@ -1,4 +1,17 @@
 import { IdentityVerificationResult, ResourceBudget } from '../types.js';
+import type { SecretRef } from '../isa/types.js';
+
+export interface SecretResolutionContext {
+  /** Capability binding supplied by the supervisor; drivers may require it. */
+  capabilityId?: string;
+}
+
+export type SecretResolver = (
+  ref: SecretRef,
+  context: SecretResolutionContext,
+) => Promise<string> | string;
+
+export interface SpawnContext extends SecretResolutionContext {}
 
 export interface StructuredCommand {
   execPath: string;
@@ -21,10 +34,15 @@ export interface StructuredCommand {
    */
   envWhiteList?: Record<string, string>;
   /**
-   * 未提供 envWhiteList 时是否继承宿主 process.env，默认 true。
-   * 设为 false 时子进程得到空环境（故障关闭，适合安全敏感调用方）。
+   * 仅在显式设为 true 时继承宿主 process.env，默认 false。
+   * 显式 envWhiteList 优先于继承策略；不继承时子进程得到空环境。
    */
   inheritEnv?: boolean;
+  /**
+   * 通过平台 driver 解析的秘密环境变量。值只能是 SecretRef，绝不接受明文秘密。
+   * driver 会在内存中注入值，并在输出流离开 driver 前脱敏。
+   */
+  secretEnv?: Record<string, SecretRef>;
   /**
    * OS 级硬限制（仅在 `resourceBudget.enforcement: 'hard'` 且驱动声明了对应能力时由监督器填写）。
    * 驱动必须在进程能够 fork 之前施加，否则显式拒绝启动。
@@ -70,6 +88,8 @@ export interface StopProcessResult {
   scope: 'direct_child' | 'process_group' | 'containment_cgroup' | 'subreaper_tree' | 'tracked_tree' | 'unknown';
   // containment_cgroup：进程专属 cgroup 的 cgroup.events 报告 populated 0，整棵树（含逃逸者）已空
   residualPids?: number[];         // 存疑的残留进程 PID
+  /** Observed zombies: execution stopped, but their parent has not collected the PID entries. */
+  unreapedPids?: number[];
   errorDetails?: string;
 }
 
@@ -108,7 +128,9 @@ export interface PlatformCapabilities {
 export interface PlatformDriver {
   name: string;
   capabilities: PlatformCapabilities;
-  spawn(command: StructuredCommand): Promise<ManagedProcessHandle>;
+  /** True only when this driver resolves SecretRef values inside its spawn boundary. */
+  readonly secretResolution?: boolean;
+  spawn(command: StructuredCommand, context?: SpawnContext): Promise<ManagedProcessHandle>;
   verifyIdentity(identity: ProcessIdentity): Promise<IdentityVerificationResult>;
   terminate(identity: ProcessIdentity, graceMs: number): Promise<StopProcessResult>;
   /**

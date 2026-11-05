@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -31,9 +31,23 @@ afterEach(() => {
 function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
+  } catch (error: any) {
+    if (error.code === 'ESRCH') return false;
+    if (error.code !== 'EPERM') throw error;
+  }
+  // Independent OS evidence: a zombie cannot execute or hold a pipe. Failed
+  // observation must fail the test rather than silently declaring it stopped.
+  try {
+    const state = execFileSync('ps', ['-p', String(pid), '-o', 'state='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (!/^[A-Za-z]/.test(state)) throw new Error(`Unknown OS process state for PID ${pid}: ${JSON.stringify(state)}`);
+    return !state.startsWith('Z');
+  } catch (error) {
+    try { process.kill(pid, 0); }
+    catch (probeError: any) { if (probeError.code === 'ESRCH') return false; }
+    throw error;
   }
 }
 
@@ -216,15 +230,23 @@ describe('P1: Dual-Boundary Wrap Gateway (Wire Proxy + Shell Shim)', () => {
     expect(intercepted.rewrittenEnv.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:9999');
     expect(intercepted.rewrittenEnv.GOOGLE_GEMINI_BASE_URL).toBe('http://127.0.0.1:9999');
     expect(intercepted.rewrittenArgs[2]).toContain('http://127.0.0.1:9999/v1');
-    expect(JSON.parse(fs.readFileSync(opencodeCfg, 'utf8')).provider.local.options.baseURL).toBe(
+    expect(intercepted.rewrittenEnv.OPENCODE_CONFIG).not.toBe(opencodeCfg);
+    expect(intercepted.rewrittenEnv.XIO_CONFIG).not.toBe(xioCfg);
+    expect(JSON.parse(fs.readFileSync(intercepted.rewrittenEnv.OPENCODE_CONFIG!, 'utf8')).provider.local.options.baseURL).toBe(
       'http://127.0.0.1:9999/v1'
     );
-    expect(JSON.parse(fs.readFileSync(xioCfg, 'utf8')).providers.local.baseUrl).toBe('http://127.0.0.1:9999/v1');
+    expect(JSON.parse(fs.readFileSync(intercepted.rewrittenEnv.XIO_CONFIG!, 'utf8')).providers.local.baseUrl).toBe('http://127.0.0.1:9999/v1');
+    expect(JSON.parse(fs.readFileSync(opencodeCfg, 'utf8')).provider.local.options.baseURL).toBe(
+      'http://127.0.0.1:4100/v1'
+    );
+    expect(JSON.parse(fs.readFileSync(xioCfg, 'utf8')).providers.local.baseUrl).toBe('http://127.0.0.1:4200/v1');
 
     intercepted.restoreConfigs();
     expect(JSON.parse(fs.readFileSync(opencodeCfg, 'utf8')).provider.local.options.baseURL).toBe(
       'http://127.0.0.1:4100/v1'
     );
+    expect(fs.existsSync(intercepted.rewrittenEnv.OPENCODE_CONFIG!)).toBe(false);
+    expect(fs.existsSync(intercepted.rewrittenEnv.XIO_CONFIG!)).toBe(false);
   });
 
   it('supervises shell tool calls, reaps setsid orphans, bounds pipe-hold drain, and enforces timeouts', async () => {
@@ -352,7 +374,7 @@ console.log(JSON.stringify({ elapsedPipe, timedOutExit }));
     }
   });
 
-  it('reaps in-flight tool tree on SIGKILL via watchdog and injects indeterminate recovery notice on resume', async () => {
+  it('stops in-flight tool tree on SIGKILL via watchdog and injects indeterminate recovery notice on resume', async () => {
     const dir = makeTempDir();
     const domainPath = path.join(dir, '.xioflow-kernel');
     const effectFile = path.join(dir, 'effect.txt');
@@ -447,11 +469,11 @@ if (mode === 'first') {
       wrapper.kill('SIGKILL');
       await new Promise((r) => wrapper.once('exit', r));
 
-      // Wait briefly for the double-forked watchdog to detect socket EOF and reap the tool process
-      const reapDeadline = Date.now() + 3000;
+      // The watchdog must stop the tool. PID 1 may leave a non-executing zombie.
+      const stopDeadline = Date.now() + 3000;
       while (
         (isPidAlive(toolPid) || !readGatewayInterruptedTool(domainPath)?.reapedByWatchdog) &&
-        Date.now() < reapDeadline
+        Date.now() < stopDeadline
       ) {
         await new Promise((r) => setTimeout(r, 25));
       }

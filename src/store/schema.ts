@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS runs (
   started_at TEXT NOT NULL,
   ended_at TEXT,
   config_snapshot TEXT,
+  config_binding TEXT,
   FOREIGN KEY(task_id) REFERENCES tasks(id)
 );
 
@@ -49,6 +50,8 @@ CREATE TABLE IF NOT EXISTS operations (
   output_ref TEXT,
   process_identity TEXT,
   spawn_gated INTEGER CHECK (spawn_gated IN (0, 1)),
+  recovery_evidence TEXT,
+  config_snapshot TEXT,
   result TEXT,
   FOREIGN KEY(run_id) REFERENCES runs(id)
 );
@@ -69,7 +72,15 @@ CREATE TABLE IF NOT EXISTS journal_events (
   operation_id TEXT,
   type TEXT NOT NULL,
   payload TEXT NOT NULL,
-  timestamp TEXT NOT NULL
+  timestamp TEXT NOT NULL,
+  schema_version TEXT NOT NULL DEFAULT 'xio/event/1.0',
+  request_id TEXT,
+  program_id TEXT,
+  instruction_id TEXT,
+  op_id TEXT,
+  event TEXT NOT NULL DEFAULT 'legacy.event',
+  sensitivity TEXT NOT NULL DEFAULT 'internal',
+  created_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z'
 );
 
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -93,10 +104,34 @@ CREATE TABLE IF NOT EXISTS capabilities (
   parent_id TEXT,
   issued_by TEXT NOT NULL,
   scope TEXT NOT NULL,
+  policy_version TEXT NOT NULL DEFAULT 'legacy/0',
+  reason TEXT NOT NULL DEFAULT 'legacy-capability',
+  limits TEXT NOT NULL DEFAULT '{"cpuMs":315360000000,"memoryBytes":1099511627776,"outputBytes":107374182400,"concurrentOps":4096,"processes":65536}',
   epoch INTEGER NOT NULL,
   expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL,
   revoked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+  artifact_id TEXT PRIMARY KEY,
+  domain_id TEXT NOT NULL,
+  owner_operation_id TEXT,
+  creating_instruction_id TEXT,
+  path TEXT NOT NULL,
+  sha256 TEXT,
+  size_bytes INTEGER,
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  sensitivity TEXT NOT NULL CHECK (sensitivity IN ('public', 'internal', 'secret')),
+  encryption_state TEXT NOT NULL CHECK (encryption_state IN ('unknown', 'plaintext', 'encrypted')),
+  deletion_state TEXT NOT NULL CHECK (deletion_state IN ('present', 'deleted', 'unknown')),
+  dev TEXT NOT NULL,
+  ino TEXT NOT NULL,
+  birthtime_ns TEXT NOT NULL,
+  deleted_at TEXT,
+  deletion_reason TEXT,
+  UNIQUE(domain_id, path, dev, ino, birthtime_ns)
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_task_id ON runs(task_id);
@@ -109,4 +144,6 @@ CREATE INDEX IF NOT EXISTS idx_journal_events_domain_type_seq ON journal_events(
 CREATE INDEX IF NOT EXISTS idx_snapshots_domain ON snapshots(domain_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_journal_seq ON snapshots(journal_seq);
 CREATE INDEX IF NOT EXISTS idx_capabilities_domain ON capabilities(domain_id);
+CREATE INDEX IF NOT EXISTS idx_artifacts_domain_path ON artifacts(domain_id, path);
+CREATE INDEX IF NOT EXISTS idx_artifacts_domain_state ON artifacts(domain_id, deletion_state);
 `;

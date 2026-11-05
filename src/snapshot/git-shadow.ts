@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import util from 'node:util';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import {
   SnapshotDriver,
@@ -10,6 +11,15 @@ import {
 } from '../types.js';
 
 const execFileAsync = util.promisify(execFile);
+
+/** Opaque operation IDs are not Git ref components. Keep ordinary legacy refs readable. */
+function snapshotRefName(id: string): string {
+  const ordinary = /^[A-Za-z0-9][A-Za-z0-9._-]{0,179}$/u.test(id)
+    && !id.includes('..') && !id.endsWith('.') && !id.endsWith('.lock');
+  return ordinary
+    ? `refs/xioflow/snapshots/${id}`
+    : `refs/xioflow/encoded-snapshots/${createHash('sha256').update(Buffer.from(id, 'utf16le')).digest('hex')}`;
+}
 
 export interface GitShadowDriverOptions {
   execGitTimeoutMs?: number;
@@ -259,7 +269,7 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
       );
       const commitHash = commitOut.trim();
 
-      const refName = `refs/xioflow/snapshots/${snapshotId}`;
+      const refName = snapshotRefName(snapshotId);
       await this.git(repoRoot, ['update-ref', refName, commitHash]);
 
       this.snapshotRepos.set(snapshotId, repoRoot);
@@ -535,7 +545,7 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
           `Cannot prune snapshot ${id}: source repository root unknown (pass options.repoRoot, e.g. SnapshotRef.roots[0])`
         );
       }
-      const refName = `refs/xioflow/snapshots/${id}`;
+      const refName = snapshotRefName(id);
       const { repoRoot: resolvedRoot } = await this.assertGitRepo(repoRoot);
       // 仓库已确认存在后，只把"ref 本来就不存在"视为已清理；删除失败原样抛出
       const exists = await this.git(resolvedRoot, ['show-ref', '--verify', '--quiet', refName]).then(
@@ -568,7 +578,7 @@ export class GitShadowSnapshotDriver implements SnapshotDriver {
     if (!repoRoot) {
       throw new Error(`Cannot materialize snapshot ${snapshotId}: source repository root unknown`);
     }
-    const refName = `refs/xioflow/snapshots/${snapshotId}`;
+    const refName = snapshotRefName(snapshotId);
     await this.git(repoRoot, ['worktree', 'add', '--detach', rawPath, refName]);
     const realWorktreePath = await resolveRealPath(rawPath);
     this.worktreeRepos.set(rawPath, repoRoot);

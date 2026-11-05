@@ -21,17 +21,40 @@ import {
   Run,
   SnapshotDriver,
   Capability,
-  CapabilityScope,
+  CapabilityLimits,
+  CapabilityIssueRequest,
+  CapabilityScopeInput,
   CapabilityViolationError,
   DuplicateOperationError,
+  ArtifactRecord,
 } from './types.js';
 import {
   normalizeScope,
   validateScopeNarrowing,
   checkCapabilityAdmission,
+  DEFAULT_CAPABILITY_LIMITS,
 } from './capability/index.js';
 
 export { DomainLockedError, ResourceConflictError, EpochFencedError, AdjudicationRecord, CapabilityViolationError };
+
+function normalizeCapabilityLimits(limits: Partial<CapabilityLimits> | undefined): CapabilityLimits {
+  const merged = { ...DEFAULT_CAPABILITY_LIMITS, ...(limits ?? {}) };
+  for (const key of ['cpuMs', 'memoryBytes', 'outputBytes', 'concurrentOps', 'processes'] as const) {
+    const value = merged[key];
+    if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`Capability limit '${key}' must be a non-negative safe integer`);
+  }
+  return merged;
+}
+
+function narrowCapabilityLimits(parent: CapabilityLimits, requested: Partial<CapabilityLimits> | undefined): CapabilityLimits {
+  const child = normalizeCapabilityLimits({ ...parent, ...(requested ?? {}) });
+  for (const key of ['cpuMs', 'memoryBytes', 'outputBytes', 'concurrentOps', 'processes'] as const) {
+    if (child[key] > parent[key]) {
+      throw new CapabilityViolationError('attenuation_widened', `Cannot widen capability limit '${key}' from ${parent[key]} to ${child[key]}`);
+    }
+  }
+  return child;
+}
 
 export interface DomainStatus {
   domainId: string;
@@ -629,8 +652,13 @@ export class ExecutionDomain {
     const releasedList: string[] = [];
 
     if (resources && resources.length > 0) {
+      const persisted = new Set(
+        this.store.getPersistedResourceLeases(this.domainId)
+          .filter((lease) => lease.operationId === operationId)
+          .map((lease) => lease.resourceId)
+      );
       for (const res of resources) {
-        if (this.inMemoryLockedResources.get(res) === operationId) {
+        if (this.inMemoryLockedResources.get(res) === operationId || persisted.has(res)) {
           this.inMemoryLockedResources.delete(res);
           this.store.releaseResourceLease(operationId, res);
           releasedList.push(res);
@@ -658,6 +686,7 @@ export class ExecutionDomain {
       payload: {
         operationId,
         resources: releasedList,
+        releaseReason: 'kernel_release',
       },
       timestamp: new Date().toISOString(),
     });
@@ -672,7 +701,8 @@ export class ExecutionDomain {
     opId: string,
     verdict: 'confirmed_stopped' | 'abandon_with_residuals',
     actor: string,
-    note?: string
+    note?: string,
+    options?: { decision?: AdjudicationRecord['decision']; evidence?: string }
   ): Promise<AdjudicationRecord> {
     this.assertNotFenced();
     this.store.verifyEpochFencing(this.domainId);
@@ -741,8 +771,10 @@ export class ExecutionDomain {
     const record: AdjudicationRecord = {
       operationId: opId,
       verdict,
+      decision: options?.decision,
       actor,
       note,
+      evidence: options?.evidence,
       residualPids: residualPids.length > 0 ? residualPids : undefined,
       decidedAt: new Date().toISOString(),
     };
@@ -821,7 +853,7 @@ export class ExecutionDomain {
    * 产物回收防线 (ARCHITECTURE §4.3 / N7)
    * 只回收已终态且未被引用的产物，严格拒绝回收未终结或 indeterminate 状态的产物。
    */
-  public pruneArtifacts(filter?: { olderThanMs?: number; prefix?: string }): {
+  public pruneArtifacts(filter?: { olderThanMs?: number; prefix?: string; nowMs?: number }): {
     deleted: string[];
     retained: string[];
   } {
@@ -835,14 +867,37 @@ export class ExecutionDomain {
     const protectedFiles = new Set<string>();
     const allOps = this.store.getAllOperations(this.domainId);
     const operations = new Map(allOps.map((op) => [op.id, op]));
-    const ownedFiles = new Map<string, OwnedArtifact>();
+    type OwnedFile = { owned: OwnedArtifact; record?: ArtifactRecord };
+    const ownedFiles = new Map<string, OwnedFile>();
+    const artifactRecords = this.store.listArtifacts(this.domainId);
+    // A durable row wins over the legacy journal fallback.  This also prevents a
+    // historical event from authorizing deletion of a path whose current record
+    // is active, unknown-owned, or already marked deleted.
+    const knownArtifactPaths = new Set(artifactRecords.map((record) => path.resolve(record.path)));
+    for (const record of artifactRecords) {
+      if (record.deletionState !== 'present' || !record.ownerOperationId || !path.isAbsolute(record.path)) continue;
+      const op = operations.get(record.ownerOperationId);
+      const isIndet = op?.result?.status === 'indeterminate' || (op?.result as any)?.kind === 'indeterminate';
+      if (!op || op.status !== 'done' || isIndet) continue;
+      ownedFiles.set(path.resolve(record.path), {
+        owned: {
+          path: path.resolve(record.path),
+          dev: record.dev,
+          ino: record.ino,
+          birthtimeNs: record.birthtimeNs,
+        },
+        record,
+      });
+    }
     for (const event of this.store.getJournalEvents(this.domainId)) {
       if (event.type !== 'ARTIFACT_CREATED' || !event.operationId) continue;
       const op = operations.get(event.operationId);
       if (!op || op.status !== 'done' || !op.result || op.result.status === 'indeterminate') continue;
       const { path: file, dev, ino, birthtimeNs } = event.payload;
       if (typeof file !== 'string' || !path.isAbsolute(file) || typeof dev !== 'string' || typeof ino !== 'string' || typeof birthtimeNs !== 'string') continue;
-      ownedFiles.set(file, { path: file, dev, ino, birthtimeNs });
+      const absoluteFile = path.resolve(file);
+      if (knownArtifactPaths.has(absoluteFile) || ownedFiles.has(absoluteFile)) continue;
+      ownedFiles.set(absoluteFile, { owned: { path: absoluteFile, dev, ino, birthtimeNs } });
     }
     for (const op of allOps) {
       const isIndet = op.result?.status === 'indeterminate' || (op.result as any)?.kind === 'indeterminate';
@@ -882,7 +937,7 @@ export class ExecutionDomain {
     const files = fs.readdirSync(artifactsDir);
     const deleted: string[] = [];
     const retained: string[] = [];
-    const now = Date.now();
+    const now = filter?.nowMs ?? Date.now();
 
     for (const file of files) {
       const filePath = path.join(artifactsDir, file);
@@ -907,7 +962,22 @@ export class ExecutionDomain {
         continue;
       }
 
-      if (filter?.olderThanMs !== undefined) {
+      const expiresAt = owned.record?.expiresAt;
+      let expired = false;
+      if (expiresAt !== undefined) {
+        const expiresAtMs = Date.parse(expiresAt);
+        if (!Number.isFinite(expiresAtMs)) {
+          retained.push(filePath);
+          continue;
+        }
+        expired = expiresAtMs <= now;
+        if (!expired) {
+          retained.push(filePath);
+          continue;
+        }
+      }
+
+      if (!expired && filter?.olderThanMs !== undefined) {
         try {
           const stat = fs.lstatSync(filePath);
           if (now - stat.mtimeMs < filter.olderThanMs) {
@@ -921,33 +991,66 @@ export class ExecutionDomain {
       }
 
       try {
-        removeOwnedArtifact(owned);
-        deleted.push(filePath);
+        removeOwnedArtifact(owned.owned);
       } catch {
         retained.push(filePath);
+        continue;
       }
+      if (owned.record) {
+        // The filesystem identity check above is the deletion proof.  A
+        // manifest update failure is surfaced instead of silently claiming a
+        // durable deletion state that was not persisted.
+        this.store.markArtifactDeleted(this.domainId, owned.owned, expired ? 'retention_expired' : 'pruned');
+      }
+      deleted.push(filePath);
     }
 
     return { deleted, retained };
   }
 
   /**
-   * 签发受管 Capability（ARCHITECTURE §0.2 裁决 9 / 契约 #55）
+   * Issue a v1 capability. The three-argument form remains a 0.x compatibility
+   * API; the object form emits a `cap:` reference and carries the complete v1
+   * policy, scope and limit record.
    */
-  public issueCapability(scope: CapabilityScope, actor: string, ttlMs: number): Capability {
+  public issueCapability(scope: CapabilityScopeInput, actor: string, ttlMs: number): Capability;
+  public issueCapability(request: CapabilityIssueRequest): Capability;
+  public issueCapability(
+    scopeOrRequest: CapabilityScopeInput | CapabilityIssueRequest,
+    actor?: string,
+    ttlMs?: number,
+  ): Capability {
     if (this.isFenced) {
       throw new EpochFencedError(this.domainId, this.ownerRecord.epoch, this.ownerRecord.epoch);
     }
+    const isV1Request = typeof scopeOrRequest === 'object'
+      && 'issuer' in scopeOrRequest
+      && 'policyVersion' in scopeOrRequest
+      && 'reason' in scopeOrRequest
+      && 'limits' in scopeOrRequest;
+    const request = isV1Request ? scopeOrRequest as CapabilityIssueRequest : undefined;
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
-    const id = `cap-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-    const normalizedScope = normalizeScope(scope);
-
+    const issuer = request?.issuer ?? actor;
+    if (!issuer) throw new TypeError('Capability issuer is required');
+    const requestedTtl = request?.ttlMs ?? ttlMs;
+    const expiresAt = request?.expiresAt
+      ?? new Date(now.getTime() + (requestedTtl ?? 60_000)).toISOString();
+    const expiryMs = new Date(expiresAt).getTime();
+    if (!Number.isFinite(expiryMs) || expiryMs <= now.getTime()) throw new TypeError('Capability expiration must be a future ISO timestamp');
+    const idPrefix = request ? 'cap:' : 'cap-';
+    const id = `${idPrefix}${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    const sourceScope: CapabilityScopeInput = request ? request.scope : scopeOrRequest as CapabilityScopeInput;
+    const normalizedScope = normalizeScope(sourceScope);
+    const limits = normalizeCapabilityLimits(request?.limits);
     const cap: Capability = {
       id,
       domainId: this.domainId,
       scope: normalizedScope,
-      issuedBy: actor,
+      issuedBy: issuer,
+      issuer,
+      policyVersion: request?.policyVersion ?? 'legacy/0',
+      reason: request?.reason ?? 'legacy-capability',
+      limits,
       expiresAt,
       epoch: this.getEpoch(),
       createdAt: now.toISOString(),
@@ -959,8 +1062,12 @@ export class ExecutionDomain {
       type: 'CAPABILITY_ISSUED',
       payload: {
         capabilityId: id,
-        actor,
+        actor: issuer,
+        issuer,
+        policyVersion: cap.policyVersion,
+        reason: cap.reason,
         scope: normalizedScope,
+        limits,
         expiresAt,
         epoch: cap.epoch,
       },
@@ -971,69 +1078,62 @@ export class ExecutionDomain {
   }
 
   /**
-   * 收窄 Capability 作用域（只能收窄，禁止放宽）
+   * Attenuate a capability. Every v1 scope and limit is a subset of its parent;
+   * the parent policy version and expiry remain an upper bound.
    */
   public attenuate(
     capId: string,
-    narrowerScope: Partial<CapabilityScope>,
+    narrowerScope: CapabilityScopeInput,
     actor: string,
-    ttlMs?: number
+    ttlOrOptions?: number | {
+      ttlMs?: number;
+      policyVersion?: string;
+      reason?: string;
+      limits?: Partial<CapabilityLimits>;
+    },
   ): Capability {
     if (this.isFenced) {
       throw new EpochFencedError(this.domainId, this.ownerRecord.epoch, this.ownerRecord.epoch);
     }
     const parent = this.store.getCapability(capId);
-    if (!parent) {
-      throw new CapabilityViolationError('revoked', `Parent capability '${capId}' not found`);
-    }
+    if (!parent) throw new CapabilityViolationError('revoked', `Parent capability '${capId}' not found`);
     if (parent.epoch !== this.getEpoch()) {
-      throw new CapabilityViolationError(
-        'epoch_mismatch',
-        `Parent capability '${capId}' epoch ${parent.epoch} does not match current epoch ${this.getEpoch()}`
-      );
+      throw new CapabilityViolationError('epoch_mismatch', `Parent capability '${capId}' epoch ${parent.epoch} does not match current epoch ${this.getEpoch()}`);
     }
-    if (parent.revokedAt) {
-      throw new CapabilityViolationError('revoked', `Parent capability '${capId}' is revoked`);
-    }
+    if (parent.revokedAt) throw new CapabilityViolationError('revoked', `Parent capability '${capId}' is revoked`);
     const now = Date.now();
     const parentExpiry = new Date(parent.expiresAt).getTime();
-    if (parentExpiry <= now) {
-      throw new CapabilityViolationError('expired', `Parent capability '${capId}' has expired`);
-    }
+    if (parentExpiry <= now) throw new CapabilityViolationError('expired', `Parent capability '${capId}' has expired`);
 
-    // 递归校验祖先链是否有效
     let curAncestorId = parent.parentId;
     while (curAncestorId) {
       const anc = this.store.getCapability(curAncestorId);
-      if (!anc || anc.revokedAt) {
-        throw new CapabilityViolationError('revoked', `Parent capability ancestor '${curAncestorId}' was revoked or not found`);
-      }
-      if (anc.epoch !== this.getEpoch()) {
-        throw new CapabilityViolationError('epoch_mismatch', `Parent capability ancestor '${curAncestorId}' epoch mismatch`);
-      }
-      if (new Date(anc.expiresAt).getTime() <= now) {
-        throw new CapabilityViolationError('expired', `Parent capability ancestor '${curAncestorId}' has expired`);
-      }
+      if (!anc || anc.revokedAt) throw new CapabilityViolationError('revoked', `Parent capability ancestor '${curAncestorId}' was revoked or not found`);
+      if (anc.epoch !== this.getEpoch()) throw new CapabilityViolationError('epoch_mismatch', `Parent capability ancestor '${curAncestorId}' epoch mismatch`);
+      if (new Date(anc.expiresAt).getTime() <= now) throw new CapabilityViolationError('expired', `Parent capability ancestor '${curAncestorId}' has expired`);
       curAncestorId = anc.parentId;
     }
 
-    // 校验并生成收窄 scope（放宽时内部抛出 attenuation_widened 错误）
     const childScope = validateScopeNarrowing(parent.scope, narrowerScope);
-
-    let childExpiresAt = parent.expiresAt;
-    if (ttlMs !== undefined) {
-      const requestedExpiry = now + ttlMs;
-      const effectiveExpiry = Math.min(requestedExpiry, parentExpiry);
-      childExpiresAt = new Date(effectiveExpiry).toISOString();
+    const config = typeof ttlOrOptions === 'number' ? { ttlMs: ttlOrOptions } : (ttlOrOptions ?? {});
+    if (config.policyVersion !== undefined && config.policyVersion !== parent.policyVersion) {
+      throw new CapabilityViolationError('policy_mismatch', `Child policy version '${config.policyVersion}' cannot differ from parent '${parent.policyVersion}'`);
     }
-
-    const id = `cap-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+    const childLimits = narrowCapabilityLimits(parent.limits, config.limits);
+    const requestedExpiry = config.ttlMs === undefined ? parentExpiry : now + config.ttlMs;
+    const childExpiresAt = new Date(Math.min(requestedExpiry, parentExpiry)).toISOString();
+    const idPrefix = parent.id.startsWith('cap:') ? 'cap:' : 'cap-';
+    const id = `${idPrefix}${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
     const childCap: Capability = {
       id,
       domainId: this.domainId,
       parentId: parent.id,
       scope: childScope,
       issuedBy: actor,
+      issuer: actor,
+      policyVersion: parent.policyVersion,
+      reason: config.reason ?? 'attenuation',
+      limits: childLimits,
       expiresAt: childExpiresAt,
       epoch: this.getEpoch(),
       createdAt: new Date().toISOString(),
@@ -1047,7 +1147,11 @@ export class ExecutionDomain {
         capabilityId: id,
         parentId: parent.id,
         actor,
+        issuer: actor,
+        policyVersion: childCap.policyVersion,
+        reason: childCap.reason,
         scope: childScope,
+        limits: childLimits,
         expiresAt: childExpiresAt,
         epoch: childCap.epoch,
       },
@@ -1088,9 +1192,16 @@ export class ExecutionDomain {
     capabilityId: string;
     requiredResources?: string[];
     mutationRoots?: string[];
+    opcode?: string;
+    workspace?: string;
+    secretRefs?: string[];
+    requestedLimits?: Partial<CapabilityLimits>;
+    policyVersion?: string;
     runId?: string;
     opId?: string;
   }) {
+    const active = this.store.getAllOperations(this.domainId)
+      .filter((operation) => operation.capabilityId === options.capabilityId && operation.id !== options.opId && operation.status !== 'done');
     return checkCapabilityAdmission({
       domainId: this.domainId,
       currentEpoch: this.getEpoch(),
@@ -1098,6 +1209,13 @@ export class ExecutionDomain {
       capabilityId: options.capabilityId,
       requiredResources: options.requiredResources,
       mutationRoots: options.mutationRoots,
+      opcode: options.opcode,
+      workspace: options.workspace,
+      secretRefs: options.secretRefs,
+      requestedLimits: options.requestedLimits,
+      currentConcurrentOps: active.length,
+      currentProcesses: active.filter((operation) => operation.kind === 'process' || operation.kind === 'service').length,
+      policyVersion: options.policyVersion,
       runId: options.runId,
       opId: options.opId,
     });

@@ -42,6 +42,25 @@ The package also includes an **experimental `AgentRuntime`**: kernel-owned agent
 
 ## 5-minute path
 
+The XIO-ISA SDK is available as a **preview** at `@xioflow/kernel/isa`.
+`xio plan --input program.json` (or `--input -` for stdin) checks a Program
+without acquiring a domain. Without host policy this is structural planning,
+not permission to execute. `xio execute` and the MCP `execute` tool return
+`unsupported` for side effects without an explicit host binding. The current
+durable binding supports `workspace.snapshot`, `workspace.rollback`,
+`control.status` and `control.health`;
+other opcodes and transaction mode remain unsupported. Legacy tools and the
+wide 0.x root remain available during migration. See the
+[preview adapter evidence](audit/reports/isa-adapter-preview-2026-11-03.md).
+
+The host must bind the domain/supervisor/workspace and supply a persisted
+capability. `programId` identifies an existing Run; side effects require it to
+be running. The adapters do not sign capabilities, create replacement Runs or
+reopen terminal Runs. MCP hosts can use `isaOnly: true` for an execute-only
+server that does not acquire a domain at startup. Cancellation prevents pending
+or later ISA dispatch; an already dispatched snapshot waits for its actual
+result. The standalone CLI has no automatic side-effect binding.
+
 ```bash
 npm install @xioflow/kernel
 ```
@@ -77,7 +96,7 @@ Prerequisites: Node.js >= 22.13 and a built kernel checkout (`pnpm install && pn
 | No premature release | Exclusive resource leases are released only after the platform driver confirms the process is gone. An unconfirmed stop keeps the lease and escalates to `indeterminate`. |
 | No silent output loss | In-memory output is capped by `maxOutputBytes` (default 10 MiB); each stream is spilled under `<domain>/artifacts/`, `fsync`ed, and hashed. IDs are opaque keys: ordinary IDs keep readable filenames; other IDs are encoded into a safe basename. Truncation is reported per stream with references, byte counts and hashes; a collision or storage failure is reported as `spillError`. |
 | No implicit environment | `envWhiteList` is exact: whatever you pass is what the child gets, with no injected `PATH`. Without a whitelist the child inherits `process.env`, unless you pass `inheritEnv: false` to get an empty environment. |
-| No orphan leak | Termination escalates SIGINT to SIGTERM to SIGKILL across the process group, then re-enumerates descendants. Escaped (`setsid`) survivors are reported honestly as `{ stopped: 'cannot_determine', residualPids: [...] }` instead of a fake success. If the group is confirmed empty but the output pipes are still held by a process the driver never saw, the operation is `indeterminate`, not `succeeded`. Drained pipes are not taken as an empty tree either: after the root exits, survivors the driver knows about (including daemonized ones with closed stdio) are reaped, and `treeSettlement` says whether emptiness was proven (`empty`), enforced (`reaped`) or is beyond what the driver can see (`unverified`). |
+| Honest process-tree settlement | Termination escalates SIGINT to SIGTERM to SIGKILL across the process group, then re-enumerates descendants. Escaped executable survivors produce `cannot_determine` with `residualPids`; missing observation or unknown pipe holders remain `indeterminate`. On Linux, observed zombies are preserved as `unreapedPids`: confirmed stopping does not claim PID disappearance or a successful parent `waitpid`. `treeSettlement: 'empty'` requires driver proof; legacy `reaped` records stop intervention and must be read together with unreaped facts; `unverified` preserves the observation boundary. |
 | No blind retry | Resubmitting an `opId` with the same input fingerprint joins the in-flight execution or replays the recorded result (`replayed: true`); an `indeterminate` result is returned as-is and never re-executed. A different fingerprint throws `OperationIdConflictError`. |
 | No out-of-scope rollback | A rollback only rewrites and deletes files inside the snapshot's declared roots, never touches ignored files unless they were captured, and is verified by fingerprint. `coverage: 'complete'` is claimed only when every operation since the snapshot ran under a confinement driver and ignored files are accounted for: they were in the snapshot, or a manifest proves they are unchanged. Otherwise the result says `non_ignored` or `declared_roots`, with the reasons in `coverageBasis`. |
 | No split brain | A domain has one active owner, held by an exclusive lock file plus a heartbeat lease. Stale owners are fenced by an epoch counter; their writes are rejected. |
@@ -327,7 +346,7 @@ Leases are held by the service across restart backoff. A stop the driver cannot 
 
 ## Snapshots, rollback and forks
 
-The git-shadow driver snapshots declared roots without touching the user's index, HEAD or branch, and pins each snapshot under `refs/xioflow/snapshots/<id>`:
+The git-shadow driver snapshots declared roots without touching the user's index, HEAD or branch. Ordinary legacy IDs are pinned under `refs/xioflow/snapshots/<id>`; other opaque IDs (including ISA `op:...` IDs) use `refs/xioflow/encoded-snapshots/<hash>`. The public snapshot ID is preserved:
 
 ```js
 const snap = await supervisor.captureSnapshot({ runId: 'run-1', opId: 'snap-1', roots: ['/path/to/workspace/src'] });
@@ -490,11 +509,19 @@ defineContractTestSuite('My Agent Runtime', async () => ({
 
 The suite is framework-agnostic: under vitest it resolves its API from globals, and third parties can run the same suite with **no test framework at all** through the dependency-free plain-node runner (`@xioflow/kernel/testing/plain`), which prints a machine-readable JSON report. The [conformance entry](spec/conformance.md) documents both paths and the compliance tiers (`core` / `workspace` / `experimental`).
 
+For repository verification, `pnpm test` runs Vitest under `tests/` before seven
+explicit local `node:test` research suites. Flags such as `--maxWorkers=2` go
+only to Vitest; either stage's failure is nonzero. The native suites use local
+fixtures, require `jq`, and do not call paid model APIs. `pnpm conformance:report`
+adds version/platform/driver/build evidence and separates catalog, runnable,
+archived/planned and unsupported entries; it does not count unsupported hard
+limits as passed. See the [test orchestration record](audit/reports/test-orchestration-2026-11-03.md).
+
 Beyond the contracts, the repository kills its own supervisor at every durable step (before and after each store commit, and while the process runs), recovers in a fresh process and checks the invariants again (`tests/fault/crash-matrix.test.ts`), and model-checks the same invariants for every interleaving of launch, stop, crash and recovery with TLA+ (`spec/tla/`, `pnpm check:tla`).
 
 - Persistence is SQLite with WAL and `synchronous = FULL`, so committed facts survive power loss.
 - One execution domain is one workspace-scoped store plus one active owner. Isolation is rebuilt from the store before any new operation is admitted.
-- When the root process exits while a descendant still holds its pipes, the supervisor reaps the process group and reports the root's real exit facts with `residualProcessesReaped: true`, instead of blocking the operation until its timeout.
+- When the root process exits while a descendant still holds its pipes, the supervisor runs the process-group stop pipeline and reports the root's real exit facts with the legacy `residualProcessesReaped` intervention flag. Observed zombies remain in `unreapedPids`; the flag does not promise that their parent collected every PID entry.
 - A spawn failure is reported both as `status: 'failed'`/`exitCode: 127` and as `spawnFailure` with the underlying error message, so embedders can tell "the binary could not start" apart from "the child exited 127".
 - `onStreamChunk(stream, chunk)` forwards raw stdout/stderr chunks while the process runs, so a caller can render live output. A throwing callback never aborts the drain; the first error is recorded as `streamCallbackError`.
 - Hard resource requests (`maxMemoryBytes`, `maxPids`, `maxCpuTimeMs` with `enforcement: 'hard'`) are rejected at admission with `UnsupportedCapabilityError` on platforms that cannot enforce them, instead of degrading silently. The remaining capability flags are reported truthfully for callers to inspect, but are not enforced by admission yet.

@@ -10,6 +10,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   AgentRuntime,
   DomainLockedError,
@@ -19,6 +20,7 @@ import {
   ReaperPlatformDriver,
   RecoveryEngine,
 } from '@xioflow/kernel';
+import { execute as executeIsa } from '@xioflow/kernel/isa';
 
 let checks = 0;
 const ok = (name, detail) => {
@@ -60,6 +62,17 @@ let active = domain;
 let failed = false;
 
 try {
+  const previewPlan = {
+    isa: 'xio/1', mode: 'plan', requestId: 'package-plan', programId: 'package-plan',
+    instructions: [{ id: 'health', op: 'control.health', args: {}, dependsOn: [], precondition: [], output: 'health' }],
+  };
+  const eventsBeforePlan = store.getJournalEvents(domain.domainId).length;
+  const planned = await executeIsa(previewPlan, { requireCapability: false });
+  assert.equal(planned.status, 'admitted');
+  assert.equal(planned.capability, 'not_requested');
+  assert.equal(store.getJournalEvents(domain.domainId).length, eventsBeforePlan);
+  ok('packaged ISA preview SDK', 'public subpath resolves; structural plan does not write journal');
+
   ensureRun('agent-smoke');
   let commandContext;
   const agents = new AgentRuntime(domain, {
@@ -321,8 +334,13 @@ try {
   assert.ok(Date.now() - residualStarted < 5_000, 'residual descendant must not block until timeout');
   const residualPid = Number.parseInt(residual.stdout.trim(), 10);
   assert.ok(Number.isInteger(residualPid) && residualPid > 0, 'descendant pid must be captured');
-  assert.throws(() => process.kill(residualPid, 0), 'residual descendant must be dead');
-  ok('residual descendant reaped', `descendant=${residualPid} reaped=${residual.residualProcessesReaped}`);
+  const observedResidual = spawnSync('ps', ['-o', 'stat=', '-p', String(residualPid)], { encoding: 'utf8', timeout: 2000 });
+  if (observedResidual.status === 0 && observedResidual.stdout.trim().startsWith('Z')) {
+    assert.ok(residual.unreapedPids?.includes(residualPid), 'a stopped zombie must remain visible in the result evidence');
+  } else {
+    assert.throws(() => process.kill(residualPid, 0), (error) => error.code === 'ESRCH', 'residual descendant must not remain executable');
+  }
+  ok('residual descendant stopped', `descendant=${residualPid} unreaped=${JSON.stringify(residual.unreapedPids ?? [])}`);
 
   // 2e. Live output projection: chunks reach the embedder while the process runs.
   ensureRun('run-stream');
@@ -505,6 +523,14 @@ assert.equal(
   const usage = execFileSync(path.join(process.cwd(), 'node_modules/.bin/xioflow'), [], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   assert.equal(usage, '');
   ok('packaged xioflow CLI runs', 'bin link resolves');
+  const plan = execFileSync(path.join(process.cwd(), 'node_modules/.bin/xio'), ['plan', '--input', '-'], {
+    input: JSON.stringify({ isa: 'xio/1', mode: 'plan', requestId: 'cli-plan', programId: 'cli-plan',
+      instructions: [{ id: 'health', op: 'control.health', args: {}, dependsOn: [], precondition: [], output: 'health' }] }),
+    encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  assert.equal(JSON.parse(plan).status, 'admitted');
+  assert.equal(fs.existsSync(path.join(process.cwd(), '.xioflow-kernel')), false);
+  ok('packaged ISA preview CLI', 'stdin plan works without a domain database');
 }
 
 console.log(`  ${checks} embedder contract checks passed`);

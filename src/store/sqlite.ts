@@ -1,5 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
-import { SCHEMA_SQL } from './schema.js';
+import { runMigrations } from './migrations.js';
+import { createEventEnvelope, type EventEnvelope, type EventEnvelopeInput } from './event-envelope.js';
+import { withRecoveryIdentity } from '../recovery/evidence.js';
 import { callerLabel, crashpoint, crashpointsEnabled } from '../fault/crashpoint.js';
 import {
   Task,
@@ -18,7 +20,10 @@ import {
   sanitizeConfigSnapshot,
   SnapshotRef,
   Capability,
+  ArtifactRecord,
+  RequestConfigSnapshot,
 } from '../types.js';
+import { assertRequestConfigSnapshot } from '../config/snapshot.js';
 
 export class SqliteStore {
   private db: DatabaseSync;
@@ -38,26 +43,7 @@ export class SqliteStore {
   }
 
   private initSchema(): void {
-    this.db.exec(SCHEMA_SQL);
-    // 旧库补列：先查列是否已存在，只在缺列时 ALTER；ALTER 自身失败（磁盘、锁、只读）必须暴露
-    const existing = new Set(
-      (this.db.prepare('PRAGMA table_info(operations)').all() as Array<{ name: string }>).map((c) => c.name)
-    );
-    if (!existing.has('mutation_roots')) {
-      this.db.exec('ALTER TABLE operations ADD COLUMN mutation_roots TEXT;');
-    }
-    if (!existing.has('capability_id')) {
-      this.db.exec('ALTER TABLE operations ADD COLUMN capability_id TEXT;');
-    }
-    if (!existing.has('spawn_gated')) {
-      this.db.exec('ALTER TABLE operations ADD COLUMN spawn_gated INTEGER CHECK (spawn_gated IN (0, 1));');
-    }
-    const snapshotColumns = new Set(
-      (this.db.prepare('PRAGMA table_info(snapshots)').all() as Array<{ name: string }>).map((c) => c.name)
-    );
-    if (!snapshotColumns.has('ignored_manifest_digest')) {
-      this.db.exec('ALTER TABLE snapshots ADD COLUMN ignored_manifest_digest TEXT;');
-    }
+    runMigrations(this.db);
   }
 
   private inTransaction = false;
@@ -271,14 +257,16 @@ export class SqliteStore {
       }
     }
     const sanitizedConfig = sanitizeConfigSnapshot(run.configSnapshotWhiteList);
+    if (run.configSnapshot) assertRequestConfigSnapshot(run.configSnapshot);
     const stmt = this.db.prepare(`
-      INSERT INTO runs (id, task_id, domain_id, owner, status, termination_reason, started_at, ended_at, config_snapshot)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO runs (id, task_id, domain_id, owner, status, termination_reason, started_at, ended_at, config_snapshot, config_binding)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         status = excluded.status,
         termination_reason = excluded.termination_reason,
         ended_at = excluded.ended_at,
-        config_snapshot = excluded.config_snapshot
+        config_snapshot = excluded.config_snapshot,
+        config_binding = COALESCE(runs.config_binding, excluded.config_binding)
     `);
     stmt.run(
       run.id,
@@ -289,8 +277,25 @@ export class SqliteStore {
       run.terminationReason || null,
       run.startedAt,
       run.endedAt || null,
-      JSON.stringify(sanitizedConfig)
+      JSON.stringify(sanitizedConfig),
+      run.configSnapshot ? JSON.stringify(run.configSnapshot) : null,
     );
+  }
+
+  /** Bind the first request snapshot to a run without allowing later requests to rewrite it. */
+  public bindRunConfigSnapshot(runId: string, snapshot: RequestConfigSnapshot): void {
+    assertRequestConfigSnapshot(snapshot);
+    this.transaction(() => {
+      const run = this.getRun(runId);
+      if (!run) throw new Error(`Run '${runId}' not found`);
+      if (run.configSnapshot) {
+        assertRequestConfigSnapshot(run.configSnapshot);
+        return;
+      }
+      this.verifyEpochFencing(run.domainId);
+      this.db.prepare('UPDATE runs SET config_binding = ? WHERE id = ? AND config_binding IS NULL')
+        .run(JSON.stringify(snapshot), runId);
+    });
   }
 
   public getRun(id: string): Run | null {
@@ -307,6 +312,7 @@ export class SqliteStore {
       startedAt: row.started_at,
       endedAt: row.ended_at || undefined,
       configSnapshotWhiteList: row.config_snapshot ? JSON.parse(row.config_snapshot) : undefined,
+      configSnapshot: row.config_binding ? JSON.parse(row.config_binding) : undefined,
     };
   }
 
@@ -435,6 +441,7 @@ export class SqliteStore {
       startedAt: row.started_at,
       endedAt: row.ended_at || undefined,
       configSnapshotWhiteList: row.config_snapshot ? JSON.parse(row.config_snapshot) : undefined,
+      configSnapshot: row.config_binding ? JSON.parse(row.config_binding) : undefined,
     }));
   }
 
@@ -453,6 +460,7 @@ export class SqliteStore {
       startedAt: row.started_at,
       endedAt: row.ended_at || undefined,
       configSnapshotWhiteList: row.config_snapshot ? JSON.parse(row.config_snapshot) : undefined,
+      configSnapshot: row.config_binding ? JSON.parse(row.config_binding) : undefined,
     }));
   }
 
@@ -460,6 +468,7 @@ export class SqliteStore {
     if (op.spawnGated !== undefined && typeof op.spawnGated !== 'boolean') {
       throw new TypeError('spawnGated must be a boolean when provided');
     }
+    if (op.configSnapshot) assertRequestConfigSnapshot(op.configSnapshot);
     const run = this.getRun(op.runId);
     if (!run) {
       throw new Error(
@@ -482,9 +491,9 @@ export class SqliteStore {
         INSERT INTO operations (
           id, run_id, domain_id, kind, name, input_fingerprint, status,
           required_resources, mutation_roots, capability_id, timeout_ms,
-          resource_budget, output_ref, process_identity, result, spawn_gated
+          resource_budget, output_ref, process_identity, result, spawn_gated, recovery_evidence, config_snapshot
         )
-        VALUES (?, ?, ?, ?, ?, ?, 'intent_registered', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 'intent_registered', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       opStmt.run(
         op.id,
@@ -501,7 +510,9 @@ export class SqliteStore {
         op.outputRef || null,
         op.processIdentity ? JSON.stringify(op.processIdentity) : null,
         op.result ? JSON.stringify(op.result) : null,
-        op.spawnGated === undefined ? null : Number(op.spawnGated)
+        op.spawnGated === undefined ? null : Number(op.spawnGated),
+        op.recoveryEvidence ? JSON.stringify(op.recoveryEvidence) : null,
+        op.configSnapshot ? JSON.stringify(op.configSnapshot) : null,
       );
 
       // 2. 写入 resource_leases 表记录排他资源占用
@@ -534,6 +545,16 @@ export class SqliteStore {
           inputFingerprint: op.inputFingerprint,
           resourceBudget: op.resourceBudget,
           spawnGated: op.spawnGated,
+          configBinding: op.configSnapshot ? {
+            schemaVersion: op.configSnapshot.schemaVersion,
+            capabilityId: op.configSnapshot.capabilityId,
+            capabilityPolicyVersion: op.configSnapshot.capabilityPolicyVersion,
+            driverName: op.configSnapshot.driverName,
+            driverVersion: op.configSnapshot.driverVersion,
+            retentionVersion: op.configSnapshot.retentionVersion,
+            redactionVersion: op.configSnapshot.redactionVersion,
+            digest: op.configSnapshot.digest,
+          } : undefined,
         },
         timestamp: now,
       });
@@ -545,6 +566,7 @@ export class SqliteStore {
     domainId: string,
     result: OperationResult
   ): void {
+    if (op.configSnapshot) assertRequestConfigSnapshot(op.configSnapshot);
     const run = this.getRun(op.runId);
     if (!run) {
       throw new Error(
@@ -574,9 +596,9 @@ export class SqliteStore {
         INSERT INTO operations (
           id, run_id, domain_id, kind, name, input_fingerprint, status,
           required_resources, mutation_roots, capability_id, timeout_ms,
-          resource_budget, output_ref, process_identity, result
+          resource_budget, output_ref, process_identity, result, config_snapshot
         )
-        VALUES (?, ?, ?, ?, ?, ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       opStmt.run(
         op.id,
@@ -592,7 +614,8 @@ export class SqliteStore {
         op.resourceBudget ? JSON.stringify(op.resourceBudget) : null,
         op.outputRef || null,
         op.processIdentity ? JSON.stringify(op.processIdentity) : null,
-        JSON.stringify(result)
+        JSON.stringify(result),
+        op.configSnapshot ? JSON.stringify(op.configSnapshot) : null,
       );
 
       this.recordEventAndTransitionState({
@@ -600,7 +623,7 @@ export class SqliteStore {
         runId: op.runId,
         operationId: op.id,
         type: 'OPERATION_RESULT_RECORDED',
-        payload: { result, releaseResources: false },
+        payload: { result, releaseResources: false, preIntentCancelled: true },
         timestamp: result.completedAt || new Date().toISOString(),
       });
     });
@@ -619,10 +642,18 @@ export class SqliteStore {
       }
       const stmt = this.db.prepare(`
         UPDATE operations
-        SET status = ?, process_identity = COALESCE(?, process_identity), output_ref = COALESCE(?, output_ref)
+        SET status = ?, process_identity = COALESCE(?, process_identity), output_ref = COALESCE(?, output_ref),
+            recovery_evidence = COALESCE(?, recovery_evidence)
         WHERE id = ?
       `);
-      stmt.run(status, processIdentity ? JSON.stringify(processIdentity) : null, outputRef || null, opId);
+      const recoveryEvidence = processIdentity ? withRecoveryIdentity(op?.recoveryEvidence, processIdentity) : undefined;
+      stmt.run(
+        status,
+        processIdentity ? JSON.stringify(processIdentity) : null,
+        outputRef || null,
+        recoveryEvidence ? JSON.stringify(recoveryEvidence) : null,
+        opId,
+      );
 
       if (op) {
         this.recordEventAndTransitionState({
@@ -634,6 +665,26 @@ export class SqliteStore {
           timestamp: new Date().toISOString(),
         });
       }
+    });
+  }
+
+  /** Persist additional crash-recovery facts without changing the operation state. */
+  public updateRecoveryEvidence(opId: string, patch: Partial<NonNullable<Operation['recoveryEvidence']>>): void {
+    this.transaction(() => {
+      const op = this.getOperation(opId);
+      if (!op) throw new Error(`Operation ${opId} not found`);
+      this.verifyEpochFencing(op.domainId);
+      if (!op.recoveryEvidence) return;
+      const merged = {
+        ...op.recoveryEvidence,
+        ...patch,
+        identity: patch.identity ?? op.recoveryEvidence.identity,
+        tree: patch.tree ?? op.recoveryEvidence.tree,
+        pipes: patch.pipes ?? op.recoveryEvidence.pipes,
+        containment: patch.containment ?? op.recoveryEvidence.containment,
+      };
+      this.db.prepare('UPDATE operations SET recovery_evidence = ? WHERE id = ?')
+        .run(JSON.stringify(merged), opId);
     });
   }
 
@@ -666,6 +717,31 @@ export class SqliteStore {
       if (op.status === 'done') {
         throw new Error(
           `Cannot record result for operation "${opId}": operation is already finalized with status "done"`
+        );
+      }
+
+      const intent = this.db.prepare(`
+        SELECT 1 AS present
+        FROM journal_events
+        WHERE operation_id = ? AND type = 'OPERATION_INTENT_REGISTERED'
+        ORDER BY seq ASC
+        LIMIT 1
+      `).get(opId) as { present?: number } | undefined;
+      if (!intent?.present) {
+        throw new Error(
+          `Cannot record result for operation "${opId}": durable intent was not recorded`
+        );
+      }
+
+      const priorResult = this.db.prepare(`
+        SELECT 1 AS present
+        FROM journal_events
+        WHERE operation_id = ? AND type = 'OPERATION_RESULT_RECORDED'
+        LIMIT 1
+      `).get(opId) as { present?: number } | undefined;
+      if (priorResult?.present) {
+        throw new Error(
+          `Cannot record result for operation "${opId}": result event already exists`
         );
       }
 
@@ -736,7 +812,9 @@ export class SqliteStore {
       outputRef: row.output_ref || undefined,
       status: row.status as OperationStatus,
       processIdentity: row.process_identity ? JSON.parse(row.process_identity) : undefined,
-      spawnGated: row.spawn_gated === null ? undefined : row.spawn_gated === 1,
+      spawnGated: row.spawn_gated == null ? undefined : row.spawn_gated === 1,
+      recoveryEvidence: row.recovery_evidence ? JSON.parse(row.recovery_evidence) : undefined,
+      configSnapshot: row.config_snapshot ? JSON.parse(row.config_snapshot) : undefined,
       result: row.result ? JSON.parse(row.result) : undefined,
     };
   }
@@ -796,19 +874,98 @@ export class SqliteStore {
 
   public recordEventAndTransitionState(event: Omit<JournalEvent, 'seq'>): number {
     this.verifyEpochFencing(event.domainId);
+    const operationId = event.operationId ?? event.opId;
+    const eventName = event.event ?? event.type;
+    const preIntentCancelled = eventName === 'OPERATION_RESULT_RECORDED'
+      && event.payload !== null
+      && typeof event.payload === 'object'
+      && !Array.isArray(event.payload)
+      && (event.payload as Record<string, unknown>).preIntentCancelled === true;
+    const requiresIntent = eventName === 'OPERATION_RESULT_RECORDED'
+      || eventName === 'OPERATION_STATUS_TRANSITION'
+      || eventName === 'CAPABILITY_USED'
+      || /^(?:SERVICE|SNAPSHOT|WORKSPACE|ARTIFACT|PROCESS|PROC)_/u.test(eventName);
+    if (operationId && requiresIntent && eventName !== 'OPERATION_INTENT_REGISTERED' && eventName !== 'RESOURCES_RELEASED' && eventName !== 'OPERATION_REPLAYED' && !preIntentCancelled) {
+      const intent = this.db.prepare(`
+        SELECT 1 AS present
+        FROM journal_events
+        WHERE operation_id = ? AND type = 'OPERATION_INTENT_REGISTERED'
+        ORDER BY seq ASC
+        LIMIT 1
+      `).get(operationId) as { present?: number } | undefined;
+      if (!intent?.present) {
+        throw new Error(
+          `Cannot record event "${eventName}" for operation "${operationId}": durable intent was not recorded`
+        );
+      }
+    }
+    if (eventName === 'OPERATION_RESULT_RECORDED' && operationId && !preIntentCancelled) {
+      const priorResult = this.db.prepare(`
+        SELECT 1 AS present
+        FROM journal_events
+        WHERE operation_id = ? AND type = 'OPERATION_RESULT_RECORDED'
+        LIMIT 1
+      `).get(operationId) as { present?: number } | undefined;
+      if (priorResult?.present) {
+        throw new Error(
+          `Cannot record result event for operation "${operationId}": result event already exists`
+        );
+      }
+    }
+    const envelope = createEventEnvelope({
+      schemaVersion: event.schemaVersion,
+      domainId: event.domainId,
+      requestId: event.requestId,
+      programId: event.programId,
+      instructionId: event.instructionId,
+      opId: event.opId ?? event.operationId,
+      event: event.event ?? event.type,
+      payload: event.payload,
+      sensitivity: event.sensitivity,
+      createdAt: event.createdAt ?? event.timestamp,
+    });
     const stmt = this.db.prepare(`
-      INSERT INTO journal_events (domain_id, run_id, operation_id, type, payload, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO journal_events (
+        domain_id, run_id, operation_id, type, payload, timestamp,
+        schema_version, request_id, program_id, instruction_id, op_id, event, sensitivity, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const res = stmt.run(
       event.domainId,
       event.runId || null,
       event.operationId || null,
-      event.type,
-      JSON.stringify(event.payload),
-      event.timestamp
+      envelope.event,
+      JSON.stringify(envelope.payload),
+      envelope.createdAt,
+      envelope.schemaVersion,
+      envelope.requestId || null,
+      envelope.programId || null,
+      envelope.instructionId || null,
+      envelope.opId || null,
+      envelope.event,
+      envelope.sensitivity,
+      envelope.createdAt,
     );
     return Number(res.lastInsertRowid);
+  }
+
+  public recordEventEnvelope(event: EventEnvelopeInput): number {
+    const envelope = createEventEnvelope(event);
+    return this.recordEventAndTransitionState({
+      domainId: envelope.domainId,
+      operationId: envelope.opId,
+      type: envelope.event,
+      payload: envelope.payload,
+      timestamp: envelope.createdAt,
+      schemaVersion: envelope.schemaVersion,
+      requestId: envelope.requestId,
+      programId: envelope.programId,
+      instructionId: envelope.instructionId,
+      opId: envelope.opId,
+      event: envelope.event,
+      sensitivity: envelope.sensitivity,
+      createdAt: envelope.createdAt,
+    });
   }
 
   public recordJournalEvent(event: Omit<JournalEvent, 'seq'>): number {
@@ -837,7 +994,7 @@ export class SqliteStore {
   }
 
   private mapJournalEvent(row: any): JournalEvent {
-    return {
+    const event: JournalEvent = {
       seq: row.seq,
       domainId: row.domain_id,
       runId: row.run_id || undefined,
@@ -846,6 +1003,40 @@ export class SqliteStore {
       payload: JSON.parse(row.payload),
       timestamp: row.timestamp,
     };
+    if (row.schema_version && row.schema_version !== 'xio/event/1.0') event.schemaVersion = row.schema_version;
+    if (row.request_id) event.requestId = row.request_id;
+    if (row.program_id) event.programId = row.program_id;
+    if (row.instruction_id) event.instructionId = row.instruction_id;
+    if (row.op_id && row.op_id !== row.operation_id) event.opId = row.op_id;
+    if (row.event && row.event !== row.type) event.event = row.event;
+    if (row.sensitivity && row.sensitivity !== 'internal') event.sensitivity = row.sensitivity;
+    if (row.created_at && row.created_at !== row.timestamp) event.createdAt = row.created_at;
+    return event;
+  }
+
+  public getEventEnvelopes(
+    domainId: string,
+    fromSeq: number = 0,
+    toSeq: number = Number.MAX_SAFE_INTEGER,
+  ): EventEnvelope[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM journal_events
+      WHERE domain_id = ? AND seq >= ? AND seq <= ?
+      ORDER BY seq ASC
+    `).all(domainId, fromSeq, toSeq) as any[];
+    return rows.map((row) => ({
+      seq: row.seq,
+      schemaVersion: row.schema_version || 'xio/event/1.0',
+      domainId: row.domain_id,
+      requestId: row.request_id || undefined,
+      programId: row.program_id || undefined,
+      instructionId: row.instruction_id || undefined,
+      opId: row.op_id || row.operation_id || undefined,
+      event: row.event || row.type,
+      payload: JSON.parse(row.payload),
+      sensitivity: row.sensitivity || 'internal',
+      createdAt: row.created_at || row.timestamp,
+    }));
   }
 
   public getEventsByRun(runId: string): JournalEvent[] {
@@ -855,15 +1046,104 @@ export class SqliteStore {
       ORDER BY seq ASC
     `);
     const rows = stmt.all(runId) as any[];
-    return rows.map((row) => ({
-      seq: row.seq,
+    return rows.map((row) => this.mapJournalEvent(row));
+  }
+
+  public recordArtifact(record: ArtifactRecord): void {
+    this.transaction(() => {
+      this.verifyEpochFencing(record.domainId);
+      this.db.prepare(`
+        INSERT INTO artifacts (
+          artifact_id, domain_id, owner_operation_id, creating_instruction_id, path,
+          sha256, size_bytes, created_at, expires_at, sensitivity, encryption_state,
+          deletion_state, dev, ino, birthtime_ns, deleted_at, deletion_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        record.id,
+        record.domainId,
+        record.ownerOperationId ?? null,
+        record.creatingInstructionId ?? null,
+        record.path,
+        record.sha256 ?? null,
+        record.sizeBytes ?? null,
+        record.createdAt,
+        record.expiresAt ?? null,
+        record.sensitivity,
+        record.encryptionState,
+        record.deletionState,
+        record.dev,
+        record.ino,
+        record.birthtimeNs,
+        record.deletedAt ?? null,
+        record.deletionReason ?? null,
+      );
+    });
+  }
+
+  public finalizeArtifact(
+    domainId: string,
+    identity: Pick<ArtifactRecord, 'path' | 'dev' | 'ino' | 'birthtimeNs'>,
+    facts: { sha256: string; sizeBytes: number },
+  ): void {
+    this.transaction(() => {
+      this.verifyEpochFencing(domainId);
+      this.db.prepare(`
+        UPDATE artifacts
+        SET sha256 = ?, size_bytes = ?
+        WHERE domain_id = ? AND dev = ? AND ino = ? AND birthtime_ns = ?
+      `).run(facts.sha256, facts.sizeBytes, domainId, identity.dev, identity.ino, identity.birthtimeNs);
+    });
+  }
+
+  public markArtifactDeleted(
+    domainId: string,
+    identity: Pick<ArtifactRecord, 'path' | 'dev' | 'ino' | 'birthtimeNs'>,
+    reason: string = 'pruned',
+  ): void {
+    this.transaction(() => {
+      this.verifyEpochFencing(domainId);
+      this.db.prepare(`
+        UPDATE artifacts
+        SET deletion_state = 'deleted', deleted_at = ?, deletion_reason = ?
+        WHERE domain_id = ? AND dev = ? AND ino = ? AND birthtime_ns = ?
+      `).run(new Date().toISOString(), reason, domainId, identity.dev, identity.ino, identity.birthtimeNs);
+    });
+  }
+
+  private mapArtifactRow(row: any): ArtifactRecord {
+    return {
+      id: row.artifact_id,
       domainId: row.domain_id,
-      runId: row.run_id || undefined,
-      operationId: row.operation_id || undefined,
-      type: row.type,
-      payload: JSON.parse(row.payload),
-      timestamp: row.timestamp,
-    }));
+      ownerOperationId: row.owner_operation_id || undefined,
+      creatingInstructionId: row.creating_instruction_id || undefined,
+      path: row.path,
+      sha256: row.sha256 || undefined,
+      sizeBytes: row.size_bytes === null || row.size_bytes === undefined ? undefined : Number(row.size_bytes),
+      createdAt: row.created_at,
+      expiresAt: row.expires_at || undefined,
+      sensitivity: row.sensitivity,
+      encryptionState: row.encryption_state,
+      deletionState: row.deletion_state,
+      dev: row.dev,
+      ino: row.ino,
+      birthtimeNs: row.birthtime_ns,
+      deletedAt: row.deleted_at || undefined,
+      deletionReason: row.deletion_reason || undefined,
+    };
+  }
+
+  public getArtifact(idOrPath: string, domainId?: string): ArtifactRecord | null {
+    const row = domainId === undefined
+      ? this.db.prepare('SELECT * FROM artifacts WHERE artifact_id = ? OR path = ? ORDER BY created_at DESC LIMIT 1').get(idOrPath, idOrPath)
+      : this.db.prepare('SELECT * FROM artifacts WHERE domain_id = ? AND (artifact_id = ? OR path = ?) ORDER BY created_at DESC LIMIT 1').get(domainId, idOrPath, idOrPath);
+    return row ? this.mapArtifactRow(row) : null;
+  }
+
+  public listArtifacts(domainId: string, states?: readonly ArtifactRecord['deletionState'][]): ArtifactRecord[] {
+    const rows = states && states.length > 0
+      ? this.db.prepare(`SELECT * FROM artifacts WHERE domain_id = ? AND deletion_state IN (${states.map(() => '?').join(',')}) ORDER BY created_at, artifact_id`).all(domainId, ...states)
+      : this.db.prepare('SELECT * FROM artifacts WHERE domain_id = ? ORDER BY created_at, artifact_id').all(domainId);
+    return (rows as any[]).map((row) => this.mapArtifactRow(row));
   }
 
   public recordSnapshot(snapshot: SnapshotRef): void {
@@ -945,8 +1225,9 @@ export class SqliteStore {
     this.verifyEpochFencing(capability.domainId);
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO capabilities (
-        id, domain_id, parent_id, issued_by, scope, epoch, expires_at, created_at, revoked_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, domain_id, parent_id, issued_by, scope, policy_version, reason, limits,
+        epoch, expires_at, created_at, revoked_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       capability.id,
@@ -954,6 +1235,9 @@ export class SqliteStore {
       capability.parentId ?? null,
       capability.issuedBy,
       JSON.stringify(capability.scope),
+      capability.policyVersion,
+      capability.reason,
+      JSON.stringify(capability.limits),
       capability.epoch,
       capability.expiresAt,
       capability.createdAt,
@@ -989,12 +1273,33 @@ export class SqliteStore {
   }
 
   private mapCapabilityRow(row: any): Capability {
+    const legacyLimits = {
+      cpuMs: 315_360_000_000,
+      memoryBytes: 1_099_511_627_776,
+      outputBytes: 107_374_182_400,
+      concurrentOps: 4096,
+      processes: 65_536,
+    };
+    const rawScope = JSON.parse(row.scope);
+    const paths = Array.isArray(rawScope.paths) ? rawScope.paths : (Array.isArray(rawScope.write) ? rawScope.write : []);
+    const scope = {
+      write: Array.isArray(rawScope.write) ? rawScope.write : paths,
+      exclusive: Array.isArray(rawScope.exclusive) ? rawScope.exclusive : [],
+      opcodes: Array.isArray(rawScope.opcodes) ? rawScope.opcodes : [],
+      workspaces: Array.isArray(rawScope.workspaces) ? rawScope.workspaces : [],
+      paths,
+      secrets: Array.isArray(rawScope.secrets) ? rawScope.secrets : [],
+    };
     return {
       id: row.id,
       domainId: row.domain_id,
       parentId: row.parent_id || undefined,
       issuedBy: row.issued_by,
-      scope: JSON.parse(row.scope),
+      issuer: row.issued_by,
+      policyVersion: row.policy_version || 'legacy/0',
+      reason: row.reason || 'legacy-capability',
+      limits: row.limits ? { ...legacyLimits, ...JSON.parse(row.limits) } : legacyLimits,
+      scope,
       epoch: Number(row.epoch),
       expiresAt: row.expires_at,
       createdAt: row.created_at,

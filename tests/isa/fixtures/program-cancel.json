@@ -1,0 +1,19 @@
+{
+  "isa": "xio/1",
+  "requestId": "golden-cancel-request",
+  "programId": "golden-cancel",
+  "mode": "pipeline",
+  "capability": "cap:golden",
+  "workspace": "workspace:root",
+  "instructions": [
+    {
+      "id": "spawn",
+      "op": "proc.spawn",
+      "args": { "argv": ["node", "-e", "setTimeout(() => {}, 1000)"], "cwd": "workspace:root", "stdio": "capture" },
+      "dependsOn": [],
+      "precondition": [],
+      "output": "process",
+      "opId": "op:golden-cancel.spawn"
+    }
+  ]
+}

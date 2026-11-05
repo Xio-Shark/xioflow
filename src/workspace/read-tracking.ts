@@ -21,6 +21,12 @@ export interface ReadTrackingWalkOptions {
   skip?: Iterable<string>;
 }
 
+export interface WorkspaceObservationIndex {
+  readSet: string[];
+  discoverySet: string[];
+  pathDependencies: string[];
+}
+
 const DEFAULT_SKIP = new Set(['.git', '.xioflow-kernel', '.xioflow']);
 const ATIME_MARGIN_S = 2;
 
@@ -88,18 +94,38 @@ export function collectReadTracking(
   root: string,
   options?: ReadTrackingWalkOptions
 ): { readSet: string[]; pathDependencies: string[] } {
+  const index = collectWorkspaceObservationIndex(root, options);
+  return { readSet: index.readSet, pathDependencies: index.pathDependencies };
+}
+
+/**
+ * 一次遍历同时建立读集、发现集和路径依赖，供 workspace incremental index 使用。
+ * discoverySet 只描述本次扫描实际覆盖到的条目；调用方若无法完成扫描必须传 null，
+ * 不得把部分目录当成完整工作区。
+ */
+export function collectWorkspaceObservationIndex(
+  root: string,
+  options?: ReadTrackingWalkOptions
+): WorkspaceObservationIndex {
   const readSet: string[] = [];
+  const discoverySet: string[] = [];
   const pathDependencies: string[] = [];
   const skipSet = buildSkipSet(options);
   walk(
     root,
     (_abs, rel, st) => {
+      const entry = st.isDirectory() ? `${rel || '.'}/` : rel;
+      discoverySet.push(entry);
       if (st.isSymbolicLink()) pathDependencies.push(rel);
-      else if (wasAccessed(st)) readSet.push(st.isDirectory() ? `${rel || '.'}/` : rel);
+      else if (wasAccessed(st)) readSet.push(entry);
     },
     skipSet
   );
-  return { readSet: readSet.sort(), pathDependencies: pathDependencies.sort() };
+  return {
+    readSet: readSet.sort(),
+    discoverySet: discoverySet.sort(),
+    pathDependencies: pathDependencies.sort(),
+  };
 }
 
 /** 读过的条目（相对 root，目录以 `/` 结尾，root 本身为 `./`）：atime 不早于 mtime。 */

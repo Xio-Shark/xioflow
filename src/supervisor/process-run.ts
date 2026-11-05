@@ -46,7 +46,7 @@ export async function runProcess(ctx: ProcessRunContext, plan: ProcessRunPlan): 
       () => opState.cancelRequested === true
     );
     if (opState.cancelRequested) {
-      return cancelBeforeSpawn(ctx.domain, options, opState);
+      return cancelBeforeSpawn(ctx.domain, options, opState, plan.op.configSnapshot);
     }
 
     // 2. [启动协议步骤 1] 写入 SQLite (status: intent_registered)
@@ -58,7 +58,7 @@ export async function runProcess(ctx: ProcessRunContext, plan: ProcessRunPlan): 
       throw err;
     }
     if (opState.cancelRequested) {
-      return cancelBeforeSpawn(ctx.domain, options, opState);
+      return cancelBeforeSpawn(ctx.domain, options, opState, plan.op.configSnapshot);
     }
 
     // 3. [启动协议步骤 2] 请求平台驱动启动
@@ -67,7 +67,7 @@ export async function runProcess(ctx: ProcessRunContext, plan: ProcessRunPlan): 
     try {
       // 读集观测的起点必须在进程能读到任何东西之前；归一失败按启动失败处理，不带着残缺的证据跑
       plan.readTracking?.begin();
-      handle = await ctx.driver.spawn(plan.command);
+      handle = await ctx.driver.spawn(plan.command, { capabilityId: options.capabilityId });
       opState.handle = handle;
       opState.command = plan.command;
     } catch (spawnError: any) {
@@ -134,7 +134,14 @@ async function activateOrAbort(ctx: ProcessRunContext, plan: ProcessRunPlan, han
     if (options.capabilityId && plan.capAdmission) {
       recordCapabilityUsed(
         ctx.domain,
-        { runId: options.runId, opId: options.opId, capabilityId: options.capabilityId },
+        {
+          runId: options.runId,
+          opId: options.opId,
+          capabilityId: options.capabilityId,
+          opcode: 'proc.spawn',
+          workspace: options.capabilityWorkspace,
+          secretRefs: options.capabilitySecretRefs,
+        },
         plan.capAdmission
       );
     }
@@ -193,7 +200,8 @@ async function activateOrAbort(ctx: ProcessRunContext, plan: ProcessRunPlan, han
 export function cancelBeforeSpawn(
   domain: ExecutionDomain,
   options: ExecuteProcessOptions,
-  opState: ActiveOperationState
+  opState: ActiveOperationState,
+  configSnapshot?: Operation['configSnapshot'],
 ): ProcessOperationResult {
   opState.phase = 'done';
   const stopRes: StopProcessResult = { stopped: 'confirmed_stopped', scope: 'direct_child' };
@@ -228,6 +236,7 @@ export function cancelBeforeSpawn(
       name: options.name,
       inputFingerprint: options.inputFingerprint || computeInputFingerprint(options),
       requiredResources: options.requiredResources || [],
+      configSnapshot,
       status: 'done',
     };
     domain.getStore().recordPreIntentCancelledOperation(op, domain.domainId, cancelResult);

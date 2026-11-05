@@ -17,7 +17,8 @@ export function normalizeResourceName(res: string): string {
 
 /**
  * 规范化计算完整输入的 SHA-256 指纹 (ARCHITECTURE §2 / P0-12)
- * 覆盖 execPath, args, cwd, 键排序的 envWhiteList, inheritEnv, sha256(stdin), 排序后的 requiredResources, timeoutMs, resourceBudget.
+ * 覆盖 execPath, args, cwd, 键排序的 envWhiteList/SecretRef, inheritEnv,
+ * sha256(stdin), 排序后的 requiredResources, timeoutMs, resourceBudget.
  */
 export function computeInputFingerprint(options: ExecuteProcessOptions): string {
   const cmd = options.command;
@@ -32,10 +33,15 @@ export function computeInputFingerprint(options: ExecuteProcessOptions): string 
     envSorted = keys.map((k) => [k, cmd.envWhiteList![k]]);
   }
 
+  const secretEnvSorted = cmd.secretEnv
+    ? Object.entries(cmd.secretEnv).sort(([a], [b]) => a.localeCompare(b))
+    : null;
+
   const canonical = {
     args: cmd.args || [],
     cwd: cmd.cwd || '',
     envWhiteList: envSorted,
+    secretEnv: secretEnvSorted,
     execPath: cmd.execPath || '',
     inheritEnv: cmd.inheritEnv ?? null,
     requiredResources: [...(options.requiredResources || [])].sort(),
@@ -51,6 +57,9 @@ export function computeInputFingerprint(options: ExecuteProcessOptions): string 
     stdinHash,
     timeoutMs: options.timeoutMs ?? null,
     capabilityId: options.capabilityId ?? null,
+    capabilityWorkspace: options.capabilityWorkspace ?? null,
+    capabilitySecretRefs: [...(options.capabilitySecretRefs || [])].sort(),
+    capabilityPolicyVersion: options.capabilityPolicyVersion ?? null,
   };
 
   const canonicalJson = JSON.stringify(canonical);
@@ -81,6 +90,9 @@ export function computeTreeCommandFingerprint(options: {
   timeoutMs?: number;
   resourceBudget?: ExecuteProcessOptions['resourceBudget'];
   capabilityId?: string;
+  capabilityWorkspace?: string;
+  capabilitySecretRefs?: string[];
+  capabilityPolicyVersion?: string;
 }): string {
   const roots: string[] = [];
   if (options.workspaceRoot) {
@@ -107,11 +119,16 @@ export function computeTreeCommandFingerprint(options: {
     envSorted = keys.map((k) => [k, normalizeWorkspaceString(cmd.envWhiteList![k], roots)]);
   }
 
+  const secretEnvSorted = cmd.secretEnv
+    ? Object.entries(cmd.secretEnv).sort(([a], [b]) => a.localeCompare(b))
+    : null;
+
   const canonical = {
     treeFingerprint: options.treeFingerprint,
     args: (cmd.args || []).map((arg) => normalizeWorkspaceString(arg, roots)),
     cwd: normalizeWorkspaceString(cmd.cwd || '', roots),
     envWhiteList: envSorted,
+    secretEnv: secretEnvSorted,
     execPath: normalizeWorkspaceString(cmd.execPath || '', roots),
     inheritEnv: cmd.inheritEnv ?? null,
     resourceBudget: options.resourceBudget
@@ -126,6 +143,9 @@ export function computeTreeCommandFingerprint(options: {
     stdinHash,
     timeoutMs: options.timeoutMs ?? null,
     capabilityId: options.capabilityId ?? null,
+    capabilityWorkspace: options.capabilityWorkspace ?? null,
+    capabilitySecretRefs: [...(options.capabilitySecretRefs || [])].sort(),
+    capabilityPolicyVersion: options.capabilityPolicyVersion ?? null,
   };
 
   return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');

@@ -4,6 +4,18 @@ import { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { ProcessExecutionResult, TerminationReason } from '../types.js';
 import { ToolInputSchema } from './input-schema.js';
 
+/** The core validator owns the full Program schema; the transport checks only this envelope. */
+export const ISA_EXECUTE_TOOL = {
+  name: 'execute',
+  title: 'Execute an ISA program (preview)',
+  description: 'Validate a structured xio/1 Program, or execute supported instructions through an explicitly host-bound kernel. Plan mode has no execution effects. Missing bindings and unsupported opcodes remain unsupported. This tool never issues capabilities or creates Runs.',
+  inputSchema: {
+    type: 'object', properties: { program: { type: 'object', description: 'A structured xio/1 Program.' } },
+    required: ['program'], additionalProperties: false,
+  },
+  annotations: { destructiveHint: true, openWorldHint: true },
+} as const;
+
 /**
  * MCP 工具：把内核原语暴露给任意 MCP 客户端（agent 框架、IDE、CLI agent）。
  * 刻意不暴露 adjudicate：indeterminate 的出口是人工裁决，不交给模型。

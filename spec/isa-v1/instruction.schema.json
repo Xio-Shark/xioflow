@@ -1,0 +1,459 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xio://schema/isa-v1/instruction",
+  "title": "XIO-ISA v1 instruction",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "op", "args", "dependsOn", "precondition", "output"],
+  "properties": {
+    "id": { "$ref": "#/$defs/InstructionId" },
+    "op": {
+      "type": "string",
+      "enum": [
+        "fs.read", "fs.write", "fs.patch", "fs.move", "fs.delete", "fs.stat",
+        "workspace.snapshot", "workspace.diff", "workspace.commit", "workspace.rollback",
+        "proc.spawn", "proc.wait", "proc.signal", "proc.inspect",
+        "observe.files", "observe.resources",
+        "control.status", "control.health", "control.cancel", "control.resolve", "control.resume",
+        "artifact.put", "artifact.get", "artifact.stream"
+      ]
+    },
+    "args": {
+      "oneOf": [
+        { "$ref": "#/$defs/FsReadArgs" },
+        { "$ref": "#/$defs/FsWriteArgs" },
+        { "$ref": "#/$defs/FsPatchArgs" },
+        { "$ref": "#/$defs/FsMoveArgs" },
+        { "$ref": "#/$defs/FsDeleteArgs" },
+        { "$ref": "#/$defs/FsStatArgs" },
+        { "$ref": "#/$defs/WorkspaceSnapshotArgs" },
+        { "$ref": "#/$defs/WorkspaceDiffArgs" },
+        { "$ref": "#/$defs/WorkspaceCommitArgs" },
+        { "$ref": "#/$defs/WorkspaceRollbackArgs" },
+        { "$ref": "#/$defs/ProcSpawnArgs" },
+        { "$ref": "#/$defs/ProcWaitArgs" },
+        { "$ref": "#/$defs/ProcSignalArgs" },
+        { "$ref": "#/$defs/ProcInspectArgs" },
+        { "$ref": "#/$defs/ObserveFilesArgs" },
+        { "$ref": "#/$defs/ObserveResourcesArgs" },
+        { "$ref": "#/$defs/ControlStatusArgs" },
+        { "$ref": "#/$defs/ControlHealthArgs" },
+        { "$ref": "#/$defs/ControlCancelArgs" },
+        { "$ref": "#/$defs/ControlResolveArgs" },
+        { "$ref": "#/$defs/ControlResumeArgs" },
+        { "$ref": "#/$defs/ArtifactPutArgs" },
+        { "$ref": "#/$defs/ArtifactGetArgs" },
+        { "$ref": "#/$defs/ArtifactStreamArgs" }
+      ]
+    },
+    "opId": { "$ref": "#/$defs/OperationId" },
+    "dependsOn": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/InstructionId" }
+    },
+    "precondition": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/Precondition" }
+    },
+    "output": { "$ref": "#/$defs/OutputRef" }
+  },
+  "allOf": [
+    { "if": { "properties": { "op": { "const": "fs.read" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/FsReadArgs" } } } },
+    { "if": { "properties": { "op": { "const": "fs.write" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/FsWriteArgs" } } } },
+    { "if": { "properties": { "op": { "const": "fs.patch" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/FsPatchArgs" } } } },
+    { "if": { "properties": { "op": { "const": "fs.move" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/FsMoveArgs" } } } },
+    { "if": { "properties": { "op": { "const": "fs.delete" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/FsDeleteArgs" } } } },
+    { "if": { "properties": { "op": { "const": "fs.stat" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/FsStatArgs" } } } },
+    { "if": { "properties": { "op": { "const": "workspace.snapshot" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/WorkspaceSnapshotArgs" } } } },
+    { "if": { "properties": { "op": { "const": "workspace.diff" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/WorkspaceDiffArgs" } } } },
+    { "if": { "properties": { "op": { "const": "workspace.commit" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/WorkspaceCommitArgs" } } } },
+    { "if": { "properties": { "op": { "const": "workspace.rollback" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/WorkspaceRollbackArgs" } } } },
+    { "if": { "properties": { "op": { "const": "proc.spawn" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ProcSpawnArgs" } } } },
+    { "if": { "properties": { "op": { "const": "proc.wait" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ProcWaitArgs" } } } },
+    { "if": { "properties": { "op": { "const": "proc.signal" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ProcSignalArgs" } } } },
+    { "if": { "properties": { "op": { "const": "proc.inspect" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ProcInspectArgs" } } } },
+    { "if": { "properties": { "op": { "const": "observe.files" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ObserveFilesArgs" } } } },
+    { "if": { "properties": { "op": { "const": "observe.resources" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ObserveResourcesArgs" } } } },
+    { "if": { "properties": { "op": { "const": "control.status" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ControlStatusArgs" } } } },
+    { "if": { "properties": { "op": { "const": "control.health" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ControlHealthArgs" } } } },
+    { "if": { "properties": { "op": { "const": "control.cancel" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ControlCancelArgs" } } } },
+    { "if": { "properties": { "op": { "const": "control.resolve" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ControlResolveArgs" } } } },
+    { "if": { "properties": { "op": { "const": "control.resume" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ControlResumeArgs" } } } },
+    { "if": { "properties": { "op": { "const": "artifact.put" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ArtifactPutArgs" } } } },
+    { "if": { "properties": { "op": { "const": "artifact.get" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ArtifactGetArgs" } } } },
+    { "if": { "properties": { "op": { "const": "artifact.stream" } } }, "then": { "properties": { "args": { "$ref": "#/$defs/ArtifactStreamArgs" } } } }
+  ],
+  "$defs": {
+    "InstructionId": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+    },
+    "OperationId": {
+      "type": "string",
+      "pattern": "^op:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "OutputRef": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+    },
+    "WorkspaceRef": {
+      "type": "string",
+      "pattern": "^workspace:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "ArtifactRef": {
+      "type": "string",
+      "pattern": "^artifact:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "ProcessRef": {
+      "type": "string",
+      "pattern": "^process:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "SnapshotRef": {
+      "type": "string",
+      "pattern": "^snapshot:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "TransactionRef": {
+      "type": "string",
+      "pattern": "^transaction:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "LeaseRef": {
+      "type": "string",
+      "pattern": "^lease:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "ResumeToken": {
+      "type": "string",
+      "pattern": "^resume:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "SecretRef": {
+      "type": "string",
+      "pattern": "^secret:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "Path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "Hash": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+    "Range": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 }
+      },
+      "required": ["start", "end"]
+    },
+    "Roots": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/Path" }
+    },
+    "FsReadArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "workspace": { "$ref": "#/$defs/WorkspaceRef" },
+        "path": { "$ref": "#/$defs/Path" },
+        "range": { "$ref": "#/$defs/Range" }
+      }
+    },
+    "FsWriteArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "content"],
+      "properties": {
+        "workspace": { "$ref": "#/$defs/WorkspaceRef" },
+        "path": { "$ref": "#/$defs/Path" },
+        "content": { "$ref": "#/$defs/ArtifactRef" },
+        "expectedHash": { "$ref": "#/$defs/Hash" }
+      }
+    },
+    "FsPatchArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "patch"],
+      "properties": {
+        "workspace": { "$ref": "#/$defs/WorkspaceRef" },
+        "path": { "$ref": "#/$defs/Path" },
+        "patch": { "$ref": "#/$defs/ArtifactRef" },
+        "expectedHash": { "$ref": "#/$defs/Hash" }
+      }
+    },
+    "FsMoveArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "workspace": { "$ref": "#/$defs/WorkspaceRef" },
+        "from": { "$ref": "#/$defs/Path" },
+        "to": { "$ref": "#/$defs/Path" }
+      }
+    },
+    "FsDeleteArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "workspace": { "$ref": "#/$defs/WorkspaceRef" },
+        "path": { "$ref": "#/$defs/Path" },
+        "recursive": { "type": "boolean" }
+      }
+    },
+    "FsStatArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "workspace": { "$ref": "#/$defs/WorkspaceRef" },
+        "path": { "$ref": "#/$defs/Path" }
+      }
+    },
+    "WorkspaceSnapshotArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label"],
+      "properties": {
+        "workspace": { "$ref": "#/$defs/WorkspaceRef" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "roots": { "$ref": "#/$defs/Roots" }
+      }
+    },
+    "WorkspaceDiffArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from"],
+      "properties": {
+        "workspace": { "$ref": "#/$defs/WorkspaceRef" },
+        "from": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "to": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "WorkspaceCommitArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transaction"],
+      "properties": {
+        "workspace": { "$ref": "#/$defs/WorkspaceRef" },
+        "transaction": { "$ref": "#/$defs/TransactionRef" }
+      }
+    },
+    "WorkspaceRollbackArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot"],
+      "properties": {
+        "workspace": { "$ref": "#/$defs/WorkspaceRef" },
+        "snapshot": { "$ref": "#/$defs/SnapshotRef" },
+        "roots": { "$ref": "#/$defs/Roots" }
+      }
+    },
+    "ProcSpawnArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["argv", "cwd", "stdio"],
+      "properties": {
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": { "type": "string", "maxLength": 4096 }
+        },
+        "cwd": { "$ref": "#/$defs/WorkspaceRef" },
+        "env": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]{0,127}$" },
+          "additionalProperties": { "type": "string", "maxLength": 65536 },
+          "maxProperties": 256
+        },
+        "secretEnv": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]{0,127}$" },
+          "additionalProperties": { "$ref": "#/$defs/SecretRef" },
+          "maxProperties": 64
+        },
+        "stdio": { "enum": ["capture", "inherit", "ignore", "stream"] },
+        "timeoutMs": { "type": "integer", "minimum": 0, "maximum": 315360000000 }
+      }
+    },
+    "ProcWaitArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["process"],
+      "properties": {
+        "process": { "$ref": "#/$defs/ProcessRef" },
+        "timeoutMs": { "type": "integer", "minimum": 0, "maximum": 315360000000 }
+      }
+    },
+    "ProcSignalArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["process", "signals"],
+      "properties": {
+        "process": { "$ref": "#/$defs/ProcessRef" },
+        "signals": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "type": "string", "pattern": "^SIG[A-Z0-9]+$" }
+        },
+        "graceMs": { "type": "integer", "minimum": 0, "maximum": 315360000000 }
+      }
+    },
+    "ProcInspectArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["process"],
+      "properties": {
+        "process": { "$ref": "#/$defs/ProcessRef" }
+      }
+    },
+    "ObserveFilesArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paths"],
+      "properties": {
+        "workspace": { "$ref": "#/$defs/WorkspaceRef" },
+        "paths": { "$ref": "#/$defs/Roots" },
+        "depth": { "type": "integer", "minimum": 0, "maximum": 128 }
+      }
+    },
+    "ObserveResourcesArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["process"],
+      "properties": {
+        "process": { "$ref": "#/$defs/ProcessRef" },
+        "intervalMs": { "type": "integer", "minimum": 1, "maximum": 3600000 }
+      }
+    },
+    "ControlStatusArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "program": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "instruction": { "$ref": "#/$defs/InstructionId" },
+        "lease": { "$ref": "#/$defs/LeaseRef" }
+      },
+      "anyOf": [
+        { "required": ["program"] },
+        { "required": ["instruction"] },
+        { "required": ["lease"] }
+      ]
+    },
+    "ControlHealthArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    },
+    "ControlCancelArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "program": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "instruction": { "$ref": "#/$defs/InstructionId" },
+        "lease": { "$ref": "#/$defs/LeaseRef" },
+        "graceMs": { "type": "integer", "minimum": 0, "maximum": 315360000000 }
+      },
+      "anyOf": [
+        { "required": ["program"] },
+        { "required": ["instruction"] },
+        { "required": ["lease"] }
+      ]
+    },
+    "ControlResolveArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lease", "decision", "reason"],
+      "properties": {
+        "lease": { "$ref": "#/$defs/LeaseRef" },
+        "decision": { "enum": ["succeeded", "failed", "rolled_back", "partial"] },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "evidence": { "$ref": "#/$defs/ArtifactRef" }
+      }
+    },
+    "ControlResumeArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resumeToken"],
+      "properties": {
+        "resumeToken": { "$ref": "#/$defs/ResumeToken" }
+      }
+    },
+    "ArtifactPutArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content"],
+      "properties": {
+        "content": { "type": "string", "maxLength": 10485760 },
+        "mediaType": { "type": "string", "maxLength": 256 },
+        "sensitivity": { "enum": ["public", "internal", "secret"] },
+        "ttlMs": { "type": "integer", "minimum": 0, "maximum": 315360000000 }
+      }
+    },
+    "ArtifactGetArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact"],
+      "properties": {
+        "artifact": { "$ref": "#/$defs/ArtifactRef" },
+        "range": { "$ref": "#/$defs/Range" }
+      }
+    },
+    "ArtifactStreamArgs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact"],
+      "properties": {
+        "artifact": { "$ref": "#/$defs/ArtifactRef" },
+        "cursor": { "type": "string", "pattern": "^cursor:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$" },
+        "maxBytes": { "type": "integer", "minimum": 1, "maximum": 10485760 }
+      }
+    },
+    "Precondition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "path", "sha256"],
+          "properties": {
+            "kind": { "const": "file_hash" },
+            "path": { "$ref": "#/$defs/Path" },
+            "sha256": { "$ref": "#/$defs/Hash" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "artifact", "sha256"],
+          "properties": {
+            "kind": { "const": "artifact_hash" },
+            "artifact": { "$ref": "#/$defs/ArtifactRef" },
+            "sha256": { "$ref": "#/$defs/Hash" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "instruction", "status"],
+          "properties": {
+            "kind": { "const": "instruction_status" },
+            "instruction": { "$ref": "#/$defs/InstructionId" },
+            "status": { "enum": ["admitted", "succeeded", "failed", "indeterminate", "cancelled", "rolled_back", "partial"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "workspace", "revision"],
+          "properties": {
+            "kind": { "const": "workspace_revision" },
+            "workspace": { "$ref": "#/$defs/WorkspaceRef" },
+            "revision": { "type": "string", "minLength": 1, "maxLength": 256 }
+          }
+        }
+      ]
+    }
+  }
+}

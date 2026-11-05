@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xio://schema/isa-v1/program",
+  "title": "XIO-ISA v1 program",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["isa", "requestId", "programId", "mode", "instructions"],
+  "properties": {
+    "isa": {
+      "type": "string",
+      "pattern": "^xio/1(?:\\.[0-9]+)?$"
+    },
+    "requestId": { "$ref": "#/$defs/RequestId" },
+    "programId": { "$ref": "#/$defs/ProgramId" },
+    "mode": { "enum": ["plan", "transaction", "pipeline"] },
+    "capability": { "$ref": "xio://schema/isa-v1/capability#/$defs/CapabilityRef" },
+    "workspace": { "$ref": "xio://schema/isa-v1/capability#/$defs/WorkspaceRef" },
+    "instructions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": { "$ref": "xio://schema/isa-v1/instruction" }
+    },
+    "options": { "$ref": "#/$defs/ExecutionOptions" }
+  },
+  "xioLimits": {
+    "maxJsonBytes": 10485760,
+    "maxInstructionCount": 256,
+    "maxDependencyCount": 64,
+    "maxPreconditionCount": 64,
+    "maxArtifactReferenceCount": 1024,
+    "maxNestingDepth": 32
+  },
+  "$defs": {
+    "RequestId": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+    },
+    "ProgramId": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+    },
+    "EventCursor": {
+      "type": "string",
+      "pattern": "^event:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$"
+    },
+    "ExecutionOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "wait": { "enum": ["until_terminal", "until_admitted", "return_cursor"] },
+        "maxOutputBytes": { "type": "integer", "minimum": 0, "maximum": 104857600 },
+        "eventCursor": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/EventCursor" }
+          ]
+        }
+      }
+    }
+  }
+}

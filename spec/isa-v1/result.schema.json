@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xio://schema/isa-v1/result",
+  "title": "XIO-ISA v1 execution result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["isa", "requestId", "status", "results", "events"],
+  "properties": {
+    "isa": {
+      "type": "string",
+      "pattern": "^xio/1(?:\\.[0-9]+)?$"
+    },
+    "requestId": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+    },
+    "programId": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$"
+    },
+    "status": { "$ref": "#/$defs/ProgramStatus" },
+    "committed": { "type": "boolean" },
+    "results": {
+      "type": "array",
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/InstructionResult" }
+    },
+    "events": { "$ref": "#/$defs/EventPage" }
+  },
+  "$defs": {
+    "ProgramStatus": {
+      "enum": ["admitted", "running", "succeeded", "failed", "rejected", "cancelled", "indeterminate", "partial"]
+    },
+    "InstructionStatus": {
+      "enum": ["admitted", "running", "succeeded", "failed", "rejected", "cancelled", "indeterminate", "rolled_back", "partial"]
+    },
+    "Atomicity": {
+      "enum": ["pure", "local_atomic", "compensatable", "external", "sampled"]
+    },
+    "Observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["proven", "sampled", "unknown", "unsupported", "indeterminate"] },
+        "driver": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "evidence": { "$ref": "xio://schema/isa-v1/capability#/$defs/ArtifactRef" },
+        "reason": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "Effects": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "changedPaths": {
+          "type": "array",
+          "maxItems": 4096,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "createdRefs": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "possibleEffects": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        }
+      }
+    },
+    "Evidence": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "anyOf": [
+          { "$ref": "xio://schema/isa-v1/capability#/$defs/ArtifactRef" },
+          { "$ref": "xio://schema/isa-v1/capability#/$defs/WorkspaceRef" },
+          { "$ref": "xio://schema/isa-v1/capability#/$defs/ProcessRef" },
+          { "$ref": "xio://schema/isa-v1/capability#/$defs/SnapshotRef" }
+        ]
+      }
+    },
+    "Replay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["none", "joined", "replayed", "not_replayable", "requires_adjudication"] },
+        "source": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "reason": { "type": "string", "maxLength": 1024 }
+      }
+    },
+    "Rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["none", "available", "not_applicable", "compensated", "partial", "impossible"] },
+        "coverage": { "enum": ["complete", "non_ignored", "declared_roots", "unknown"] },
+        "residual": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "type": "string", "maxLength": 4096 }
+        }
+      }
+    },
+    "InstructionValue": {
+      "type": "object"
+    },
+    "InstructionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "atomicity", "observation", "effects", "evidence", "artifactRefs", "replay", "rollback"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._:-]{0,127}$" },
+        "opId": { "type": "string", "pattern": "^op:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$" },
+        "status": { "$ref": "#/$defs/InstructionStatus" },
+        "atomicity": { "$ref": "#/$defs/Atomicity" },
+        "observation": { "$ref": "#/$defs/Observation" },
+        "effects": { "$ref": "#/$defs/Effects" },
+        "evidence": { "$ref": "#/$defs/Evidence" },
+        "artifactRefs": {
+          "type": "array",
+          "maxItems": 1024,
+          "uniqueItems": true,
+          "items": { "$ref": "xio://schema/isa-v1/capability#/$defs/ArtifactRef" }
+        },
+        "replay": { "$ref": "#/$defs/Replay" },
+        "rollback": { "$ref": "#/$defs/Rollback" },
+        "value": { "type": "object" },
+        "error": { "type": "object" },
+        "lease": { "$ref": "xio://schema/isa-v1/capability#/$defs/LeaseRef" },
+        "possibleEffects": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "nextActions": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z]+\\.[a-z]+$" }
+        },
+        "resumeToken": { "$ref": "xio://schema/isa-v1/capability#/$defs/ResumeToken" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "indeterminate" } } },
+          "then": { "required": ["lease", "possibleEffects", "nextActions"] }
+        }
+      ]
+    },
+    "EventPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nextCursor", "omitted"],
+      "properties": {
+        "nextCursor": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "pattern": "^event:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$" }
+          ]
+        },
+        "omitted": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

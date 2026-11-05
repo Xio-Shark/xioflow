@@ -1,0 +1,27 @@
+{
+  "isa": "xio/1",
+  "requestId": "golden-partial-request",
+  "programId": "golden-partial",
+  "mode": "pipeline",
+  "capability": "cap:golden",
+  "workspace": "workspace:root",
+  "instructions": [
+    {
+      "id": "read",
+      "op": "fs.read",
+      "args": { "workspace": "workspace:root", "path": "README.md" },
+      "dependsOn": [],
+      "precondition": [],
+      "output": "read-result"
+    },
+    {
+      "id": "write",
+      "op": "fs.write",
+      "args": { "workspace": "workspace:root", "path": "out.txt", "content": "artifact:input" },
+      "dependsOn": ["read"],
+      "precondition": [{ "kind": "instruction_status", "instruction": "read", "status": "succeeded" }],
+      "output": "write-result",
+      "opId": "op:golden-partial.write"
+    }
+  ]
+}

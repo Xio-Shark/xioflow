@@ -1,0 +1,20 @@
+{
+  "isa": "xio/1",
+  "requestId": "golden-replay-request",
+  "programId": "golden-replay",
+  "status": "partial",
+  "results": [
+    {
+      "id": "step",
+      "status": "partial",
+      "atomicity": "external",
+      "observation": { "status": "unknown", "reason": "partial journal" },
+      "effects": {},
+      "evidence": [],
+      "artifactRefs": [],
+      "replay": { "mode": "joined" },
+      "rollback": { "status": "not_applicable" }
+    }
+  ],
+  "events": { "nextCursor": null, "omitted": 0 }
+}

@@ -1,0 +1,42 @@
+{
+  "isa": "xio/1",
+  "requestId": "request-1",
+  "programId": "program-1",
+  "mode": "pipeline",
+  "capability": "cap:compiler-test",
+  "workspace": "workspace:root",
+  "instructions": [
+    {
+      "id": "build.spawn",
+      "op": "proc.spawn",
+      "args": {
+        "argv": ["node", "-e", "0"],
+        "cwd": "workspace:root",
+        "stdio": "capture",
+        "timeoutMs": 100
+      },
+      "dependsOn": [],
+      "precondition": [],
+      "output": "build.process",
+      "opId": "op:program-1.build.spawn"
+    },
+    {
+      "id": "build.wait",
+      "op": "proc.wait",
+      "args": {
+        "process": "process:program-1.build",
+        "timeoutMs": 100
+      },
+      "dependsOn": ["build.spawn"],
+      "precondition": [
+        {
+          "kind": "instruction_status",
+          "instruction": "build.spawn",
+          "status": "succeeded"
+        }
+      ],
+      "output": "build.result",
+      "opId": "op:program-1.build.wait"
+    }
+  ]
+}

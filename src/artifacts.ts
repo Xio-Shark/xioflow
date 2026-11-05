@@ -2,6 +2,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ExecutionDomain } from './domain.js';
+import type {
+  ArtifactEncryptionState,
+  ArtifactRecord,
+  ArtifactSensitivity,
+} from './types.js';
 
 /** IDs are opaque keys, never path components. Keep existing ordinary filenames readable. */
 export function artifactStem(id: string): string {
@@ -29,20 +34,86 @@ export interface OwnedArtifact {
   birthtimeNs: string;
 }
 
+export interface ArtifactCreateOptions {
+  artifactId?: string;
+  creatingInstructionId?: string;
+  ttlMs?: number;
+  sensitivity?: ArtifactSensitivity;
+  encryptionState?: ArtifactEncryptionState;
+  sha256?: string;
+  sizeBytes?: number;
+}
+
+export interface ArtifactFacts {
+  sha256: string;
+  sizeBytes: number;
+}
+
+export function artifactId(artifact: OwnedArtifact): string {
+  const identity = JSON.stringify([path.resolve(artifact.path), artifact.dev, artifact.ino, artifact.birthtimeNs]);
+  return `artifact:${crypto.createHash('sha256').update(identity).digest('hex').slice(0, 48)}`;
+}
+
 export function artifactIdentity(file: string, stat: fs.BigIntStats): OwnedArtifact {
   return { path: file, dev: stat.dev.toString(), ino: stat.ino.toString(), birthtimeNs: stat.birthtimeNs.toString() };
 }
 
-export function recordArtifactCreated(domain: ExecutionDomain, opId: string, artifact: OwnedArtifact): void {
+export function recordArtifactCreated(
+  domain: ExecutionDomain,
+  opId: string,
+  artifact: OwnedArtifact,
+  options: ArtifactCreateOptions = {},
+): ArtifactRecord {
   const store = domain.getStore();
-  store.recordEventAndTransitionState({
+  const createdAt = new Date().toISOString();
+  const record: ArtifactRecord = {
+    id: options.artifactId ?? artifactId(artifact),
     domainId: domain.domainId,
-    operationId: opId,
-    runId: store.getOperation(opId)?.runId,
-    type: 'ARTIFACT_CREATED',
-    payload: { ...artifact, path: path.resolve(artifact.path) },
-    timestamp: new Date().toISOString(),
+    ownerOperationId: opId,
+    creatingInstructionId: options.creatingInstructionId ?? opId,
+    path: path.resolve(artifact.path),
+    sha256: options.sha256,
+    sizeBytes: options.sizeBytes,
+    createdAt,
+    ...(options.ttlMs !== undefined ? { expiresAt: new Date(Date.now() + options.ttlMs).toISOString() } : {}),
+    sensitivity: options.sensitivity ?? 'internal',
+    encryptionState: options.encryptionState ?? 'unknown',
+    deletionState: 'present',
+    dev: artifact.dev,
+    ino: artifact.ino,
+    birthtimeNs: artifact.birthtimeNs,
+  };
+  store.transaction(() => {
+    store.recordArtifact(record);
+    store.recordEventAndTransitionState({
+      domainId: domain.domainId,
+      operationId: opId,
+      runId: store.getOperation(opId)?.runId,
+      type: 'ARTIFACT_CREATED',
+      payload: {
+        ...artifact,
+        artifactId: record.id,
+        ownerOperationId: opId,
+        creatingInstructionId: record.creatingInstructionId,
+        path: record.path,
+        sha256: record.sha256,
+        sizeBytes: record.sizeBytes,
+        expiresAt: record.expiresAt,
+        sensitivity: record.sensitivity,
+        encryptionState: record.encryptionState,
+      },
+      timestamp: createdAt,
+    });
   });
+  return record;
+}
+
+export function recordArtifactFinalized(domain: ExecutionDomain, artifact: OwnedArtifact, facts: ArtifactFacts): void {
+  domain.getStore().finalizeArtifact(domain.domainId, { ...artifact, path: path.resolve(artifact.path) }, facts);
+}
+
+export function recordArtifactDeleted(domain: ExecutionDomain, artifact: OwnedArtifact, reason: string = 'pruned'): void {
+  domain.getStore().markArtifactDeleted(domain.domainId, { ...artifact, path: path.resolve(artifact.path) }, reason);
 }
 
 /** Exclusive creation also rejects pre-existing symlinks and hard links without modifying them. */

@@ -56,6 +56,7 @@ describe('xioflow mcp (interoperability with the official MCP SDK client)', () =
       'begin_transaction',
       'cancel_operation',
       'commit_transaction',
+      'execute',
       'operation_status',
       'rollback_workspace',
       'run_command',

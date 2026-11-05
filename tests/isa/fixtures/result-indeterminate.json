@@ -1,0 +1,23 @@
+{
+  "isa": "xio/1",
+  "requestId": "golden-result-request",
+  "programId": "golden-indeterminate",
+  "status": "indeterminate",
+  "results": [
+    {
+      "id": "signal",
+      "status": "indeterminate",
+      "atomicity": "external",
+      "observation": { "status": "indeterminate", "reason": "driver lost observation" },
+      "effects": { "possibleEffects": ["process may still be running"] },
+      "evidence": ["process:golden-indeterminate.worker", "artifact:signal-evidence"],
+      "artifactRefs": ["artifact:signal-evidence"],
+      "replay": { "mode": "requires_adjudication" },
+      "rollback": { "status": "impossible" },
+      "lease": "lease:golden-indeterminate",
+      "possibleEffects": ["process may still be running"],
+      "nextActions": ["control.status", "control.resolve"]
+    }
+  ],
+  "events": { "nextCursor": "event:golden-1", "omitted": 0 }
+}

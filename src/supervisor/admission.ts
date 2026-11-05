@@ -7,6 +7,14 @@ import { ExecuteProcessOptions } from './types.js';
 
 export type CapabilityAdmission = ReturnType<ExecutionDomain['checkCapabilityAdmission']>;
 
+/** Secret values are only permitted when the selected platform driver owns a resolver. */
+export function assertSecretResolverSupported(driver: PlatformDriver, command: StructuredCommand): void {
+  if (Object.keys(command.secretEnv ?? {}).length === 0) return;
+  if (driver.secretResolution !== true) {
+    throw new UnsupportedCapabilityError('secretResolver', driver.name, 'secretEnv');
+  }
+}
+
 /**
  * Capability 准入校验与字段推导（契约 #55）。
  * 会就地改写 `options.requiredResources`（规范化或收窄到 capability 范围）：
@@ -16,6 +24,10 @@ export function admitProcessScope(
   domain: ExecutionDomain,
   options: ExecuteProcessOptions
 ): { mutationRoots?: string[]; capAdmission?: CapabilityAdmission } {
+  const commandSecretRefs = Object.values(options.command.secretEnv ?? {});
+  if (options.capabilityId && commandSecretRefs.length > 0) {
+    options.capabilitySecretRefs = [...new Set([...(options.capabilitySecretRefs ?? []), ...commandSecretRefs])];
+  }
   if (options.capabilityId) {
     let candidateRoots = options.mutationRoots ? [...options.mutationRoots] : [];
     if (candidateRoots.length === 0 && options.command.cwd) {
@@ -25,6 +37,17 @@ export function admitProcessScope(
       capabilityId: options.capabilityId,
       requiredResources: options.requiredResources,
       mutationRoots: candidateRoots.length > 0 ? candidateRoots : undefined,
+      opcode: 'proc.spawn',
+      workspace: options.capabilityWorkspace,
+      secretRefs: options.capabilitySecretRefs,
+      requestedLimits: {
+        ...(options.resourceBudget?.maxCpuTimeMs !== undefined ? { cpuMs: options.resourceBudget.maxCpuTimeMs } : {}),
+        ...(options.resourceBudget?.maxMemoryBytes !== undefined ? { memoryBytes: options.resourceBudget.maxMemoryBytes } : {}),
+        ...(options.resourceBudget?.maxOutputBytes !== undefined ? { outputBytes: options.resourceBudget.maxOutputBytes } : {}),
+        ...(options.resourceBudget?.maxPids !== undefined ? { processes: options.resourceBudget.maxPids } : {}),
+        concurrentOps: 1,
+      },
+      policyVersion: options.capabilityPolicyVersion,
       runId: options.runId,
       opId: options.opId,
     });
@@ -120,7 +143,7 @@ export function assertRunAcceptsOperations(domain: ExecutionDomain, runId: strin
 
 export function recordCapabilityUsed(
   domain: ExecutionDomain,
-  ids: { runId: string; opId: string; capabilityId: string },
+  ids: { runId: string; opId: string; capabilityId: string; opcode?: string; workspace?: string; secretRefs?: string[] },
   capAdmission: CapabilityAdmission
 ): void {
   domain.getStore().recordJournalEvent({
@@ -131,7 +154,11 @@ export function recordCapabilityUsed(
     payload: {
       capabilityId: ids.capabilityId,
       scope: capAdmission.capability.scope,
+      limits: capAdmission.effectiveLimits,
       actor: capAdmission.capability.issuedBy,
+      opcode: ids.opcode,
+      workspace: ids.workspace,
+      secretRefs: ids.secretRefs,
     },
     timestamp: new Date().toISOString(),
   });

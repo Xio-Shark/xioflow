@@ -9,8 +9,13 @@ import { wrapAgent } from './gateway/shell-shim.js';
 import { LandlockConfinementDriver } from './confinement/landlock.js';
 import { raceAgentsInVirtualWorkspaces, runInVirtualWorkspace } from './gateway/virtual-workspace.js';
 import { forkGatewayRunAtStep, formatGatewayRunTrace, traceGatewayRun } from './gateway/time-fork.js';
+import { executeIsaProgram, isaResultExitCode } from './adapters/isa.js';
 
 const USAGE = `usage:
+  xio plan --input <program.json|->
+      Preview: structurally validate an ISA Program without acquiring a domain or executing effects; no execution authority is implied.
+  xio execute --input <program.json|->
+      Submit an ISA Program through the preview adapter. Pipeline execution requires a host binding; the standalone CLI does not create one.
   xio wrap [--domain <dir>] [--domain-id <id>] [--run-id <id>] [--upstream-url <url>]
            [--shadow] [--gate <cmd>] [--timeout-ms <n>] [--max-output-bytes <n>] [--] <agent-cmd> [args...]
       Wrap an external agent process in a dual-boundary supervised gateway (optionally inside a shadow worktree).
@@ -89,6 +94,16 @@ function splitWrapArgs(args: string[]): { wrapArgs: string[]; agentArgv: string[
 
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
+  if (command === 'plan' || command === 'execute') {
+    const { values } = parseArgs({ args: rest, options: { input: { type: 'string' } }, strict: true });
+    if (!values.input) throw new Error(`${command} requires --input <program.json|->`);
+    const source = fs.readFileSync(values.input === '-' ? 0 : path.resolve(values.input), 'utf8');
+    const program: unknown = JSON.parse(source);
+    const result = await executeIsaProgram(program, { mode: command === 'plan' ? 'plan' : undefined });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    process.exitCode = isaResultExitCode(result);
+    return;
+  }
   await LandlockConfinementDriver.probe();
 
   if (command === 'wrap') {

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { ProcessSampler } from '../../src/driver/sampler.js';
 import { NodePlatformDriver } from '../../src/driver/node-driver.js';
 import { getGroupMembers } from '../../src/driver/process-facts.js';
-import type { ManagedProcessHandle } from '../../src/driver/types.js';
+import type { ManagedProcessHandle, ProcessIdentity } from '../../src/driver/types.js';
 
 describe('unavailable OS process evidence', () => {
   let root: string;
@@ -33,6 +33,48 @@ describe('unavailable OS process evidence', () => {
 
   it('rejects a failed process-table query instead of returning an empty snapshot', async () => {
     await expect(new ProcessSampler().getSnapshot(0)).rejects.toThrow(/process|observation/i);
+  });
+
+  it('uses one asynchronous process-table read for all watched trees in a cycle', async () => {
+    let reads = 0;
+    const sampler = new ProcessSampler({
+      readProcessTable: async () => {
+        reads++;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return [
+          '101 1 101 S 10 00:00.01 leader-a',
+          '202 1 202 S 20 00:00.02 leader-b',
+        ].join('\n');
+      },
+    });
+    const stopA = sampler.watchProcessTree(101, new Set<number>());
+    const stopB = sampler.watchProcessTree(202, new Set<number>());
+    try {
+      await vi.waitFor(() => {
+        expect(sampler.getCycleDiagnostics().cycleCount).toBeGreaterThanOrEqual(2);
+      });
+      const diagnostics = sampler.getCycleDiagnostics();
+      expect(diagnostics.activeWatchers).toBe(2);
+      expect(reads).toBe(diagnostics.cycleCount);
+    } finally {
+      stopA();
+      stopB();
+    }
+    expect(sampler.getCycleDiagnostics().activeWatchers).toBe(0);
+  });
+
+  it('reports an alive process missing from a snapshot as unknown evidence', async () => {
+    const sampler = ProcessSampler.getInstance();
+    const snapshot = vi.spyOn(sampler, 'getSnapshot').mockResolvedValue(new Map());
+    try {
+      const identity: ProcessIdentity = {
+        pid: process.pid,
+        spawnTime: new Date().toISOString(),
+      };
+      await expect(new NodePlatformDriver().sampleMetrics(identity)).rejects.toThrow(/missing from the process snapshot/i);
+    } finally {
+      snapshot.mockRestore();
+    }
   });
 
   it.skipIf(process.platform !== 'darwin')('does not interpret a failed macOS group query as an empty group', async () => {

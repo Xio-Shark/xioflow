@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { artifactPath, assertArtifactDirectory, recordArtifactCreated } from '../artifacts.js';
+import { artifactPath, assertArtifactDirectory, recordArtifactCreated, recordArtifactDeleted, recordArtifactFinalized } from '../artifacts.js';
 import { ManagedProcessHandle } from '../driver/types.js';
 import { ProcessOperationResult } from '../types.js';
 import { setupStreamDrainer, StreamDrainer } from './drainer.js';
@@ -63,7 +63,9 @@ export function openOutputCapture(ctx: ProcessRunContext, plan: ProcessRunPlan, 
       onChunk,
       forwardChunk(stream),
       artifactsDirError,
-      (artifact) => recordArtifactCreated(ctx.domain, options.opId, artifact)
+      (artifact) => recordArtifactCreated(ctx.domain, options.opId, artifact),
+      (artifact, facts) => recordArtifactFinalized(ctx.domain, artifact, facts),
+      (artifact, reason) => recordArtifactDeleted(ctx.domain, artifact, reason)
     );
   return {
     stdout: drainer('stdout'),

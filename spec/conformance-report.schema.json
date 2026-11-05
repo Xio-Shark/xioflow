@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "xio://schema/conformance-report/1",
+  "title": "Conformance evidence report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "status", "startedAt", "finishedAt", "suite", "environment", "command", "inventory", "counts", "raw", "errors", "limitations"],
+  "properties": {
+    "schemaVersion": { "const": "xio/conformance-report/1" },
+    "status": { "enum": ["PASS", "PASS_WITH_CONCERNS", "FAIL", "NOT_RUN"] },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "finishedAt": { "type": "string", "format": "date-time" },
+    "suite": {
+      "type": "object",
+      "required": ["package", "version", "sourceSha256", "catalogSha256", "sourceCommit", "sourceCommitError", "buildSha256"],
+      "properties": {
+        "package": { "type": "string" }, "version": { "type": "string" },
+        "sourceSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "catalogSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "sourceCommit": { "type": ["string", "null"] }, "sourceCommitError": { "type": ["string", "null"] },
+        "buildSha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "environment": {
+      "type": "object", "required": ["node", "platform", "arch", "release", "driver"],
+      "properties": {
+        "node": { "type": "string" }, "platform": { "type": "string" }, "arch": { "type": "string" }, "release": { "type": "string" },
+        "driver": { "type": "object", "required": ["name", "capabilities"], "properties": { "name": { "type": "string" }, "capabilities": { "type": "object" } } }
+      }
+    },
+    "command": {
+      "type": "object", "required": ["argv", "cwd", "executed", "exitCode"],
+      "properties": {
+        "argv": { "type": "array", "items": { "type": "string" } }, "cwd": { "type": "string" },
+        "executed": { "type": "boolean" }, "exitCode": { "type": ["integer", "null"] }
+      }
+    },
+    "inventory": {
+      "type": "object", "required": ["catalog", "runnable", "archived", "planned", "internalOnly", "unsupported"],
+      "properties": {
+        "catalog": { "type": "object", "required": ["count", "entries"], "properties": { "count": { "type": "integer", "minimum": 0 }, "entries": { "type": "array", "items": { "type": "object", "required": ["id", "level", "description", "declaration", "classification"] } } } },
+        "runnable": { "type": "object", "required": ["count", "entries"], "properties": { "count": { "type": "integer", "minimum": 0 }, "entries": { "type": "array", "items": { "type": "object", "required": ["id", "name", "status"], "properties": { "status": { "enum": ["passed", "failed", "unsupported", "not_run"] } } } } } },
+        "archived": { "$ref": "#/$defs/ids" }, "planned": { "$ref": "#/$defs/ids" }, "internalOnly": { "$ref": "#/$defs/ids" }, "unsupported": { "$ref": "#/$defs/ids" }
+      }
+    },
+    "counts": { "type": "object", "required": ["passed", "failed", "unsupported", "not_run"], "additionalProperties": { "type": "integer", "minimum": 0 } },
+    "raw": { "type": ["object", "null"] },
+    "errors": { "type": "array", "items": { "type": "object", "required": ["phase", "error"], "properties": { "phase": { "type": "string" }, "error": { "type": "string" } } } },
+    "limitations": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": { "ids": { "type": "array", "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } } }
+}

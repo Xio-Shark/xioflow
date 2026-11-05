@@ -10,6 +10,10 @@ export interface ExecuteProcessOptions {
   requiredResources?: string[];
   mutationRoots?: string[];
   capabilityId?: string;
+  /** Optional v1 capability binding facts for opcode/workspace/SecretRef admission. */
+  capabilityWorkspace?: string;
+  capabilitySecretRefs?: string[];
+  capabilityPolicyVersion?: string;
   confinement?: boolean | string;
   confinementDriver?: ConfinementDriver;
   timeoutMs?: number;
@@ -53,6 +57,7 @@ export interface CaptureSnapshotOptions {
   opId: string;
   roots?: string[];
   capabilityId?: string;
+  capabilityWorkspace?: string;
   includeIgnored?: boolean;
   /**
    * 'manifest'：不复制被忽略文件的内容，只记录每个文件的 size / mtime / ctime / mode。
@@ -69,6 +74,7 @@ export interface RollbackOptions {
   snapshotId: string;
   roots?: string[];
   capabilityId?: string;
+  capabilityWorkspace?: string;
   force?: boolean;
   /** full_tree 快照之后新出现的被忽略文件：默认保留并列入 unrestoredPaths（status 为 partial）；true 时删除。 */
   removeNewIgnored?: boolean;

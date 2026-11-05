@@ -355,13 +355,18 @@ remain host responsibilities; parent-child cancellation follows the task scope.
 ## Verified scope
 
 - `scripts/agent-soak.mjs` exercises repeated scoped cancellation, queue overflow,
-  journal-boundary fault injection and real SIGKILL restart. Run `pnpm build` then
-  `XIOFLOW_SOAK_SECONDS=120 node scripts/agent-soak.mjs`. It reports sampled RSS,
-  journal/database growth, event-loop delay, rejected commands and remaining known
-  process IDs. Set `XIOFLOW_EXPECT_CGROUP=1` inside a delegated Linux cgroup to
-  test that driver. Duration defaults to 120 seconds and accepts up to 86,400.
-  ENOSPC is an injected journal exception, not a full-disk experiment. A bounded
-  run does not establish day-long stability or bounded journal retention.
+  journal-boundary fault injection, real SIGKILL restart/reopen, ISA pipeline writes,
+  artifact prune, lease release, RSS, active-handle count, event-loop delay and
+  remaining known process IDs. Run `pnpm build` then
+  `XIOFLOW_SOAK_PROFILE=smoke XIOFLOW_SOAK_SECONDS=120 node scripts/agent-soak.mjs`.
+  The `24h` and `7d` profiles set target durations of `86,400` and `604,800` seconds;
+  `XIOFLOW_SOAK_SECONDS` can shorten them for smoke checks, and the JSON report then
+  says `PASS_WITH_CONCERNS` with `completedTargetDuration: false` instead of claiming
+  long-run evidence. Set `XIOFLOW_EXPECT_CGROUP=1` inside a delegated Linux cgroup
+  to test that driver. ENOSPC is an injected journal exception, not a full-disk
+  experiment. Set `XIOFLOW_SOAK_OUTPUT=/path/to/report.json` to persist the JSON
+  report; a bounded run does not establish day-long stability or bounded journal
+  retention.
 
 - Unit tests cover round-robin ordering, parallel bounds, child creation,
   independent pauses, evidence gates, checkpoint selection and budget retention.

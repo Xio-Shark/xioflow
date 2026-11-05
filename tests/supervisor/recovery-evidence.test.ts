@@ -4,6 +4,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ExecutionDomain, NodePlatformDriver, RecoveryEngine, ResourceConflictError } from '../../src/index.js';
+import { createRecoveryEvidence } from '../../src/recovery/evidence.js';
+import type { RecoveryEvidence } from '../../src/types.js';
 
 describe('durable recovery evidence', () => {
   let root: string;
@@ -30,10 +32,10 @@ describe('durable recovery evidence', () => {
     domain = ExecutionDomain.acquire(root, 'recovery');
   }
 
-  function intent(spawnGated: boolean | undefined, kind: 'process' | 'service' = 'process', id = 'op') {
+  function intent(spawnGated: boolean | undefined, kind: 'process' | 'service' = 'process', id = 'op', recoveryEvidence?: RecoveryEvidence) {
     domain.registerOperationIntent({
       id, runId: 'run', kind, name: id, inputFingerprint: 'fingerprint',
-      requiredResources: ['res:workspace'], status: 'pending', spawnGated,
+      requiredResources: ['res:workspace'], status: 'pending', spawnGated, recoveryEvidence,
     });
   }
 
@@ -84,6 +86,68 @@ describe('durable recovery evidence', () => {
     const report = await new RecoveryEngine(domain, driver).recover();
     expect(report.recoveredOperations[0]?.action).toBe('isolated_indeterminate');
     expect(domain.isResourceLocked('res:workspace')).toBe(true);
+  });
+
+  it.each(['is_original_process', 'not_original_process'] as const)('preserves observed unreaped PIDs after recovery of %s', async (verification) => {
+    intent(true);
+    domain.getStore().updateOperationStatus('op', 'active', { pid: 99999999, pgid: 99999999, spawnTime: new Date().toISOString() });
+    const driver = new NodePlatformDriver();
+    vi.spyOn(driver, 'verifyIdentity').mockResolvedValue(verification);
+    vi.spyOn(driver, 'terminate').mockResolvedValue({ stopped: 'confirmed_stopped', scope: 'process_group', unreapedPids: [99999999] });
+    vi.spyOn(driver, 'terminateGroup').mockResolvedValue({ stopped: 'confirmed_stopped', scope: 'process_group', unreapedPids: [99999999] });
+    vi.spyOn(driver, 'getGroupEvidence').mockResolvedValue([]);
+    Object.assign(driver, { isGroupAlive: () => true });
+    const report = await new RecoveryEngine(domain, driver).recover();
+    expect(report.recoveredOperations[0]?.action).toBe(verification === 'is_original_process' ? 'stopped_alive_process' : 'marked_dead');
+    expect(domain.getStore().getOperation('op')?.result).toMatchObject({
+      kind: 'process', unreapedPids: [99999999], exitCode: null, signal: null, evidence: 'unobserved',
+    });
+    expect(domain.isResourceLocked('res:workspace')).toBe(false);
+  });
+
+  it('uses original containment evidence instead of replacement driver capabilities', async () => {
+    const original = new NodePlatformDriver();
+    original.capabilities.descendantEnumeration = 'cgroup';
+    intent(true, 'process', 'op', createRecoveryEvidence(original));
+    domain.getStore().updateOperationStatus('op', 'active', {
+      pid: 99999999,
+      pgid: 99999999,
+      cgroupPath: '/sys/fs/cgroup/xio/original-op',
+      spawnTime: new Date().toISOString(),
+    });
+
+    reopen();
+    const replacement = new NodePlatformDriver();
+    replacement.capabilities.descendantEnumeration = 'full';
+    vi.spyOn(replacement, 'verifyIdentity').mockResolvedValue('not_original_process');
+    const settleTree = vi.spyOn(replacement, 'settleTree').mockResolvedValue('empty');
+    const terminateGroup = vi.spyOn(replacement, 'terminateGroup').mockResolvedValue({
+      stopped: 'confirmed_stopped', scope: 'process_group',
+    });
+    await new RecoveryEngine(domain, replacement).recover();
+    expect(settleTree).toHaveBeenCalled();
+    expect(terminateGroup).not.toHaveBeenCalled();
+    expect(domain.getStore().getOperation('op')?.recoveryEvidence).toMatchObject({
+      driverCapabilities: { descendantEnumeration: 'cgroup' },
+      containment: { kind: 'cgroup', path: '/sys/fs/cgroup/xio/original-op' },
+    });
+  });
+
+  it('does not infer legacy containment semantics from a replacement driver', async () => {
+    intent(true);
+    domain.getStore().updateOperationStatus('op', 'active', {
+      pid: 99999999,
+      cgroupPath: '/sys/fs/cgroup/xio/legacy-op',
+      spawnTime: new Date().toISOString(),
+    });
+    reopen();
+    const replacement = new NodePlatformDriver();
+    replacement.capabilities.descendantEnumeration = 'cgroup';
+    const settleTree = vi.spyOn(replacement, 'settleTree');
+    const report = await new RecoveryEngine(domain, replacement).recover();
+    expect(settleTree).not.toHaveBeenCalled();
+    expect(report.recoveredOperations[0]).toMatchObject({ action: 'isolated_indeterminate', resourcesReleased: false });
+    expect(domain.getStore().getOperation('op')?.result?.status).toBe('indeterminate');
   });
 
   it('isolates an active operation with missing identity instead of leaving it unfinished', async () => {

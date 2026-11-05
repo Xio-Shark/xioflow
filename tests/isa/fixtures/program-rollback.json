@@ -1,0 +1,19 @@
+{
+  "isa": "xio/1",
+  "requestId": "golden-rollback-request",
+  "programId": "golden-rollback",
+  "mode": "transaction",
+  "capability": "cap:golden",
+  "workspace": "workspace:root",
+  "instructions": [
+    {
+      "id": "rollback",
+      "op": "workspace.rollback",
+      "args": { "workspace": "workspace:root", "snapshot": "snapshot:base" },
+      "dependsOn": [],
+      "precondition": [],
+      "output": "rollback-result",
+      "opId": "op:golden-rollback.rollback"
+    }
+  ]
+}

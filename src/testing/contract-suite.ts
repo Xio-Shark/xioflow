@@ -43,17 +43,24 @@ export interface ConsumerContext {
   cleanup: () => Promise<void>;
 }
 
-/** 进程是否已真正消失（容许 init / 持有者回收僵尸的短暂延迟）。 */
-async function waitUntilGone(pid: number, timeoutMs: number): Promise<boolean> {
+/** Independent OS check: zombies cannot execute or hold output pipes, even if init never reaps them. */
+async function waitUntilStopped(pid: number, timeoutMs: number): Promise<'gone' | 'zombie' | 'running'> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    try { process.kill(pid, 0); }
+    catch (error: any) { if (error.code === 'ESRCH') return 'gone'; else if (error.code !== 'EPERM') throw error; }
     try {
-      process.kill(pid, 0);
-    } catch (err: any) {
-      if (err.code === 'ESRCH') return true;
+      const { stdout } = await execFileAsync('ps', ['-p', String(pid), '-o', 'state=']);
+      const state = stdout.trim();
+      if (!/^[A-Za-z]/.test(state)) throw new Error(`Unknown OS process state for PID ${pid}: ${JSON.stringify(state)}`);
+      if (state.startsWith('Z')) return 'zombie';
+    } catch (error) {
+      try { process.kill(pid, 0); }
+      catch (probeError: any) { if (probeError.code === 'ESRCH') return 'gone'; }
+      throw error;
     }
-    if (Date.now() >= deadline) return false;
-    await new Promise((r) => setTimeout(r, 25));
+    if (Date.now() >= deadline) return 'running';
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }
 
@@ -491,11 +498,9 @@ export function defineContractTestSuite(
       expect(stopRes.stopped).toBe('confirmed_stopped');
       expect(domain.isResourceLocked('res:c9-group')).toBe(false);
 
-      // 核心真实断言：整组 kill(-pgid) 广播后，同组孙进程必须确定性死亡，绝不泄漏为 PID 1 孤儿！
-      // 与其它契约一致，容许 init / 持有者回收僵尸的短暂延迟：孙进程退场前会在进程表里
-      // 留下僵尸条目，kill(pid, 0) 对僵尸同样成功，瞬时快照会把「待回收」误判成「仍存活」。
-      // 有界等待退场；真泄漏（超时仍不退场）仍然失败。
-      expect(await waitUntilGone(grandchildPid, 2000)).toBe(true);
+      const stoppedState = await waitUntilStopped(grandchildPid, 2000);
+      expect(stoppedState).not.toBe('running');
+      if (stoppedState === 'zombie') expect(stopRes.unreapedPids).toContain(grandchildPid);
 
       await executePromise;
     });
@@ -560,14 +565,18 @@ export function defineContractTestSuite(
         await new Promise((r) => setTimeout(r, 200));
 
         // 调用停止流水线。结论必须与事实一致：
-        // - 能持有整棵树的驱动（如 Linux 子收割者）可以真的停掉逃逸者，此时逃逸者必须确已消失；
+        // - 能持有整棵树的驱动（如 Linux 子收割者）可以真的停掉逃逸者，留下的 zombie 必须单列；
         // - 做不到的驱动必须如实上报 cannot_determine + residualPids，绝不能声称 confirmed_stopped。
         const cancelRes = await supervisor.cancelOperation('op-c10-escape', 1000);
 
         if (cancelRes.stopped === 'confirmed_stopped') {
-          expect(await waitUntilGone(escapedPid, 2000)).toBe(true);
+          const stoppedState = await waitUntilStopped(escapedPid, 2000);
+          expect(stoppedState).not.toBe('running');
+          if (stoppedState === 'zombie') expect(cancelRes.unreapedPids).toContain(escapedPid);
           const result = await executePromise;
+          assert(result.kind === 'process');
           expect(result.status).toBe('cancelled');
+          if (stoppedState === 'zombie') expect(result.unreapedPids).toContain(escapedPid);
           expect(domain.isResourceLocked('res:c10-lock')).toBe(false);
           return;
         }
@@ -852,7 +861,9 @@ export function defineContractTestSuite(
 
       const descendant = Number.parseInt(result.stdout.trim(), 10);
       expect(Number.isInteger(descendant)).toBe(true);
-      expect(() => process.kill(descendant, 0)).toThrow();
+      const stoppedState = await waitUntilStopped(descendant, 2000);
+      expect(stoppedState).not.toBe('running');
+      if (stoppedState === 'zombie') expect(result.unreapedPids).toContain(descendant);
     }, 15_000);
 
     it('契约 18: 流式投影回调按流转发 chunk，回调抛错不中断排空', async () => {
@@ -944,10 +955,12 @@ export function defineContractTestSuite(
           // 逃逸者未被确认停止：保留租约等待裁决
           expect(domain.isResourceLocked('res:c19-bounded')).toBe(true);
         } else {
-          // 驱动确认停掉了整棵树：只有逃逸者确已消失才允许按超时失败结清并释放租约
+          // 驱动确认停掉了整棵树：独立核验停止，未被收割的 zombie 必须保留事实。
           expect(result.status).toBe('failed');
           expect(result.terminationReason).toBe('timed_out');
-          expect(await waitUntilGone(subPid, 2000)).toBe(true);
+          const stoppedState = await waitUntilStopped(subPid, 2000);
+          expect(stoppedState).not.toBe('running');
+          if (stoppedState === 'zombie') expect(result.unreapedPids).toContain(subPid);
           expect(domain.isResourceLocked('res:c19-bounded')).toBe(false);
         }
       } finally {
@@ -1035,10 +1048,17 @@ export function defineContractTestSuite(
 
         expect(domain.isResourceLocked('res:c21')).toBe(false);
         const result = domain.getStore().getOperation(opId)!.result!;
+        assert(result.kind === 'process');
         expect(result.status).toBe('failed');
         // 退出事实未被观察到：结局未知，不能被当作「确实失败、可换 opId 重试」
-        expect((result as ProcessOperationResult).terminationReason).toBe('exit_unobserved');
-        expect(result.kind === 'process' ? result.stderr : '').toContain('reaped during recovery');
+        expect(result.terminationReason).toBe('exit_unobserved');
+        expect(result.exitCode).toBe(null);
+        expect(result.signal).toBe(null);
+        expect(result.evidence).toBe('unobserved');
+        expect(result.stderr).toContain('confirmed stopped during recovery');
+        const stoppedState = await waitUntilStopped(descendantPid, 2000);
+        expect(stoppedState).not.toBe('running');
+        if (stoppedState === 'zombie') expect(result.unreapedPids).toContain(descendantPid);
       } finally {
         try {
           process.kill(-descendantPid, 'SIGKILL');
@@ -2583,7 +2603,7 @@ export function defineContractTestSuite(
       expect(domain.isResourceLocked('res:c37')).toBe(false);
     });
 
-    it('契约 38: hard 进程数上限挡住 fork 炸弹：命中后停掉整棵树，结果为 pids_exceeded，所有派生进程都已消失', async () => {
+    it('契约 38: hard 进程数上限挡住 fork 炸弹：命中后停掉整棵树，结果为 pids_exceeded，所有派生进程都已停止', async () => {
       const { supervisor, domain, tempDir, driver } = ctx;
       ensureTaskAndRun(domain, 'task-c38', 'run-c38');
       const pidFile = path.join(tempDir, 'c38-pids.txt');
@@ -2606,13 +2626,18 @@ export function defineContractTestSuite(
         return;
       }
       const result = await run();
+      assert(result.kind === 'process');
       expect(result.status).toBe('failed');
       expect(result.terminationReason).toBe('pids_exceeded');
       expect(domain.isResourceLocked('res:c38')).toBe(false);
       const spawned = fs.readFileSync(pidFile, 'utf8').split('\n').map(Number).filter((pid) => pid > 0);
       expect(spawned.length).toBeGreaterThan(0);
       expect(spawned.length).toBeLessThan(200);
-      for (const pid of spawned) expect(await waitUntilGone(pid, 2000)).toBe(true);
+      for (const pid of spawned) {
+        const stoppedState = await waitUntilStopped(pid, 2000);
+        expect(stoppedState).not.toBe('running');
+        if (stoppedState === 'zombie') expect(result.unreapedPids).toContain(pid);
+      }
     });
 
     it('契约 62: 根进程退出且管道已排空不等于树已空：关闭了 stdio 的脱离后代要么被回收（reaped），要么结果如实声明 unverified，绝不声称 empty', async () => {
@@ -2646,7 +2671,9 @@ export function defineContractTestSuite(
           expect(result.residualProcessesReaped).toBe(true);
         }
         if (result.treeSettlement === 'reaped') {
-          expect(await waitUntilGone(daemonPid, 2000)).toBe(true);
+          const stoppedState = await waitUntilStopped(daemonPid, 2000);
+          expect(stoppedState).not.toBe('running');
+          if (stoppedState === 'zombie') expect(result.unreapedPids).toContain(daemonPid);
         } else {
           expect(result.treeSettlement).toBe('unverified');
         }

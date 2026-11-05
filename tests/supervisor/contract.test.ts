@@ -15,20 +15,24 @@ import { PlatformDriver, ProcessIdentity, StopProcessResult } from '../../src/dr
  * a container init that does not wait) stays in the PID table and makes
  * `process.kill(pid, 0)` succeed, so the state has to come from `ps`.
  */
-function isPidAlive(pid: number): boolean {
+function readPidState(pid: number): 'gone' | 'zombie' | 'running' {
   try {
     process.kill(pid, 0);
-  } catch {
-    return false;
+  } catch (error: any) {
+    if (error.code === 'ESRCH') return 'gone';
+    if (error.code !== 'EPERM') throw error;
   }
   try {
     const state = execFileSync('ps', ['-p', String(pid), '-o', 'state='], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
-    return state[0] !== 'Z';
-  } catch {
-    return false;
+    if (!/^[A-Za-z]/.test(state)) throw new Error(`Unknown OS process state for PID ${pid}: ${JSON.stringify(state)}`);
+    return state.startsWith('Z') ? 'zombie' : 'running';
+  } catch (error) {
+    try { process.kill(pid, 0); }
+    catch (probeError: any) { if (probeError.code === 'ESRCH') return 'gone'; }
+    throw error;
   }
 }
 
@@ -602,7 +606,9 @@ setTimeout(() => {
 
     const descendant = Number.parseInt(result.stdout.trim(), 10);
     expect(Number.isInteger(descendant)).toBe(true);
-    expect(isPidAlive(descendant)).toBe(false);
+    const stoppedState = readPidState(descendant);
+    expect(stoppedState).not.toBe('running');
+    if (stoppedState === 'zombie') expect(result.unreapedPids).toContain(descendant);
   }, 15_000);
 
   it('13. 流式投影：chunk 实时转发，回调抛错只记录不中断排空', async () => {
@@ -713,13 +719,19 @@ setTimeout(() => {
       expect(report.recoveredOperations[0].action).toBe('marked_dead');
       expect(report.recoveredOperations[0].resourcesReleased).toBe(true);
 
-      // 孤儿后代必须被真正清掉，而不是只写一条"已标记死亡"。
-      expect(isPidAlive(descendantPid)).toBe(false);
+      // 独立核验孤儿后代不能再执行，留在 PID 表里的 zombie 必须如实记录。
+      const stoppedState = readPidState(descendantPid);
+      expect(stoppedState).not.toBe('running');
       expect(domain.isResourceLocked('res:zombie')).toBe(false);
       const result = domain.getStore().getOperation(opId)!.result!;
-      expect(result.kind).toBe('process');
+      assert(result.kind === 'process');
       expect(result.status).toBe('failed');
-      expect(result.kind === 'process' ? result.stderr : '').toContain('reaped during recovery');
+      expect(result.terminationReason).toBe('exit_unobserved');
+      expect(result.exitCode).toBe(null);
+      expect(result.signal).toBe(null);
+      expect(result.evidence).toBe('unobserved');
+      expect(result.stderr).toContain('confirmed stopped during recovery');
+      if (stoppedState === 'zombie') expect(result.unreapedPids).toContain(descendantPid);
     } finally {
       try {
         process.kill(-descendantPid, 'SIGKILL');

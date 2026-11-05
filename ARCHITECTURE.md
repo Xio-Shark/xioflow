@@ -1,5 +1,7 @@
 # xioflow 内核与 xiocode 发行版架构与协议规范
 
+> **2026-11-03 ISA 预览边界（未发布）**：`@xioflow/kernel/isa`、CLI `plan`/`execute` 与 MCP `execute` 已有预览入口；计划检查不取得执行域，未提供宿主策略时只做结构预检并报告 `capability: 'not_requested'`。副作用绑定必须由宿主提供既有 domain、supervisor、workspace 与持久化 capability，`programId` 对应已登记 Run，副作用要求 Run 为 running；当前只接通 snapshot/rollback/status/health，其他 opcode 和 transaction 明确 unsupported。旧入口尚未全部迁移，不能据此声明稳定 ISA 或完整 adapter 等价性。
+
 > **2026-10-13 内核基础加固（未发布）**：同一取得的执行域统一协调各监督器入口的在飞执行、服务归属、读观测与事务提交。产物创建和回收依据明确的所有权事实，符号链接作为保守路径依赖。契约 63–65 覆盖这些边界；兼容性与限制以[当前实现契约](spec/current-contract.md#domain-coordination-and-artifact-ownership)为准。
 
 > **2026-10-13 方向裁决（晚，优先于当日早间条目）**：Rust 核心、语言绑定与 daemon/多客户端方向**放弃**（理由与复活条件见 `ROADMAP.md` 附录 A）。据此修订裁决 3（仲裁范围以单宿主进程为界：同进程多入口共享仲裁，跨进程接入同一工作区显式失败，daemon 语义退场）、裁决 5（TypeScript 嵌入式核心即参考实现）与裁决 6（确立「调度 vs 策略」线，AgentRuntime 据此生长）。§5 的 daemon 设计材料保留为历史记录，其消息形状仍是黑盒 conformance 的传输契约基线。
@@ -185,6 +187,7 @@ export interface Run {
   startedAt: string;
   endedAt?: string;
   configSnapshotWhiteList?: Record<string, unknown>; // 白名单安全配置快照
+  configSnapshot?: RequestConfigSnapshot; // 首次请求绑定的不可变配置快照
 }
 
 export type KernelRunStatus =
@@ -720,13 +723,14 @@ export interface ProcessTreeMetrics {
 1. **组级投递与降级升级**：
    - 优先向 `-pgid`（或通过 `cgroup.kill` / `TerminateJobObject`）发送 `SIGINT`；
    - 宽限期 `graceMs`（默认 3000ms）超时后升级发送 `SIGTERM`，继而 `SIGKILL`；
-2. **组空轮询核验 (Wait for ESRCH)**：
-   - 发送 `SIGKILL` 到 `-pgid` 后，驱动周期轮询 `kill(-pgid, 0)` 直至返回 `ESRCH`（确认进程组内已无存活进程）；
+2. **执行状态与回收事实核验**：
+   - 驱动依据 OS 进程状态及自身 containment 证据核验是否仍有可执行成员。`kill(pid, 0)` 或组探测只能证明 PID/组仍可见，不能单独区分运行进程和已退出待收尸的 `Z` 状态；观测失败不能当作组空。
+   - Linux 上已停止但尚未被父进程 `waitpid` 收集的 PID 必须记录为 `unreapedPids`。`confirmed_stopped` 只确认声明 scope 内无观察到的可执行残留，不宣称这些 PID 已消失；subreaper 的 `ECHILD` 或 cgroup 的 `populated=0` 才是相应驱动的树空证据。
 3. **逃逸后代显式扫描 (Escaped Descendants Audit)**：
    - 孙进程可能调用 `setsid()` 脱离原有 PGID。驱动在组空后执行一次后代树扫描（Linux 遍历 `/proc` 父子链，或核验 cgroup 成员）；
    - 若扫描到脱离残留进程，如实记录于 `residualPids`，停止判定置为 `'cannot_determine'` 或 `'not_stopped'`——**绝不因组空而草率判定为完全停止**；
 4. **决策分流与隔离释放**：
-   - `stopped === 'confirmed_stopped'`：确认为完全终结，推进为 `cancelled` 或 `timed_out`，原子释放相关资源租约；
+   - `stopped === 'confirmed_stopped'`：在声明 scope 内确认停止执行，保留 `unreapedPids` 等事实，推进为 `cancelled` 或 `timed_out`，原子释放相关资源租约；
    - `stopped !== 'confirmed_stopped'`：保留现场资源隔离屏障，推进为 `indeterminate`，记录告警事件并阻止资源被新操作复用。
 5. **所有等待必须有界**：超时 / 取消路径等待的是**根进程退出事实**，而不是 stdio 管道关闭；逃逸后代持有管道时，操作仍须在 `timeoutMs + 停止流水线宽限 + 排空超时` 之内返回（结论为 `indeterminate`），不得挂到逃逸进程自行退出；
 6. **停止请求必须有真实对象**：对不存在、已终结或所属域已关闭的操作发起停止，必须返回显式错误（如 `OperationNotActiveError`），禁止返回 `confirmed_stopped`。
@@ -737,11 +741,13 @@ export interface ProcessTreeMetrics {
        └──> 向进程组 (-pgid) 或 cgroup 发送优雅中断 (SIGINT)
              └──> 启动受控宽限期计时器 graceMs (如 3000ms)
                    └──> 仍未退出？升级发送 SIGTERM -> SIGKILL (-pgid)
-                         └──> 轮询 kill(-pgid, 0) 直至 ESRCH（组内无进程）
+                         └──> 核验组成员执行状态与驱动证据（另记 unreapedPids）
                                └──> 触发逃逸后代扫描 (/proc 链或 cgroup 枚举)
                                      ├── 存在逃逸或无法核查 -> stopped: 'cannot_determine' -> 保持资源隔离，标为 indeterminate
-                                     └── 组空且无逃逸残留 -> stopped: 'confirmed_stopped' -> 推进终态并释放资源租约
+                                     └── 声明范围内无可执行残留 -> stopped: 'confirmed_stopped' -> 保留回收事实并释放资源租约
 ```
+
+`treeSettlement: 'reaped'` 与 `residualProcessesReaped` 是既有停止干预标签，不能覆盖 `unreapedPids` 或被解释为每个 PID 已被真正收尸。MCP ISA 取消也遵守事实边界：请求信号经宿主 binding 传入既有 pipeline，阻止排队/后续派发；已经派发、不可中断的 snapshot 等待真实结果，不伪造“已停止”。
 
 ### 4.2.1 原生持有者：reaper helper（`ReaperPlatformDriver`）
 

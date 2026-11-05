@@ -9,6 +9,8 @@ import {
   StopProcessResult,
   StructuredCommand,
   TreeSettlement,
+  SecretResolver,
+  SpawnContext,
 } from './types.js';
 import { IdentityVerificationResult } from '../types.js';
 import { NodePlatformDriver } from './node-driver.js';
@@ -34,6 +36,8 @@ export interface CgroupDriverOptions {
    * 迁移进程需要对源与目标的共同祖先的 `cgroup.procs` 有写权限。
    */
   root?: string;
+  /** Driver-local SecretRef resolver forwarded to the gated inner driver. */
+  resolveSecret?: SecretResolver;
 }
 
 /**
@@ -52,7 +56,7 @@ export class CgroupPlatformDriver implements PlatformDriver {
   public readonly root: string;
   public readonly opsDir: string;
   public readonly limitsUnavailableReason?: string;
-  private readonly inner = new NodePlatformDriver();
+  private readonly inner: NodePlatformDriver;
   /** 带硬限制的 cgroup：删除前把限制命中事实留下，供结果读取。 */
   private readonly limitedDirs = new Set<string>();
   private readonly retiredLimitEvents = new Map<string, LimitEvents>();
@@ -69,6 +73,7 @@ export class CgroupPlatformDriver implements PlatformDriver {
   }
 
   constructor(options: CgroupDriverOptions = {}) {
+    this.inner = new NodePlatformDriver({ resolveSecret: options.resolveSecret });
     const { root, own } = resolveRoot(options);
     this.root = root;
     this.opsDir = path.join(root, OPS_DIR);
@@ -87,8 +92,12 @@ export class CgroupPlatformDriver implements PlatformDriver {
     };
   }
 
-  public async spawn(command: StructuredCommand): Promise<ManagedProcessHandle> {
-    const handle = await this.inner.spawn(command);
+  public get secretResolution(): boolean {
+    return this.inner.secretResolution;
+  }
+
+  public async spawn(command: StructuredCommand, context: SpawnContext = {}): Promise<ManagedProcessHandle> {
+    const handle = await this.inner.spawn(command, context);
     if (!handle.releaseGate) {
       handle.destroyGate?.();
       throw new Error('CgroupPlatformDriver requires gated spawn: the child must not run before it is placed');

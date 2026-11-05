@@ -1,5 +1,7 @@
 # xioflow Kernel & xiocode Distribution Architecture and Protocol Specification
 
+> **ISA preview boundary (2026-11-03, unreleased):** `@xioflow/kernel/isa`, CLI `plan`/`execute` and MCP `execute` have preview entry points. Planning acquires no execution domain; without host policy it performs structural checks and reports `capability: 'not_requested'`. Side effects require an explicit host-owned domain/supervisor/workspace binding and persisted capability. `programId` names a registered Run; side effects require it to be running. Only snapshot/rollback/status/health are connected; other opcodes and transaction mode remain unsupported. Legacy migration is incomplete, so this does not declare a stable ISA or full adapter equivalence.
+
 > **Start here for integration:** [Current implementation contract](spec/current-contract.md) separates the embedded TypeScript execution core, experimental AgentRuntime, and the abandoned (2026-10-13) Rust/daemon/Python direction. `CHANGELOG.md` distinguishes released behavior from worktree changes.
 
 > **Direction ruling (2026-10-13, evening; supersedes the morning entry):** The Rust core, language bindings and daemon/multi-client direction is **abandoned** (reasons and revival conditions in the roadmap appendix). Decisions 3, 5 and 6 below are amended accordingly: arbitration is bounded by the host process, the TypeScript embedded core is the reference implementation, and `AgentRuntime` grows along a scheduling-versus-policy line. §5 daemon material remains a historical design record; its message shapes remain the transport baseline for black-box conformance.
@@ -203,6 +205,7 @@ export interface Run {
   startedAt: string;
   endedAt?: string;
   configSnapshotWhiteList?: Record<string, unknown>; // allow-listed safe config snapshot
+  configSnapshot?: RequestConfigSnapshot; // immutable first-request configuration binding
 }
 
 export type KernelRunStatus =
@@ -757,13 +760,14 @@ Treating "a signal was sent to the PID" as "the process has stopped" is strictly
 1. **Group-level delivery with graceful escalation**:
    - Prefer sending `SIGINT` to `-pgid` (or via `cgroup.kill` / `TerminateJobObject`);
    - After the grace period `graceMs` (default 3000ms), escalate to `SIGTERM`, then `SIGKILL`;
-2. **Group-empty polling verification (Wait for ESRCH)**:
-   - After sending `SIGKILL` to `-pgid`, the driver periodically polls `kill(-pgid, 0)` until it returns `ESRCH` (confirming no surviving process in the group);
+2. **Execution-state and reaping-fact verification**:
+   - The driver checks OS process states and its containment evidence for executable members. `kill(pid, 0)` or a group probe only establishes visibility; it does not alone distinguish running processes from exited `Z` entries. Failed observation is not an empty group.
+   - On Linux, stopped PIDs not yet collected by their parent's `waitpid` must remain in `unreapedPids`. `confirmed_stopped` confirms no observed executable residual within the declared scope, not PID disappearance. Subreaper `ECHILD` or cgroup `populated=0` is the corresponding driver's tree-empty evidence.
 3. **Escaped-descendant explicit scan (Escaped Descendants Audit)**:
    - Grandchildren may call `setsid()` to leave the original PGID. After the group is empty, the driver performs one descendant-tree scan (Linux walks the `/proc` parent chain, or verifies cgroup membership);
    - If escaped residual processes are found, record them honestly in `residualPids` and set the stop verdict to `'cannot_determine'` or `'not_stopped'` — **never hastily conclude full stop merely because the group is empty**;
 4. **Decision branching & isolation release**:
-   - `stopped === 'confirmed_stopped'`: confirmed fully terminated; advance to `cancelled` or `timed_out`, atomically release related resource leases;
+   - `stopped === 'confirmed_stopped'`: execution is confirmed stopped within the declared scope; preserve facts such as `unreapedPids`, advance to `cancelled` or `timed_out`, and atomically release related resource leases;
    - `stopped !== 'confirmed_stopped'`: retain the on-site resource isolation barrier, advance to `indeterminate`, record a warning event and prevent the resources from being reused by new operations;
 5. **All waits must be bounded**: timeouts / cancellation paths wait for the **root process exit fact**, not stdio pipe closure; when escaped descendants hold pipes, the operation must still return within `timeoutMs + stop pipeline grace + drain timeout` (conclusion `indeterminate`), never hanging until the escapee exits on its own;
 6. **Stop requests must have a real object**: stopping a non-existent, already-terminal, or domain-closed operation must return an explicit error (e.g. `OperationNotActiveError`); returning `confirmed_stopped` is forbidden.
@@ -774,11 +778,13 @@ Cancel / timeout / resource limit triggered
        └──> Send graceful interrupt (SIGINT) to the process group (-pgid) or cgroup
              └──> Start controlled grace-period timer graceMs (e.g. 3000ms)
                    └──> Still not exited? Escalate SIGTERM -> SIGKILL (-pgid)
-                         └──> Poll kill(-pgid, 0) until ESRCH (no processes in group)
+                         └──> Verify member execution states and driver evidence (record unreapedPids separately)
                                └──> Trigger escaped-descendant scan (/proc chain or cgroup enumeration)
                                      ├── Escapes present or unverifiable -> stopped: 'cannot_determine' -> keep resource isolation, mark indeterminate
-                                     └── Group empty and no escaped residuals -> stopped: 'confirmed_stopped' -> advance to terminal state and release leases
+                                     └── No executable residual within declared scope -> stopped: 'confirmed_stopped' -> preserve reaping facts and release leases
 ```
+
+`treeSettlement: 'reaped'` and `residualProcessesReaped` are legacy stop-intervention labels, not proof that every PID entry was collected; they do not override `unreapedPids`. MCP ISA cancellation follows the same factual boundary: its signal passes through host binding into the existing pipeline to prevent queued/later dispatch. An already dispatched, non-interruptible snapshot waits for its genuine result rather than fabricating a stopped outcome.
 
 ### 4.2.1 Native Holder: reaper helper (`ReaperPlatformDriver`)
 

@@ -65,6 +65,21 @@ export function validateExecuteProcessOptions(options: ExecuteProcessOptions): v
       string(value, 'command.envWhiteList value', false, true);
     }
   }
+  if (command.secretEnv !== undefined) {
+    record(command.secretEnv, 'command.secretEnv');
+    for (const [key, value] of Object.entries(command.secretEnv)) {
+      if (key.length === 0 || key.includes('=') || key.includes('\0')) {
+        throw new TypeError('command.secretEnv keys must be nonempty and contain neither = nor null bytes');
+      }
+      string(value, 'command.secretEnv reference', true);
+      if (!/^secret:[A-Za-z0-9][A-Za-z0-9._:-]{0,239}$/u.test(value)) {
+        throw new TypeError('command.secretEnv values must be SecretRef values');
+      }
+      if (command.envWhiteList && Object.hasOwn(command.envWhiteList, key)) {
+        throw new TypeError(`command.secretEnv key '${key}' conflicts with command.envWhiteList`);
+      }
+    }
+  }
   if (command.hardLimits !== undefined) {
     record(command.hardLimits, 'command.hardLimits');
     nonnegativeNumber(command.hardLimits.memoryMaxBytes, 'command.hardLimits.memoryMaxBytes', true);
@@ -73,6 +88,9 @@ export function validateExecuteProcessOptions(options: ExecuteProcessOptions): v
   if (options.requiredResources !== undefined) strings(options.requiredResources, 'requiredResources', true);
   if (options.mutationRoots !== undefined) strings(options.mutationRoots, 'mutationRoots', true, true);
   optionalString(options.capabilityId, 'capabilityId', true);
+  optionalString(options.capabilityWorkspace, 'capabilityWorkspace', true);
+  optionalString(options.capabilityPolicyVersion, 'capabilityPolicyVersion');
+  if (options.capabilitySecretRefs !== undefined) strings(options.capabilitySecretRefs, 'capabilitySecretRefs', true);
   optionalString(options.inputFingerprint, 'inputFingerprint');
   optionalString(options.artifactsDir, 'artifactsDir', true, true);
   if (options.confinement !== undefined && typeof options.confinement !== 'boolean') {

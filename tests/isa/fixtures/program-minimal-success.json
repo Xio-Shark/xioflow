@@ -1,0 +1,18 @@
+{
+  "isa": "xio/1",
+  "requestId": "golden-success-request",
+  "programId": "golden-success",
+  "mode": "pipeline",
+  "capability": "cap:golden",
+  "workspace": "workspace:root",
+  "instructions": [
+    {
+      "id": "read",
+      "op": "fs.read",
+      "args": { "workspace": "workspace:root", "path": "README.md" },
+      "dependsOn": [],
+      "precondition": [],
+      "output": "read-result"
+    }
+  ]
+}

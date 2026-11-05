@@ -7,18 +7,34 @@ import {
   ProcessIdentity,
   StopProcessResult,
   TreeSettlement,
+  SecretResolver,
+  SpawnContext,
 } from './types.js';
 import { IdentityVerificationResult } from '../types.js';
 import { readBootId, readStartTime, getGroupMembers } from './process-facts.js';
-import { ProcessSampler } from './sampler.js';
+import { ProcessSampler, type ProcessSnapshotMap } from './sampler.js';
 import { ProcessObservationError } from './observation.js';
 import { detectAvailableConfinementDrivers } from '../confinement/detector.js';
 import { computeCommandFingerprint, resolveExecutable } from './spawn-support.js';
+import { redactSecretStream, resolveCommandEnvironment } from './secret-env.js';
+
+export interface NodePlatformDriverOptions {
+  resolveSecret?: SecretResolver;
+}
 
 export class NodePlatformDriver implements PlatformDriver {
   public readonly name = 'node-default';
+  private readonly secretResolver?: SecretResolver;
   private cachedBootId: Promise<string | null> = readBootId();
   private sampler: ProcessSampler = ProcessSampler.getInstance();
+
+  constructor(options: NodePlatformDriverOptions = {}) {
+    this.secretResolver = options.resolveSecret;
+  }
+
+  public get secretResolution(): boolean {
+    return this.secretResolver !== undefined;
+  }
 
   public async readBootId(): Promise<string | null> {
     return this.cachedBootId;
@@ -49,9 +65,8 @@ export class NodePlatformDriver implements PlatformDriver {
     new Map();
   // 持续累积后代 PID 集合：leaderPid -> Set<descendantPid>
   private cumulativeDescendantsMap: Map<number, Set<number>> = new Map();
-  private pollerTimer: NodeJS.Timeout | null = null;
 
-  public async spawn(command: StructuredCommand): Promise<ManagedProcessHandle> {
+  public async spawn(command: StructuredCommand, context: SpawnContext = {}): Promise<ManagedProcessHandle> {
     const stdinPayload =
       command.stdin === undefined
         ? undefined
@@ -59,11 +74,8 @@ export class NodePlatformDriver implements PlatformDriver {
           ? Buffer.from(command.stdin, 'utf8')
           : Buffer.from(command.stdin);
 
-    const childEnv: NodeJS.ProcessEnv = command.envWhiteList
-      ? { ...command.envWhiteList }
-      : command.inheritEnv === false
-        ? {}
-        : process.env;
+    const resolvedEnvironment = await resolveCommandEnvironment(command, this.secretResolver, context);
+    const childEnv = resolvedEnvironment.env;
 
     const useGatedSpawn = Boolean(this.capabilities.gatedSpawn);
 
@@ -138,15 +150,14 @@ export class NodePlatformDriver implements PlatformDriver {
 
         const cumSet = new Set<number>();
         this.cumulativeDescendantsMap.set(pid, cumSet);
-        this.ensureSharedPoller();
+        const stopWatchingTree = this.sampler.watchProcessTree(pid, cumSet);
 
         const exitPromise = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>(
           (exitResolve) => {
             const cleanup = () => {
               this.activeHandles.delete(pid);
-              if (this.activeHandles.size === 0) {
-                this.stopSharedPoller();
-              }
+              stopWatchingTree();
+              this.cumulativeDescendantsMap.delete(pid);
             };
             // 退出事实只来自真实的 close。spawn 之后的 'error'（kill / IPC 失败等）不代表进程已退出，
             // 进程结束时 Node 仍会发出 exit/close，因此这里不结清、也不编造 exitCode。
@@ -193,8 +204,8 @@ export class NodePlatformDriver implements PlatformDriver {
         const handle: ManagedProcessHandle = {
           identity,
           stdin: isStreamStdin ? (child.stdin ?? undefined) : undefined,
-          stdout: child.stdout!,
-          stderr: child.stderr!,
+          stdout: redactSecretStream(child.stdout!, resolvedEnvironment.secretValues),
+          stderr: redactSecretStream(child.stderr!, resolvedEnvironment.secretValues),
           onRootExit: rootExitPromise,
           onExit: exitPromise,
           rawProcess: child,
@@ -220,33 +231,6 @@ export class NodePlatformDriver implements PlatformDriver {
         resolve(handle);
       });
     });
-  }
-
-  private ensureSharedPoller(): void {
-    if (this.pollerTimer) return;
-    this.pollerTimer = setInterval(async () => {
-      if (this.cumulativeDescendantsMap.size === 0) {
-        this.stopSharedPoller();
-        return;
-      }
-      try {
-        const snapshot = await this.sampler.getSnapshot(30);
-        for (const [leaderPid, cumSet] of this.cumulativeDescendantsMap.entries()) {
-          const tree = await this.sampler.getProcessTree(leaderPid, snapshot, Array.from(cumSet));
-          for (const d of tree.allDescendants) {
-            cumSet.add(d);
-          }
-        }
-      } catch {}
-    }, 35);
-    if (this.pollerTimer.unref) this.pollerTimer.unref();
-  }
-
-  private stopSharedPoller(): void {
-    if (this.pollerTimer) {
-      clearInterval(this.pollerTimer);
-      this.pollerTimer = null;
-    }
   }
 
   public async verifyIdentity(identity: ProcessIdentity): Promise<IdentityVerificationResult> {
@@ -343,10 +327,10 @@ export class NodePlatformDriver implements PlatformDriver {
 
     // 若原主进程已死且无任何进程组或后代存活，直接收尾
     const isGroupAlive = await this.sampler.isGroupAlive(pid);
-    const aliveBeforeSignals = Array.from(allTrackedPids).filter((p) => p !== pid && this.isPidAlive(p));
-    if (!this.isPidAlive(pid) && !isGroupAlive && aliveBeforeSignals.length === 0) {
+    const beforeSignals = await this.sampler.classifyPids(allTrackedPids);
+    if (!isGroupAlive && beforeSignals.runningPids.length === 0) {
       this.cumulativeDescendantsMap.delete(pid);
-      return { stopped: 'confirmed_stopped', scope: 'direct_child' };
+      return { stopped: 'confirmed_stopped', scope: 'direct_child', ...(beforeSignals.unreapedPids.length ? { unreapedPids: beforeSignals.unreapedPids } : {}) };
     }
 
     // 第一阶段：SIGINT 中断信号至整组
@@ -387,7 +371,8 @@ export class NodePlatformDriver implements PlatformDriver {
     }
 
     // 探活所有曾属于该进程树的后代
-    const aliveResiduals = Array.from(allTrackedPids).filter((p) => this.isPidAlive(p));
+    const residuals = await this.sampler.classifyPids(allTrackedPids);
+    const aliveResiduals = residuals.runningPids;
 
     if (aliveResiduals.length > 0) {
       // 存在逃逸或残留孤儿，如实标记 cannot_determine 与 residualPids
@@ -395,12 +380,13 @@ export class NodePlatformDriver implements PlatformDriver {
         stopped: 'cannot_determine',
         scope: 'unknown',
         residualPids: aliveResiduals,
+        ...(residuals.unreapedPids.length ? { unreapedPids: residuals.unreapedPids } : {}),
         errorDetails: `Residual or escaped processes still alive after termination: ${aliveResiduals.join(', ')}`,
       };
     }
 
     this.cumulativeDescendantsMap.delete(pid);
-    return { stopped: 'confirmed_stopped', scope: 'process_group' };
+    return { stopped: 'confirmed_stopped', scope: 'process_group', ...(residuals.unreapedPids.length ? { unreapedPids: residuals.unreapedPids } : {}) };
   }
 
   /**
@@ -441,29 +427,36 @@ export class NodePlatformDriver implements PlatformDriver {
         errorDetails: 'process groups are not supported on this platform',
       };
     }
-    if (!(await this.sampler.isGroupAlive(pgid))) {
-      return { stopped: 'confirmed_stopped', scope: 'process_group' };
+    const stopped = (snapshot: ProcessSnapshotMap): StopProcessResult => {
+      const unreapedPids = [...snapshot.values()].filter((entry) => entry.pgid === pgid && entry.state === 'Z').map((entry) => entry.pid);
+      return { stopped: 'confirmed_stopped', scope: 'process_group', ...(unreapedPids.length ? { unreapedPids } : {}) };
+    };
+    this.sampler.clearCache();
+    let snapshot = await this.sampler.getSnapshot(0);
+    if (!(await this.sampler.isGroupAlive(pgid, snapshot))) {
+      return stopped(snapshot);
     }
 
     this.sendSignalToGroup(pgid, 'SIGKILL');
     const start = Date.now();
     while (Date.now() - start < graceMs) {
       this.sampler.clearCache();
-      if (!(await this.sampler.isGroupAlive(pgid))) {
+      snapshot = await this.sampler.getSnapshot(0);
+      if (!(await this.sampler.isGroupAlive(pgid, snapshot))) {
         this.cumulativeDescendantsMap.delete(pgid);
-        return { stopped: 'confirmed_stopped', scope: 'process_group' };
+        return stopped(snapshot);
       }
       await new Promise((r) => setTimeout(r, 25));
     }
 
-    const snapshot = await this.sampler.getSnapshot(10);
+    snapshot = await this.sampler.getSnapshot(0);
     const survivors: number[] = [];
     for (const entry of snapshot.values()) {
       if (entry.state === 'Z') continue;
       if (entry.pgid === pgid) survivors.push(entry.pid);
     }
-    return {
-      stopped: survivors.length === 0 ? 'confirmed_stopped' : 'cannot_determine',
+    return survivors.length === 0 ? stopped(snapshot) : {
+      stopped: 'cannot_determine',
       scope: 'process_group',
       residualPids: survivors.length > 0 ? survivors : undefined,
     };
@@ -472,12 +465,28 @@ export class NodePlatformDriver implements PlatformDriver {
   public async sampleMetrics(
     identity: ProcessIdentity
   ): Promise<{ rssBytes: number; pidsCount: number; cpuTimeMs: number }> {
-    const tree = await this.sampler.getProcessTree(identity.pid);
+    const snapshot = await this.sampler.getSnapshot(100);
+    if (!snapshot.has(identity.pid) && this.isPidAlive(identity.pid)) {
+      throw new ProcessObservationError(
+        `Process ${identity.pid} is alive but missing from the process snapshot`,
+        new Error('incomplete process table observation'),
+      );
+    }
+    const knownDescendants = this.cumulativeDescendantsMap.get(identity.pid);
+    for (const pid of knownDescendants ?? []) {
+      if (this.isPidAlive(pid) && !snapshot.has(pid)) {
+        throw new ProcessObservationError(
+          `Descendant ${pid} is alive but missing from the process snapshot`,
+          new Error('incomplete process table observation'),
+        );
+      }
+    }
+    const tree = await this.sampler.getProcessTree(identity.pid, snapshot);
     const targetPids = [identity.pid, ...tree.allDescendants].filter((p) => this.isPidAlive(p));
     if (targetPids.length === 0) {
       return { rssBytes: 0, pidsCount: 0, cpuTimeMs: 0 };
     }
-    return this.sampler.sampleMetrics(targetPids);
+    return this.sampler.sampleMetrics(targetPids, snapshot);
   }
 
   private isPidAlive(pid: number): boolean {
@@ -510,20 +519,20 @@ export class NodePlatformDriver implements PlatformDriver {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       this.sampler.clearCache();
-      const grpAlive = await this.sampler.isGroupAlive(pid);
-      const procAlive = this.isPidAlive(pid);
-      const inGrpAlive = inGroupPids.some((p) => this.isPidAlive(p));
+      const snapshot = await this.sampler.getSnapshot(0);
+      const grpAlive = await this.sampler.isGroupAlive(pid, snapshot);
+      const { runningPids } = await this.sampler.classifyPids([pid, ...inGroupPids], snapshot);
 
-      if (!grpAlive && !procAlive && !inGrpAlive) {
+      if (!grpAlive && runningPids.length === 0) {
         return true;
       }
       await new Promise((r) => setTimeout(r, 50));
     }
 
     this.sampler.clearCache();
-    const stillGrp = await this.sampler.isGroupAlive(pid);
-    const stillProc = this.isPidAlive(pid);
-    const stillInGrp = inGroupPids.some((p) => this.isPidAlive(p));
-    return !stillGrp && !stillProc && !stillInGrp;
+    const snapshot = await this.sampler.getSnapshot(0);
+    const stillGrp = await this.sampler.isGroupAlive(pid, snapshot);
+    const { runningPids } = await this.sampler.classifyPids([pid, ...inGroupPids], snapshot);
+    return !stillGrp && runningPids.length === 0;
   }
 }

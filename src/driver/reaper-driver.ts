@@ -12,11 +12,14 @@ import {
   ProcessIdentity,
   StopProcessResult,
   TreeSettlement,
+  SecretResolver,
+  SpawnContext,
 } from './types.js';
 import { IdentityVerificationResult } from '../types.js';
 import { NodePlatformDriver } from './node-driver.js';
 import { readStartTime } from './process-facts.js';
 import { computeCommandFingerprint, resolveExecutable } from './spawn-support.js';
+import { redactSecretStream, resolveCommandEnvironment } from './secret-env.js';
 
 type ExitFacts = { exitCode: number | null; signal: NodeJS.Signals | null };
 
@@ -78,6 +81,8 @@ export interface ReaperDriverOptions {
   helperPath?: string;
   /** stop 应答的额外等待上限（在 grace + 3s 信号阶梯之外），超过即判 cannot_determine。 */
   stopReplyMarginMs?: number;
+  /** Driver-local SecretRef resolver. Secret values never leave this driver. */
+  resolveSecret?: SecretResolver;
 }
 
 interface ReaperSession {
@@ -89,6 +94,8 @@ interface ReaperSession {
   /** root 的退出事实（helper 回收 root 时报告）。 */
   rootExit?: ExitFacts;
   rootExitListeners: Array<(facts: ExitFacts) => void>;
+  rootExitError?: Error;
+  rootExitErrorListeners: Array<(error: Error) => void>;
   /** helper 报告整棵树已空（root 退出后后代也全部结束，或 stop 已确认）。 */
   treeEmpty: boolean;
   /** 等待 `empty`（或通道关闭）的结算回调。 */
@@ -117,6 +124,7 @@ interface ReaperSession {
 export class ReaperPlatformDriver implements PlatformDriver {
   public readonly name = 'reaper';
   public readonly capabilities: PlatformCapabilities;
+  private readonly secretResolver?: SecretResolver;
   private readonly helperPath: string;
   private readonly stopReplyMarginMs: number;
   private readonly facts = new NodePlatformDriver();
@@ -144,12 +152,17 @@ export class ReaperPlatformDriver implements PlatformDriver {
     }
     this.helperPath = helperPath;
     this.stopReplyMarginMs = options.stopReplyMarginMs ?? 2000;
+    this.secretResolver = options.resolveSecret;
     this.capabilities = {
       ...this.facts.capabilities,
       processGroupKill: true,
       gatedSpawn: true,
       descendantEnumeration: process.platform === 'linux' ? 'subreaper' : 'full',
     };
+  }
+
+  public get secretResolution(): boolean {
+    return this.secretResolver !== undefined;
   }
 
   public async readBootId(): Promise<string | null> {
@@ -187,12 +200,9 @@ export class ReaperPlatformDriver implements PlatformDriver {
     }
   }
 
-  public async spawn(command: StructuredCommand): Promise<ManagedProcessHandle> {
-    const childEnv: NodeJS.ProcessEnv = command.envWhiteList
-      ? { ...command.envWhiteList }
-      : command.inheritEnv === false
-        ? {}
-        : process.env;
+  public async spawn(command: StructuredCommand, context: SpawnContext = {}): Promise<ManagedProcessHandle> {
+    const resolvedEnvironment = await resolveCommandEnvironment(command, this.secretResolver, context);
+    const childEnv = resolvedEnvironment.env;
     // 与 NodePlatformDriver 相同：启动前确认可执行文件存在，缺失即显式失败（契约 #1）
     if (!resolveExecutable(command.execPath, childEnv.PATH)) {
       const err = new Error(`spawn ${command.execPath} ENOENT`);
@@ -242,8 +252,8 @@ export class ReaperPlatformDriver implements PlatformDriver {
     return {
       identity,
       stdin: isStreamStdin ? (helper.stdin ?? undefined) : undefined,
-      stdout: helper.stdout!,
-      stderr: helper.stderr!,
+      stdout: redactSecretStream(helper.stdout!, resolvedEnvironment.secretValues),
+      stderr: redactSecretStream(helper.stderr!, resolvedEnvironment.secretValues),
       onRootExit: this.rootExitPromise(session),
       onExit: new Promise<ExitFacts>((resolve) => {
         // close：helper 退出且目标继承的输出管道全部关闭（与 NodePlatformDriver 的 close 语义一致）
@@ -430,6 +440,7 @@ export class ReaperPlatformDriver implements PlatformDriver {
       ctl: helper.stdio[3] as unknown as Socket,
       rootPid,
       rootExitListeners: [],
+      rootExitErrorListeners: [],
       treeEmpty: false,
       treeEmptyListeners: [],
       helperLost: false,
@@ -468,6 +479,7 @@ export class ReaperPlatformDriver implements PlatformDriver {
       };
       session.rootExit = facts;
       for (const listener of session.rootExitListeners.splice(0)) listener(facts);
+      session.rootExitErrorListeners.length = 0;
       // root 已结束：剩余后代由 helper 继续持有，不再阻止宿主进程退出（宿主退出即 EOF，helper 清场）
       session.helper.unref();
       session.ctl.unref();
@@ -491,19 +503,35 @@ export class ReaperPlatformDriver implements PlatformDriver {
   }
 
   private rootExitPromise(session: ReaperSession): Promise<ExitFacts> {
-    return new Promise<ExitFacts>((resolve) => {
+    return new Promise<ExitFacts>((resolve, reject) => {
       if (session.rootExit) resolve(session.rootExit);
-      else session.rootExitListeners.push(resolve);
+      else if (session.rootExitError) reject(session.rootExitError);
+      else {
+        session.rootExitListeners.push(resolve);
+        session.rootExitErrorListeners.push(reject);
+      }
     });
   }
 
   /** helper 丢失而 root 退出事实未知：不编造退出码，只观察 root 何时不再存活。 */
   private watchOrphanedRoot(session: ReaperSession): void {
+    let checking = false;
     const timer = setInterval(() => {
-      if (isPidAlive(session.rootPid)) return;
-      clearInterval(timer);
-      const facts: ExitFacts = { exitCode: null, signal: null };
-      for (const listener of session.rootExitListeners.splice(0)) listener(facts);
+      if (checking || !session.identity) return;
+      checking = true;
+      void this.facts.verifyIdentity(session.identity).then((verification) => {
+        if (verification !== 'not_original_process') return;
+        clearInterval(timer);
+        const facts: ExitFacts = { exitCode: null, signal: null };
+        session.rootExit = facts;
+        for (const listener of session.rootExitListeners.splice(0)) listener(facts);
+        session.rootExitErrorListeners.length = 0;
+      }, (error: unknown) => {
+        clearInterval(timer);
+        session.rootExitError = error instanceof Error ? error : new Error(String(error));
+        for (const listener of session.rootExitErrorListeners.splice(0)) listener(session.rootExitError);
+        session.rootExitListeners.length = 0;
+      }).finally(() => { checking = false; });
     }, 100);
     timer.unref();
   }
@@ -551,13 +579,4 @@ function markTreeEmpty(session: ReaperSession): void {
 function signalName(signo: number): NodeJS.Signals | null {
   const signals = os.constants.signals as Record<string, number>;
   return (Object.keys(signals).find((name) => signals[name] === signo) as NodeJS.Signals | undefined) ?? null;
-}
-
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err: any) {
-    return err.code === 'EPERM';
-  }
 }

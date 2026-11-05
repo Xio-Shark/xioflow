@@ -18,6 +18,8 @@ import {
 import { CapabilityAdmission } from './admission.js';
 import { activateInternalOperation, sha256Json, SnapshotContext } from './snapshot-ops.js';
 import { RollbackOptions } from './types.js';
+import { createRequestConfigSnapshot } from '../config/snapshot.js';
+import { NodePlatformDriver } from '../driver/node-driver.js';
 
 /**
  * 回滚协议 (ARCHITECTURE §3.5 / 契约 #28–#30, #56)
@@ -36,6 +38,8 @@ export async function rollback(ctx: SnapshotContext, options: RollbackOptions): 
     capAdmission = domain.checkCapabilityAdmission({
       capabilityId: options.capabilityId,
       mutationRoots: targetRoots,
+      opcode: 'workspace.rollback',
+      workspace: options.capabilityWorkspace,
       runId: options.runId,
       opId: options.opId,
     });
@@ -58,6 +62,20 @@ export async function rollback(ctx: SnapshotContext, options: RollbackOptions): 
     requiredResources: targetRoots.map((r) => `workspace:write:${r}`),
     mutationRoots: targetRoots,
     capabilityId: options.capabilityId,
+    configSnapshot: createRequestConfigSnapshot({
+      driver: domain.getDriver() ?? new NodePlatformDriver(),
+      capabilityId: options.capabilityId,
+      capabilityPolicyVersion: capAdmission?.capability.policyVersion,
+      config: {
+        kind: 'workspace.rollback',
+        snapshotId: options.snapshotId,
+        roots: targetRoots,
+        force: options.force ?? false,
+        removeNewIgnored: options.removeNewIgnored ?? false,
+        timeoutMs: options.timeoutMs,
+        snapshotDriver: snapshotDriver.name,
+      },
+    }),
     outputRef: options.snapshotId,
     timeoutMs: options.timeoutMs,
     status: 'intent_registered',

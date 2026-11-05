@@ -5,6 +5,7 @@ import { buildProcessResult, ExitFacts, openOutputCapture, OutputCapture } from 
 import type { ProcessRunContext, ProcessRunPlan } from './process-run.js';
 import { crashpoint } from '../fault/crashpoint.js';
 import { settleProcessTree } from '../driver/tree-settlement.js';
+import { recordArtifactCreated } from '../artifacts.js';
 /** 要么拿到根进程退出事实继续收尾，要么已经得出（并落盘）最终结果。 */
 type Settled = { exit: ExitFacts } | { final: ProcessExecutionResult };
 
@@ -60,6 +61,26 @@ export async function superviseActive(
   });
   if ('final' in drained) return drained.final;
 
+  const treeStatus = drained.treeSettlement === 'empty'
+    ? 'empty'
+    : drained.treeSettlement === 'reaped'
+      ? 'residual'
+      : 'unknown';
+  ctx.domain.getStore().updateRecoveryEvidence(options.opId, {
+    tree: {
+      status: treeStatus,
+      source: outcome.type === 'exit' ? 'natural_exit' : 'stop',
+      observedAt: new Date().toISOString(),
+    },
+    pipes: {
+      stdin: 'unknown',
+      stdout: 'drained',
+      stderr: 'drained',
+      source: outcome.type === 'exit' ? 'natural_exit' : 'stop',
+      observedAt: new Date().toISOString(),
+    },
+  });
+
   await recordHardLimitHits(ctx, plan, handle);
   const result = buildProcessResult(plan, capture, {
     exit: settled.exit,
@@ -69,16 +90,21 @@ export async function superviseActive(
     resourceSamplingError: sampler.error(),
     identityVerification: await ctx.driver.verifyIdentity(handle.identity),
   });
+  if (drained.unreapedPids?.length) result.unreapedPids = drained.unreapedPids;
 
   if (opState.stopPromise) {
     const stopRes = await opState.stopPromise;
     if (stopRes.stopped !== 'confirmed_stopped') {
       return recordUnconfirmedStop(ctx, plan, handle, stopRes, true);
     }
+    if (stopRes.unreapedPids?.length) result.unreapedPids = [...new Set([...(result.unreapedPids ?? []), ...stopRes.unreapedPids])];
   }
 
   if (plan.readTracking) {
-    result.readEvidence = plan.readTracking.collect(capture.artifactsDir);
+    result.readEvidence = plan.readTracking.collect(
+      capture.artifactsDir,
+      (artifact, facts) => recordArtifactCreated(ctx.domain, options.opId, artifact, facts),
+    );
   }
 
   // 6. [事务提交结果与释放资源 - Single Writer]
@@ -308,7 +334,7 @@ function holdLeases(
   });
 }
 
-type Drained = { residualProcessesReaped: boolean; treeSettlement?: ProcessOperationResult['treeSettlement'] };
+type Drained = { residualProcessesReaped: boolean; treeSettlement?: ProcessOperationResult['treeSettlement']; unreapedPids?: number[] };
 
 /**
  * 有界等待流排空。排空超时说明根进程已退出但仍有后代持有管道：回收整个进程组，
@@ -329,6 +355,7 @@ async function drainOrReap(
 
   let drained = await drainedWithin(drainTimeoutMs);
   let residualProcessesReaped = false;
+  let unreapedPids: number[] | undefined;
   if (!drained && facts.exitedNaturally) {
     const reapResult = await ctx.driver.terminate(handle.identity, 1500);
     if (reapResult.stopped !== 'confirmed_stopped') {
@@ -339,19 +366,24 @@ async function drainOrReap(
       return { final: holdLeases(ctx, plan, indet) };
     }
     residualProcessesReaped = true;
+    unreapedPids = reapResult.unreapedPids;
     // 被杀死的后代释放管道后，给排空最后一次机会
     drained = await drainedWithin(250);
   }
 
   if (drained) {
     // 停止流水线在途时由它确认整棵树（停止结果的 scope），不再另做结算
-    if (!facts.exitedNaturally || opState.stopPromise) return { residualProcessesReaped };
-    if (residualProcessesReaped) return { residualProcessesReaped, treeSettlement: 'reaped' };
+    if (!facts.exitedNaturally || opState.stopPromise) return { residualProcessesReaped, ...(unreapedPids?.length ? { unreapedPids } : {}) };
+    if (residualProcessesReaped) return { residualProcessesReaped, treeSettlement: 'reaped', ...(unreapedPids?.length ? { unreapedPids } : {}) };
     return settleTree(ctx, plan, handle);
   }
-  // 排空超时路径强制调用 fsyncSync + closeSync 结清刷盘
+  // 排空超时路径仍要结清异步 writer；管道继续被消费但不再把新数据加入内存或文件。
   capture.stdout.forceFinalize();
   capture.stderr.forceFinalize();
+  await Promise.race([
+    Promise.all([capture.stdout.finishPromise, capture.stderr.finishPromise]),
+    new Promise<void>((resolve) => setTimeout(resolve, 1000)),
+  ]);
   // 走到这里时进程组已被确认停止，管道写端却仍被持有：
   // 必然存在一个驱动未观测到的逃逸进程（例如 setsid 后被 init 收养、采样器没来得及记录）。
   // 无法确认隔离，不能报告 succeeded / residualProcessesReaped，必须如实判 indeterminate 并保留租约。
@@ -383,5 +415,5 @@ async function settleTree(
     });
     return { final: holdLeases(ctx, plan, indet) };
   }
-  return { residualProcessesReaped: settlement.residualProcessesReaped, treeSettlement: settlement.treeSettlement };
+  return { residualProcessesReaped: settlement.residualProcessesReaped, treeSettlement: settlement.treeSettlement, ...(settlement.unreapedPids?.length ? { unreapedPids: settlement.unreapedPids } : {}) };
 }

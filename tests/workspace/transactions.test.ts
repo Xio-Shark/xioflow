@@ -140,6 +140,38 @@ describe('workspace transactions (optimistic parallel agents)', () => {
     expect(types.filter((t) => t === 'TX_COMMITTED')).toHaveLength(2);
   });
 
+  it('persists a versioned incremental workspace index with separate evidence sets', async () => {
+    const tx = await begin('indexed', 'run-a');
+    fs.readFileSync(path.join(tx.forkRoot, 'config.json'), 'utf8');
+    fs.writeFileSync(path.join(tx.forkRoot, 'src/indexed.ts'), 'export const indexed = true;\n');
+
+    const inspected = await supervisor.inspectWorkspaceTransaction(tx.txId, {
+      workspaceIndex: {
+        discoverySet: ['tool-result:src/indexed.ts'],
+        symbolSlice: { 'src/indexed.ts#indexed': 'slice-hash' },
+        ignoredManifest: 'ignored-digest-from-host',
+      },
+    });
+    expect(inspected.workspaceIndex.schemaVersion).toBe('xio/workspace-index/1');
+    expect(inspected.workspaceIndex.discoverySet).toEqual(expect.arrayContaining(['src/', 'src/indexed.ts', 'tool-result:src/indexed.ts']));
+    expect(inspected.workspaceIndex.pathDependencies).toEqual([]);
+    expect(inspected.workspaceIndex.ignoredManifest).toBe('ignored-digest-from-host');
+    expect(inspected.workspaceIndex.symbolSlice).toEqual({ 'src/indexed.ts#indexed': 'slice-hash' });
+    expect(inspected.workspaceIndex.coverage).toBe(inspected.readSet === null ? 'unknown' : 'complete');
+    expect(inspected.workspaceIndex.digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(inspected.workspaceIndex.writeSet).toEqual([{ status: 'A', path: 'src/indexed.ts' }]);
+
+    const committed = await supervisor.commitWorkspaceTransaction(tx.txId);
+    expect(committed.status).toBe('committed');
+    const event = domain.getStore().getJournalEvents(domain.domainId)
+      .filter((entry) => entry.type === 'TX_COMMITTED' && entry.payload.txId === tx.txId)
+      .at(-1);
+    expect(event?.payload.workspaceIndex).toMatchObject({
+      schemaVersion: 'xio/workspace-index/1',
+      writeSet: [{ status: 'A', path: 'src/indexed.ts' }],
+    });
+  });
+
   it('rejects the later of two writers of the same file and leaves the first version in place', async () => {
     const a = await begin('tx-a', 'run-a');
     const b = await begin('tx-b', 'run-b');

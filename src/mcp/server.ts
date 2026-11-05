@@ -11,7 +11,8 @@ import { RecoveryEngine } from '../recovery/engine.js';
 import { exportJournalToOtlp } from '../otel/otlp.js';
 import { ProcessSupervisor } from '../supervisor/supervisor.js';
 import { compileToolInputSchema } from './input-schema.js';
-import { TOOLS, ToolContext } from './tools.js';
+import { ISA_EXECUTE_TOOL, TOOLS, ToolContext } from './tools.js';
+import { executeIsaProgram, type IsaAdapterOptions } from '../adapters/isa.js';
 
 /**
  * MCP server（stdio，JSON-RPC 2.0，每行一条消息），零依赖。
@@ -33,6 +34,10 @@ export interface KernelMcpServerOptions {
   log?: (message: string) => void;
   /** 工具结果中保留的 stdout / stderr 尾部字符数（完整输出见 stdoutRef / stderrRef）。 */
   maxOutputChars?: number;
+  /** Host-owned ISA configuration; binding callbacks are never read from client arguments. */
+  isa?: IsaAdapterOptions;
+  /** Serve only the preview execute tool without acquiring a domain or creating a database. */
+  isaOnly?: boolean;
   /** 周期性把 journal 导出为 OTLP traces；失败写日志且游标不前进，下个周期重试。 */
   otlp?: { endpoint: string; headers?: Record<string, string>; intervalMs?: number; serviceName?: string };
 }
@@ -80,8 +85,8 @@ export class KernelMcpServer {
   private driver?: PlatformDriver;
   private instructions = '';
   private readonly sessionTaskId = `mcp-session-${crypto.randomUUID()}`;
-  /** requestId → 该请求启动的操作，用于 notifications/cancelled */
-  private readonly inFlight = new Map<string, string>();
+  /** Request cancellation only; the kernel remains the execution-state authority. */
+  private readonly inFlight = new Map<string, string | AbortController>();
   private readonly pending = new Set<Promise<void>>();
 
   constructor(private readonly options: KernelMcpServerOptions) {
@@ -90,22 +95,28 @@ export class KernelMcpServer {
     }
     this.log = options.log ?? ((m) => process.stderr.write(`[xioflow-mcp] ${m}\n`));
     this.output = options.output ?? process.stdout;
+    if (options.isaOnly && options.otlp) throw new Error('isaOnly does not own a domain for OTLP export');
   }
 
   /** 获取域并完成恢复后开始服务；输入流结束时等待在途请求、关闭域后返回。 */
   public async serve(): Promise<void> {
-    this.driver = selectDriver(this.options.driver);
-    this.domain = ExecutionDomain.acquire(this.options.domainPath, this.options.domainId ?? 'default');
     try {
-      const report = await new RecoveryEngine(this.domain, this.driver).recover();
-      const isolated = report.recoveredOperations.filter((r) => r.action === 'isolated_indeterminate').length;
-      this.log(`domain ${this.options.domainPath} recovered ${report.recoveredOperations.length} operation(s), ${isolated} isolated as indeterminate`);
-      this.supervisor = new ProcessSupervisor(this.domain, this.driver);
-      this.instructions =
-        `xioflow kernel ${packageVersion()} with the ${this.driver.name} driver. ` +
-        'Use run_command instead of a plain shell when you need to know for sure what happened: reuse an opId to retry without running twice, ' +
-        'and treat "indeterminate" as "stop and ask a human", never as success or failure. ' +
-        'Use begin_transaction / commit_transaction when several agents edit the same repository.';
+      if (!this.options.isaOnly) {
+        this.driver = selectDriver(this.options.driver);
+        this.domain = ExecutionDomain.acquire(this.options.domainPath, this.options.domainId ?? 'default');
+        const report = await new RecoveryEngine(this.domain, this.driver).recover();
+        const isolated = report.recoveredOperations.filter((r) => r.action === 'isolated_indeterminate').length;
+        this.log(`domain ${this.options.domainPath} recovered ${report.recoveredOperations.length} operation(s), ${isolated} isolated as indeterminate`);
+        this.supervisor = new ProcessSupervisor(this.domain, this.driver);
+        this.instructions =
+          `xioflow kernel ${packageVersion()} with the ${this.driver.name} driver. ` +
+          'Use run_command instead of a plain shell when you need to know for sure what happened: reuse an opId to retry without running twice, ' +
+          'and treat "indeterminate" as "stop and ask a human", never as success or failure. ' +
+          'Use begin_transaction / commit_transaction when several agents edit the same repository.';
+      } else {
+        this.instructions = `xioflow kernel ${packageVersion()} ISA preview. Use execute with a structured xio/1 Program. `
+          + 'Plan mode validates without creating execution state. Pipeline mode requires an explicit host kernel binding; unsupported results are not success.';
+      }
 
       const stopExport = this.startOtlpExport();
       const lines = readline.createInterface({ input: this.options.input ?? process.stdin, crlfDelay: Infinity });
@@ -118,7 +129,7 @@ export class KernelMcpServer {
       await Promise.allSettled([...this.pending]);
       await stopExport();
     } finally {
-      this.domain.close();
+      this.domain?.close();
     }
   }
 
@@ -189,7 +200,7 @@ export class KernelMcpServer {
         return {};
       case 'tools/list':
         return {
-          tools: TOOLS.map(({ name, title, description, inputSchema, annotations }) => ({
+          tools: [ISA_EXECUTE_TOOL, ...(this.options.isaOnly ? [] : TOOLS)].map(({ name, title, description, inputSchema, annotations }) => ({
             name,
             title,
             description,
@@ -200,8 +211,12 @@ export class KernelMcpServer {
       case 'tools/call':
         return this.callTool(params, id);
       case 'notifications/cancelled': {
-        const opId = this.inFlight.get(String(params.requestId));
-        if (opId) {
+        const target = this.inFlight.get(String(params.requestId));
+        if (target instanceof AbortController) {
+          this.log(`request ${params.requestId} cancelled by client; stopping pending ISA dispatch`);
+          target.abort(new DOMException('MCP ISA request cancelled', 'AbortError'));
+        } else if (target) {
+          const opId = target;
           this.log(`request ${params.requestId} cancelled by client (${params.reason ?? 'no reason'}), stopping ${opId}`);
           await this.supervisor!.cancelOperation(opId).catch((err) => this.log(`cancel ${opId}: ${err.message}`));
         }
@@ -213,6 +228,24 @@ export class KernelMcpServer {
   }
 
   private async callTool(params: any, id: JsonRpcId | undefined): Promise<unknown> {
+    if (params?.name === ISA_EXECUTE_TOOL.name) {
+      const args = params.arguments;
+      if (args === null || typeof args !== 'object' || Array.isArray(args)
+        || Object.keys(args).some((key) => key !== 'program')
+        || args.program === null || typeof args.program !== 'object' || Array.isArray(args.program)) {
+        throw new RpcError(-32602, 'execute requires exactly one object argument: program');
+      }
+      const controller = new AbortController();
+      if (id !== undefined) this.inFlight.set(String(id), controller);
+      try {
+        const result = await executeIsaProgram(args.program, { ...this.options.isa, signal: controller.signal });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], structuredContent: result,
+          isError: result.status !== 'admitted' && result.status !== 'succeeded' };
+      } finally {
+        if (id !== undefined && this.inFlight.get(String(id)) === controller) this.inFlight.delete(String(id));
+      }
+    }
+    if (this.options.isaOnly) throw new RpcError(-32602, `Unknown tool: ${params?.name}`);
     const tool = TOOLS.find((t) => t.name === params?.name);
     if (!tool) throw new RpcError(-32602, `Unknown tool: ${params?.name}`);
     const args = params.arguments === undefined ? {} : params.arguments;

@@ -60,22 +60,40 @@ function discoverCrashpoints(driver: DriverKind, scenario: Scenario): string[] {
   }
 }
 
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err: any) {
-    return err.code === 'EPERM';
+/** Independent OS evidence: a zombie is stopped, not a successfully reaped PID. */
+function executionState(pid: number): 'absent' | 'zombie' | 'running' {
+  if (process.platform === 'linux') {
+    let stat: string;
+    try { stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); }
+    catch (error: any) {
+      if (error.code === 'ENOENT' || error.code === 'ESRCH') return 'absent';
+      throw error;
+    }
+    const end = stat.lastIndexOf(')');
+    const state = end >= 0 ? stat.slice(end + 1).trim().split(/\s+/u)[0] ?? '' : '';
+    if (!/^[A-Z]$/u.test(state)) throw new Error(`Unreadable process state for PID ${pid}`);
+    return state === 'Z' ? 'zombie' : 'running';
   }
+  const observed = spawnSync('ps', ['-p', String(pid), '-o', 'state='], { encoding: 'utf8' });
+  if (observed.error) throw observed.error;
+  if (observed.status !== 0) {
+    try { process.kill(pid, 0); }
+    catch (error: any) { if (error.code === 'ESRCH') return 'absent'; }
+    throw new Error(`Cannot observe process state for PID ${pid}: ${observed.stderr}`);
+  }
+  const state = observed.stdout.trim();
+  if (!/^[A-Z]/u.test(state)) throw new Error(`Unreadable process state for PID ${pid}`);
+  return state.startsWith('Z') ? 'zombie' : 'running';
 }
 
-async function waitGone(pid: number, timeoutMs: number): Promise<boolean> {
+async function waitStopped(pid: number, timeoutMs: number): Promise<'absent' | 'zombie' | 'running'> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!isAlive(pid)) return true;
+    const state = executionState(pid);
+    if (state !== 'running') return state;
     await new Promise((r) => setTimeout(r, 25));
   }
-  return !isAlive(pid);
+  return executionState(pid);
 }
 
 function effectCount(ws: Workspace): number {
@@ -100,11 +118,17 @@ async function checkInvariantsAfterRecovery(ws: Workspace): Promise<string> {
       expect(store.getOperation(lease.operationId)?.result?.status).toBe('indeterminate');
     }
 
-    // I3 没有无人认领的存活进程：进程要么已消失，要么操作被隔离为 indeterminate
+    // I3 无无人认领的可执行进程；未被容器 init 回收的 Z 必须单独保留事实。
     const pidFile = path.join(ws.workDir, 'op.pid');
     if (fs.existsSync(pidFile) && !indeterminate) {
       const pid = parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
-      expect(await waitGone(pid, 3000)).toBe(true);
+      expect(Number.isSafeInteger(pid) && pid > 0).toBe(true);
+      const state = await waitStopped(pid, 3000);
+      expect(state).not.toBe('running');
+      if (state === 'zombie') {
+        expect(op?.result?.kind).toBe('process');
+        expect((op?.result as any).unreapedPids).toContain(pid);
+      }
     }
 
     // I4 副作用至多一次；I5 声称成功必须有真实执行与零退出码
@@ -118,6 +142,11 @@ async function checkInvariantsAfterRecovery(ws: Workspace): Promise<string> {
     const recovered = report.recoveredOperations.find((r) => r.opId === 'op');
     if (recovered?.action === 'marked_dead') {
       expect((op?.result as any).terminationReason).toBe('exit_unobserved');
+    }
+    if (recovered?.action === 'marked_dead' || recovered?.action === 'stopped_alive_process') {
+      expect((op?.result as any).exitCode).toBeNull();
+      expect((op?.result as any).signal).toBeNull();
+      expect((op?.result as any).evidence).toBe('unobserved');
     }
 
     // I6 结果事实至多记录一次

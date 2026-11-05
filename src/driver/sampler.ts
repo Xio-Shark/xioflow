@@ -4,6 +4,21 @@ import { ProcessObservationError } from './observation.js';
 
 const execFileAsync = util.promisify(execFile);
 
+const PROCESS_TABLE_ARGS = ['-A', '-o', 'pid=,ppid=,pgid=,state=,rss=,time=,command='] as const;
+const SHARED_CYCLE_MS = 35;
+
+type ProcessTableReader = () => Promise<string>;
+
+export interface ProcessSamplerOptions {
+  /** 仅供确定性测试注入；生产默认读取异步 ps 进程表。 */
+  readProcessTable?: ProcessTableReader;
+}
+
+interface TreeWatcher {
+  leaderPid: number;
+  descendants: Set<number>;
+}
+
 export interface ProcessSnapshotEntry {
   pid: number;
   ppid: number;
@@ -32,6 +47,21 @@ export class ProcessSampler {
 
   private cachedSnapshot: { timestamp: number; map: ProcessSnapshotMap } | null = null;
   private inFlightPromise: Promise<ProcessSnapshotMap> | null = null;
+  private readonly readProcessTable: ProcessTableReader;
+  private readonly treeWatchers = new Map<number, TreeWatcher>();
+  private cycleTimer: NodeJS.Timeout | null = null;
+  private cyclePromise: Promise<void> | null = null;
+  private cycleCount = 0;
+  private lastCycleError: string | undefined;
+
+  public constructor(options: ProcessSamplerOptions = {}) {
+    this.readProcessTable =
+      options.readProcessTable ??
+      (async () => {
+        const { stdout } = await execFileAsync('ps', PROCESS_TABLE_ARGS);
+        return stdout;
+      });
+  }
 
   /**
    * 异步获取进程表快照 (支持请求合并与短缓存)
@@ -48,7 +78,7 @@ export class ProcessSampler {
 
     this.inFlightPromise = (async () => {
       try {
-        const { stdout } = await execFileAsync('ps', ['-A', '-o', 'pid=,ppid=,pgid=,state=,rss=,time=,command=']);
+        const stdout = await this.readProcessTable();
         const map = new Map<number, ProcessSnapshotEntry>();
         const lines = stdout.split('\n');
         for (const line of lines) {
@@ -69,6 +99,9 @@ export class ProcessSampler {
             });
           }
         }
+        if (map.size === 0) {
+          throw new Error('process table returned no parseable rows');
+        }
         this.cachedSnapshot = { timestamp: Date.now(), map };
         return map;
       } catch (error) {
@@ -80,6 +113,70 @@ export class ProcessSampler {
     })();
 
     return this.inFlightPromise;
+  }
+
+  /**
+   * 将进程树加入全局采样周期。所有 Node driver 实例共享同一个进程表读取，
+   * 每个周期只读一次，再把新发现的后代写入调用方持有的 Set。
+   */
+  public watchProcessTree(leaderPid: number, descendants: Set<number>): () => void {
+    const watcher: TreeWatcher = { leaderPid, descendants };
+    this.treeWatchers.set(leaderPid, watcher);
+    this.ensureCycle();
+    void this.runCycle();
+
+    return () => {
+      if (this.treeWatchers.get(leaderPid) === watcher) {
+        this.treeWatchers.delete(leaderPid);
+      }
+      if (this.treeWatchers.size === 0 && this.cycleTimer) {
+        clearInterval(this.cycleTimer);
+        this.cycleTimer = null;
+      }
+    };
+  }
+
+  /** 只供内部回归测试与诊断，避免把周期实现重新拆回每操作状态。 */
+  public getCycleDiagnostics(): {
+    activeWatchers: number;
+    cycleCount: number;
+    cycleInFlight: boolean;
+    lastCycleError?: string;
+  } {
+    return {
+      activeWatchers: this.treeWatchers.size,
+      cycleCount: this.cycleCount,
+      cycleInFlight: this.cyclePromise !== null,
+      ...(this.lastCycleError ? { lastCycleError: this.lastCycleError } : {}),
+    };
+  }
+
+  private ensureCycle(): void {
+    if (this.cycleTimer) return;
+    this.cycleTimer = setInterval(() => {
+      void this.runCycle();
+    }, SHARED_CYCLE_MS);
+    this.cycleTimer.unref?.();
+  }
+
+  private runCycle(): Promise<void> {
+    if (this.cyclePromise) return this.cyclePromise;
+    this.cyclePromise = (async () => {
+      try {
+        const snapshot = await this.getSnapshot(0);
+        this.cycleCount++;
+        this.lastCycleError = undefined;
+        for (const watcher of this.treeWatchers.values()) {
+          const tree = await this.getProcessTree(watcher.leaderPid, snapshot, Array.from(watcher.descendants));
+          for (const pid of tree.allDescendants) watcher.descendants.add(pid);
+        }
+      } catch (error) {
+        this.lastCycleError = error instanceof Error ? error.message : String(error);
+      } finally {
+        this.cyclePromise = null;
+      }
+    })();
+    return this.cyclePromise;
   }
 
   /**
@@ -198,6 +295,17 @@ export class ProcessSampler {
       }
     }
 
+    if (!hasLiveMember && ![...snapshot.values()].some((entry) => entry.pgid === pgid)) {
+      // The group may have disappeared while ps ran. Only ESRCH proves that race;
+      // an existing group omitted by ps is incomplete evidence, not an empty group.
+      try { process.kill(-pgid, 0); }
+      catch (error: any) {
+        if (error.code === 'ESRCH') return false;
+        if (error.code !== 'EPERM') throw new ProcessObservationError(`Cannot observe process group ${pgid}`, error);
+      }
+      throw new ProcessObservationError(`Process group ${pgid} exists but is missing from the process snapshot`, new Error('incomplete process group observation'));
+    }
+
     return hasLiveMember;
   }
 
@@ -207,6 +315,32 @@ export class ProcessSampler {
   public async isZombie(pid: number, existingSnapshot?: ProcessSnapshotMap): Promise<boolean> {
     const snapshot = existingSnapshot ?? (await this.getSnapshot(50));
     return snapshot.get(pid)?.state === 'Z';
+  }
+
+  /** A zombie is stopped, while a live PID missing from the table is unknown evidence. */
+  public async classifyPids(
+    pids: Iterable<number>,
+    existingSnapshot?: ProcessSnapshotMap,
+  ): Promise<{ runningPids: number[]; unreapedPids: number[] }> {
+    const snapshot = existingSnapshot ?? await this.getSnapshot(0);
+    const runningPids: number[] = [];
+    const unreapedPids: number[] = [];
+    for (const pid of new Set(pids)) {
+      const entry = snapshot.get(pid);
+      if (entry) {
+        if (entry.state === 'Z') unreapedPids.push(pid);
+        else runningPids.push(pid);
+        continue;
+      }
+      try {
+        process.kill(pid, 0);
+      } catch (error: any) {
+        if (error.code === 'ESRCH') continue;
+        if (error.code !== 'EPERM') throw new ProcessObservationError(`Cannot observe PID ${pid}`, error);
+      }
+      throw new ProcessObservationError(`PID ${pid} exists but is missing from the process snapshot`, new Error('incomplete process table observation'));
+    }
+    return { runningPids, unreapedPids };
   }
 
   /**
