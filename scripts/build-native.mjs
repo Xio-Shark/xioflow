@@ -45,7 +45,13 @@ const output = path.join(outDir, 'xioflow-reaper');
 const cc = process.env.CC || 'cc';
 const flags = ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror'];
 // Linux: static so one binary runs on any libc (glibc versions, musl/Alpine); the helper needs no NSS.
-if (process.platform === 'linux') flags.push('-static');
+if (process.platform === 'linux') {
+    flags.push('-static');
+    // GCC with glibc's fortify headers cannot prove the control-channel read
+    // length stays below sizeof(buf) across loop iterations and reports a false
+    // -Wstringop-overflow; -Werror would otherwise fail the build on Ubuntu.
+    flags.push('-Wno-stringop-overflow');
+}
 if (crossArch) flags.push('-arch', crossArch);
 
 // stdout stays clean: `npm pack --json` runs this from prepack and parses stdout.
