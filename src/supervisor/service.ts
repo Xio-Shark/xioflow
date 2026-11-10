@@ -557,6 +557,25 @@ export class ServiceSupervisor {
               durationMs: result.durationMs, completedAt: new Date().toISOString(),
             }, false);
             state.status = 'failed';
+            // This early return used to skip the terminal event entirely, leaving
+            // journal consumers without a SERVICE_FAILED for an instance that will
+            // never restart. finalizeStop emits one for the same unconfirmed
+            // condition; keep the two paths consistent.
+            const restart = state.spec.restart;
+            store.recordEventAndTransitionState({
+              domainId: this.domain.domainId,
+              runId: state.runId,
+              operationId: state.currentOpId,
+              type: 'SERVICE_FAILED',
+              payload: {
+                serviceId: state.serviceId,
+                runId: state.runId,
+                reason: 'stop_unconfirmed',
+                maxRestartsExceeded: !!restart && restart !== 'never' && state.attemptCount >= restart.maxRestarts,
+                stopped: settlement.stop.stopped,
+              },
+              timestamp: new Date().toISOString(),
+            });
             state.instanceExitResolve?.(exitResult);
             state.stdoutStream.end();
             state.stopResolve();
