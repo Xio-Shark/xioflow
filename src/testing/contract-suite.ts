@@ -1564,10 +1564,15 @@ export function defineContractTestSuite(
       await handle.ready;
       expect(handle.currentInstanceOpId).toBe('service-c51#1');
 
+      // CI 冷启动时，退出收尾（stderr 排空、进程树核验）加上拉起下一个 node
+      // 实例可能要好几秒，3 秒窗口会在慢机器上把「重启慢了」误判成「没有重启」。
+      // 放宽到 6 秒，三段合计仍低于套件的 20 秒测试超时。
+      const restartWindowMs = 6000;
+
       // 退出 instance #1
       handle.stdin.write('die-1\n');
       const start1 = Date.now();
-      while (handle.currentInstanceOpId !== 'service-c51#2' && Date.now() - start1 < 3000) {
+      while (handle.currentInstanceOpId !== 'service-c51#2' && Date.now() - start1 < restartWindowMs) {
         await new Promise((r) => setTimeout(r, 20));
       }
       expect(handle.currentInstanceOpId).toBe('service-c51#2');
@@ -1575,7 +1580,7 @@ export function defineContractTestSuite(
       // 退出 instance #2
       handle.stdin.write('die-2\n');
       const start2 = Date.now();
-      while (handle.currentInstanceOpId !== 'service-c51#3' && Date.now() - start2 < 3000) {
+      while (handle.currentInstanceOpId !== 'service-c51#3' && Date.now() - start2 < restartWindowMs) {
         await new Promise((r) => setTimeout(r, 20));
       }
       expect(handle.currentInstanceOpId).toBe('service-c51#3');
@@ -1584,7 +1589,7 @@ export function defineContractTestSuite(
       handle.stdin.write('die-3\n');
       const start3 = Date.now();
       let events = domain.getStore().getJournalEvents(domain.domainId);
-      while (!events.some((e) => e.type === 'SERVICE_FAILED' && (e.payload as any)?.serviceId === 'service-c51') && Date.now() - start3 < 3000) {
+      while (!events.some((e) => e.type === 'SERVICE_FAILED' && (e.payload as any)?.serviceId === 'service-c51') && Date.now() - start3 < restartWindowMs) {
         await new Promise((r) => setTimeout(r, 20));
         events = domain.getStore().getJournalEvents(domain.domainId);
       }
