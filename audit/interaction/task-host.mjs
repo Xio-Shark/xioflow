@@ -73,7 +73,15 @@ export class TaskHost {
         input: JSON.stringify(this.#observation.full().records), encoding: 'utf8', timeout: 2000,
         maxBuffer: 1024 * 1024, cwd: path.dirname(this.#file), env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LC_ALL: 'C' },
       });
-      if (execution.error) throw new ObservationError(execution.error.code === 'ENOENT' ? 'jq_unavailable' : 'jq_execution_error', execution.error.message);
+      if (execution.error) {
+        // jq can reject a malformed program and exit before reading its stdin; the
+        // pending stdin write then surfaces as EPIPE. jq did run and fail, so
+        // report jq_failed rather than jq_execution_error.
+        if (execution.error.code === 'EPIPE') {
+          throw new ObservationError('jq_failed', 'jq exited before consuming input: ' + execution.error.message);
+        }
+        throw new ObservationError(execution.error.code === 'ENOENT' ? 'jq_unavailable' : 'jq_execution_error', execution.error.message);
+      }
       if (execution.status !== 0) throw new ObservationError('jq_failed', `jq exited ${execution.status}: ${execution.stderr.trim().slice(0, 1000)}`);
       const output = execution.stdout.trim();
       result = { version: this.#observation.version, values: output ? output.split('\n').map((line) => JSON.parse(line)) : [] };
