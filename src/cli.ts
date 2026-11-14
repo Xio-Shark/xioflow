@@ -4,19 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
-import { SqliteStore } from './store/sqlite.js';
-import { KernelMcpServer } from './mcp/server.js';
-import { exportJournalToOtlp } from './otel/otlp.js';
-import { wrapAgent } from './gateway/shell-shim.js';
-import { createConfinementDriver, detectAvailableConfinementDrivers, LandlockConfinementDriver } from './confinement/index.js';
-import { CgroupPlatformDriver } from './driver/cgroup-driver.js';
-import { locateNativeShimLibrary, locateReaperHelper, ReaperPlatformDriver } from './driver/reaper-driver.js';
-import { defaultDomainPathForWorkspace, KernelMedium } from './kernel/medium.js';
-import { isProcessAlive, readArbiterManifest } from './arbiter/protocol.js';
-import { raceAgentsInVirtualWorkspaces, runInVirtualWorkspace } from './gateway/virtual-workspace.js';
-import { forkGatewayRunAtStep, formatGatewayRunTrace, traceGatewayRun } from './gateway/time-fork.js';
-import { executeIsaProgram, isaResultExitCode } from './adapters/isa.js';
-import { connectWorkspace, WorkspaceArbiterClient, WorkspaceArbiterServer } from './arbiter/index.js';
+import type { WorkspaceArbiterClient } from './arbiter/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -80,6 +68,17 @@ async function runDoctorCommand(rest: string[]): Promise<void> {
     },
     strict: true,
   });
+  const [
+    { defaultDomainPathForWorkspace },
+    { locateNativeShimLibrary, locateReaperHelper, ReaperPlatformDriver },
+    { createConfinementDriver, detectAvailableConfinementDrivers, LandlockConfinementDriver },
+    { CgroupPlatformDriver },
+  ] = await Promise.all([
+    import('./kernel/medium.js'),
+    import('./driver/reaper-driver.js'),
+    import('./confinement/index.js'),
+    import('./driver/cgroup-driver.js'),
+  ]);
   const meta = readPackageMeta();
   const workspace = path.resolve(values.workspace ?? process.cwd());
   const resolvedDomain = values.domain ? path.resolve(values.domain) : defaultDomainPathForWorkspace(workspace);
@@ -179,6 +178,15 @@ async function runPruneCommand(rest: string[]): Promise<void> {
     },
     strict: true,
   });
+  const [
+    { defaultDomainPathForWorkspace, KernelMedium },
+    { isProcessAlive, readArbiterManifest },
+    { connectWorkspace },
+  ] = await Promise.all([
+    import('./kernel/medium.js'),
+    import('./arbiter/protocol.js'),
+    import('./arbiter/index.js'),
+  ]);
   const workspace = fs.realpathSync(path.resolve(values.workspace ?? process.cwd()));
   const domainPath = values.domain ? path.resolve(values.domain) : defaultDomainPathForWorkspace(workspace);
   const maxAgeHours = values['max-age-hours'] !== undefined ? Number(values['max-age-hours']) : 24;
@@ -334,6 +342,7 @@ async function main(): Promise<void> {
   if (command === 'plan' || command === 'execute') {
     const { values } = parseArgs({ args: rest, options: { input: { type: 'string' } }, strict: true });
     if (!values.input) throw new Error(`${command} requires --input <program.json|->`);
+    const { executeIsaProgram, isaResultExitCode } = await import('./adapters/isa.js');
     const source = fs.readFileSync(values.input === '-' ? 0 : path.resolve(values.input), 'utf8');
     const program: unknown = JSON.parse(source);
     const result = await executeIsaProgram(program, { mode: command === 'plan' ? 'plan' : undefined });
@@ -341,7 +350,6 @@ async function main(): Promise<void> {
     process.exitCode = isaResultExitCode(result);
     return;
   }
-  await LandlockConfinementDriver.probe();
 
   if (command === 'status') {
     const { values } = parseArgs({
@@ -353,6 +361,11 @@ async function main(): Promise<void> {
       },
       strict: true,
     });
+    const [{ LandlockConfinementDriver }, { connectWorkspace }] = await Promise.all([
+      import('./confinement/index.js'),
+      import('./arbiter/index.js'),
+    ]);
+    await LandlockConfinementDriver.probe();
     const medium = await connectWorkspace(process.cwd(), {
       domainPath: values.domain ? path.resolve(values.domain) : undefined,
       domainId: values['domain-id'],
@@ -388,6 +401,11 @@ async function main(): Promise<void> {
       },
       strict: true,
     });
+    const [{ LandlockConfinementDriver }, { connectWorkspace, WorkspaceArbiterClient, WorkspaceArbiterServer }] = await Promise.all([
+      import('./confinement/index.js'),
+      import('./arbiter/index.js'),
+    ]);
+    await LandlockConfinementDriver.probe();
     if (sub === 'stop') {
       const medium = await connectWorkspace(process.cwd(), {
         domainPath: values.domain ? path.resolve(values.domain) : undefined,
@@ -439,8 +457,11 @@ async function main(): Promise<void> {
       },
       strict: true,
     });
+    const { LandlockConfinementDriver } = await import('./confinement/index.js');
+    await LandlockConfinementDriver.probe();
     const [agentCommand, ...agentArgs] = agentArgv;
     if (values.shadow || values.gate) {
+      const { runInVirtualWorkspace } = await import('./gateway/virtual-workspace.js');
       const shadowRes = await runInVirtualWorkspace({
         command: agentCommand!,
         args: agentArgs,
@@ -458,6 +479,7 @@ async function main(): Promise<void> {
       process.exitCode = shadowRes.status === 'committed' ? 0 : 1;
       return;
     }
+    const { wrapAgent } = await import('./gateway/shell-shim.js');
     const result = await wrapAgent({
       command: agentCommand!,
       args: agentArgs,
@@ -490,6 +512,11 @@ async function main(): Promise<void> {
       },
       strict: true,
     });
+    const [{ LandlockConfinementDriver }, { raceAgentsInVirtualWorkspaces }] = await Promise.all([
+      import('./confinement/index.js'),
+      import('./gateway/virtual-workspace.js'),
+    ]);
+    await LandlockConfinementDriver.probe();
     const raceRes = await raceAgentsInVirtualWorkspaces({
       workspaceRoot: process.cwd(),
       domainPath: values.domain ? path.resolve(values.domain) : undefined,
@@ -521,6 +548,7 @@ async function main(): Promise<void> {
       },
       strict: true,
     });
+    const { formatGatewayRunTrace, traceGatewayRun } = await import('./gateway/time-fork.js');
     const trace = await traceGatewayRun({
       runId,
       workspaceRoot: process.cwd(),
@@ -556,6 +584,11 @@ async function main(): Promise<void> {
     if (!Number.isInteger(atStep) || atStep < 1) {
       throw new Error('fork requires --at-step <N> (1-indexed positive integer)');
     }
+    const [{ LandlockConfinementDriver }, { forkGatewayRunAtStep }] = await Promise.all([
+      import('./confinement/index.js'),
+      import('./gateway/time-fork.js'),
+    ]);
+    await LandlockConfinementDriver.probe();
     const [agentCommand, ...agentArgs] = agentArgv;
     const forkRes = await forkGatewayRunAtStep({
       runId,
@@ -594,6 +627,11 @@ async function main(): Promise<void> {
   const domainId = values['domain-id'];
 
   if (command === 'mcp') {
+    const [{ LandlockConfinementDriver }, { KernelMcpServer }] = await Promise.all([
+      import('./confinement/index.js'),
+      import('./mcp/server.js'),
+    ]);
+    await LandlockConfinementDriver.probe();
     const driver = values.driver ?? 'auto';
     if (driver !== 'auto' && driver !== 'node' && driver !== 'reaper') throw new Error(`--driver must be auto, node or reaper`);
     const surface = values.surface ?? 'v2';
@@ -623,6 +661,10 @@ async function main(): Promise<void> {
     const resolvedDomain = domainPath ?? path.resolve('.xioflow-kernel');
     const dbPath = path.join(resolvedDomain, 'domain.db');
     if (!fs.existsSync(dbPath)) throw new Error(`no kernel domain at ${resolvedDomain} (missing domain.db)`);
+    const [{ SqliteStore }, { exportJournalToOtlp }] = await Promise.all([
+      import('./store/sqlite.js'),
+      import('./otel/otlp.js'),
+    ]);
     const store = new SqliteStore(dbPath);
     try {
       const res = await exportJournalToOtlp(
