@@ -1209,6 +1209,9 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
   process.on('SIGINT', onSigInt);
   process.on('SIGTERM', onSigTerm);
 
+  let onStdinData: ((chunk: Buffer) => void) | undefined;
+  let onStdinEnd: (() => void) | undefined;
+
   try {
     store.bindRunConfigSnapshot(runId, requestConfigSnapshot);
     handle = await driver.spawn(agentCommand);
@@ -1219,16 +1222,18 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
     handle.releaseGate?.();
 
     if (options.inheritStdio && !process.stdin.isTTY) {
-      process.stdin.on('data', (chunk) => {
+      onStdinData = (chunk: Buffer) => {
         try {
           handle!.stdin?.write(chunk);
         } catch {}
-      });
-      process.stdin.on('end', () => {
+      };
+      onStdinEnd = () => {
         try {
           handle!.stdin?.end();
         } catch {}
-      });
+      };
+      process.stdin.on('data', onStdinData);
+      process.stdin.on('end', onStdinEnd);
     }
 
     handle.stdout.on('data', (chunk: Buffer) => {
@@ -1284,6 +1289,11 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
     };
   } finally {
     const cleanupErrors: unknown[] = [];
+    if (onStdinData) process.stdin.off('data', onStdinData);
+    if (onStdinEnd) process.stdin.off('end', onStdinEnd);
+    if (onStdinData || onStdinEnd) {
+      try { process.stdin.pause(); } catch {}
+    }
     process.off('SIGINT', onSigInt);
     process.off('SIGTERM', onSigTerm);
     try { restoreConfigs(); } catch (error) { cleanupErrors.push(error); }
