@@ -54,15 +54,51 @@ const evidenceDigest = (roots: RootEvidence[]) => sha(JSON.stringify(roots.map((
 
 export const readEvidencePath = (artifactsDir: string, opId: string) => artifactPath(artifactsDir, opId, '-reads.json.gz');
 
+function isVanishedEntryError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+function tryResetAccessTime(abs: string, st: fs.BigIntStats): void {
+  try {
+    resetAccessTime(abs, st);
+  } catch (err) {
+    // 并发进程清理临时文件/目录时可能在遍历后、utimes 前删除子条目
+    if (!isVanishedEntryError(err)) throw err;
+  }
+}
+
 function walk(dir: string, visit: (abs: string, rel: string, st: fs.BigIntStats) => void, rel = ''): void {
-  const dirStat = fs.lstatSync(dir, { bigint: true });
-  if (!dirStat.isDirectory()) throw new Error(`Read tracking root is not a real directory: ${dir}`);
+  let dirStat: fs.BigIntStats;
+  try {
+    dirStat = fs.lstatSync(dir, { bigint: true });
+  } catch (err) {
+    if (rel && isVanishedEntryError(err)) return;
+    throw err;
+  }
+  if (!dirStat.isDirectory()) {
+    if (rel) return;
+    throw new Error(`Read tracking root is not a real directory: ${dir}`);
+  }
   visit(dir, rel, dirStat);
-  for (const name of fs.readdirSync(dir)) {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch (err) {
+    if (rel && isVanishedEntryError(err)) return;
+    throw err;
+  }
+  for (const name of names) {
     if (!rel && SKIP_TOP.has(name)) continue;
     const abs = path.join(dir, name);
     const childRel = rel ? `${rel}/${name}` : name;
-    const st = fs.lstatSync(abs, { bigint: true });
+    let st: fs.BigIntStats;
+    try {
+      st = fs.lstatSync(abs, { bigint: true });
+    } catch (err) {
+      if (isVanishedEntryError(err)) continue;
+      throw err;
+    }
     if (st.isDirectory()) walk(abs, visit, childRel);
     else visit(abs, childRel, st);
   }
@@ -77,10 +113,10 @@ export function normalizeAccessTimesOnePass(root: string): void {
   walk(root, (abs, _rel, st) => {
     if (st.isSymbolicLink()) return; // utimes 会跟随链接，改到链接目标上
     if (st.isDirectory()) dirs.push([abs, st]);
-    else if (wasAccessed(st)) resetAccessTime(abs, st);
+    else if (wasAccessed(st)) tryResetAccessTime(abs, st);
   });
   // 深的目录先归一：父目录的 mtime 不受子目录 atime 变化影响
-  for (const [abs, st] of dirs.reverse()) resetAccessTime(abs, st);
+  for (const [abs, st] of dirs.reverse()) tryResetAccessTime(abs, st);
 }
 
 function fingerprint(root: string, entry: string): string {
@@ -104,35 +140,34 @@ function fingerprint(root: string, entry: string): string {
 }
 
 /** 一趟遍历同时得到读过的条目（目录以 `/` 结尾，根为 `./`）与全树的 stat 清单。 */
-function scan(root: string): { reads: string[]; tree: Record<string, string>; pathDependencies: Record<string, string> } {
+function scanTree(
+  root: string,
+  collectReads: boolean,
+): { reads: string[]; tree: Record<string, string>; pathDependencies: Record<string, string> } {
   const reads: string[] = [];
   const tree: Record<string, string> = Object.create(null);
   const pathDependencies: Record<string, string> = Object.create(null);
   walk(root, (abs, rel, st) => {
     if (st.isSymbolicLink()) {
-      pathDependencies[rel] = sha(fs.readlinkSync(abs));
-      tree[rel] = `link:${pathDependencies[rel]}`;
+      try {
+        pathDependencies[rel] = sha(fs.readlinkSync(abs));
+        tree[rel] = `link:${pathDependencies[rel]}`;
+      } catch (err) {
+        if (!isVanishedEntryError(err)) throw err;
+      }
       return;
     }
     if (!st.isDirectory()) tree[rel] = `${st.size}:${st.mtimeNs}`;
-    if (wasAccessed(st)) reads.push(st.isDirectory() ? `${rel || '.'}/` : rel);
+    if (collectReads && wasAccessed(st)) reads.push(st.isDirectory() ? `${rel || '.'}/` : rel);
   });
-  return { reads: reads.sort(), tree, pathDependencies };
+  return { reads: collectReads ? reads.sort() : reads, tree, pathDependencies };
 }
 
-function scanTreeOnly(root: string): { tree: Record<string, string>; pathDependencies: Record<string, string> } {
-  const tree: Record<string, string> = Object.create(null);
-  const pathDependencies: Record<string, string> = Object.create(null);
-  walk(root, (abs, rel, st) => {
-    if (st.isSymbolicLink()) {
-      pathDependencies[rel] = sha(fs.readlinkSync(abs));
-      tree[rel] = `link:${pathDependencies[rel]}`;
-      return;
-    }
-    if (!st.isDirectory()) tree[rel] = `${st.size}:${st.mtimeNs}`;
-  });
+const scan = (root: string) => scanTree(root, true);
+const scanTreeOnly = (root: string): { tree: Record<string, string>; pathDependencies: Record<string, string> } => {
+  const { tree, pathDependencies } = scanTree(root, false);
   return { tree, pathDependencies };
-}
+};
 
 function resolveVfsEntry(root: string, candidatePath: string, forceDir: boolean): string | null {
   let resolved: string;
@@ -195,8 +230,18 @@ export class ReadTracker {
       begin: () => {
         if (useVfs || busy) return;
         for (const root of roots) {
-          observed.set(root, probeReadTracking(root) === 'atime');
-          if (observed.get(root)) normalizeAccessTimesOnePass(root);
+          const canObserve = probeReadTracking(root) === 'atime';
+          if (!canObserve) {
+            observed.set(root, false);
+            continue;
+          }
+          try {
+            normalizeAccessTimesOnePass(root);
+            observed.set(root, true);
+          } catch {
+            // 与 collect() 一致：证据准备失败不得中断命令本身，按未观测降级
+            observed.set(root, false);
+          }
         }
       },
       collect: (artifactsDir, onArtifactCreated, vfsEvents) => {

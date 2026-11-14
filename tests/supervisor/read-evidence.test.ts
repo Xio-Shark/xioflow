@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -347,5 +347,38 @@ describe('read evidence', () => {
     expect(fs.statSync(path.join(repo, 'other.txt'), { bigint: true }).ctimeNs).toBe(before);
     const data = fs.statSync(path.join(repo, 'data.json'));
     expect(data.atimeMs).toBeLessThan(data.mtimeMs);
+  });
+
+  it('tolerates transient child entries removed concurrently during atime normalization', async () => {
+    if (!atime) return;
+    const transient = path.join(repo, '.transient-dir');
+    fs.mkdirSync(transient);
+    fs.writeFileSync(path.join(transient, 'temp.txt'), 'ephemeral');
+
+    const origUtimesSync = fs.utimesSync.bind(fs);
+    let removed = false;
+    const spy = vi.spyOn(fs, 'utimesSync').mockImplementation((target, atimeVal, mtimeVal) => {
+      if (!removed && String(target) === transient) {
+        removed = true;
+        fs.rmSync(transient, { recursive: true, force: true });
+      }
+      return origUtimesSync(target, atimeVal, mtimeVal);
+    });
+
+    try {
+      const res = await supervisor.executeProcess({
+        runId: 'run',
+        opId: 'c13-vanished',
+        name: 'check',
+        command: { execPath: process.execPath, args: ['-e', 'process.exit(0)'], cwd: repo },
+        trackReads: { roots: [repo], mode: 'atime' },
+      });
+      assert(res.kind === 'process');
+      expect(removed).toBe(true);
+      expect(res.status).toBe('succeeded');
+      expect(res.exitCode).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
