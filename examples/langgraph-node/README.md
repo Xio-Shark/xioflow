@@ -5,8 +5,8 @@ This example demonstrates how to integrate `@xioflow/kernel` with **LangGraph.js
 ## Prerequisites
 
 - Node.js >= 22.13 and a built kernel checkout (`pnpm install && pnpm build` at the repository root).
-- `pnpm install` in this directory (pulls `@langchain/langgraph` and links the kernel via `file:../../`).
-- Last verified 2026-10-13 on Linux, Node 22.23.3, kernel 0.7.0.
+- `npm install` (or `pnpm install --ignore-workspace`) in this directory (pulls `@langchain/langgraph` and links the kernel via `file:../../`).
+- Verified 2026-11-14 on macOS, Node 26.12.0, `@xioflow/kernel` 0.8.0 (`KernelMedium.open` / `medium.exec`).
 
 ## The Problem in LangGraph Nodes
 
@@ -24,18 +24,25 @@ LangGraph passes execution configuration to each node:
 Together, `${thread_id}:${nodeName}:step-${step}` forms a stable, unique `opId`.
 
 ```ts
+import { KernelMedium } from '@xioflow/kernel';
+
 async function executeCommandNode(state, config) {
   const threadId = config?.configurable?.thread_id;
   const opId = `${threadId}:executeCommand:step-${state.step}`;
 
-  // Execute with at-most-once semantics
-  const result = await quickRun(command, { opId });
-  return { replayed: result.replayed ?? false, output: result.stdout };
+  const medium = await KernelMedium.open(process.cwd(), { domainPath: '.xioflow-kernel' });
+  try {
+    // Execute with at-most-once semantics
+    const result = await medium.exec({ opId, execPath: '...', args: [...] });
+    return { replayed: result.replayed ?? false, output: result.stdout };
+  } finally {
+    await medium.close();
+  }
 }
 ```
 
 When LangGraph resumes from a checkpoint:
-- If the command succeeded during the earlier attempt, `quickRun` immediately returns the recorded result (`replayed: true`), skipping subprocess execution entirely.
+- If the command succeeded during the earlier attempt, `medium.exec` immediately returns the recorded result (`replayed: true`), skipping subprocess execution entirely.
 - The command side effect occurs **exactly once**.
 
 ## What this demonstrates (kernel contracts)

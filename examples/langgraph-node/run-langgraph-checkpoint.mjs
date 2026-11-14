@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StateGraph, Annotation, MemorySaver, START, END } from '@langchain/langgraph';
-import { quickRun } from '@xioflow/kernel';
+import { KernelMedium } from '@xioflow/kernel';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const effectsLogPath = path.join(__dirname, 'langgraph-effects.log');
@@ -41,24 +41,23 @@ async function executeCommandNode(state, config) {
     console.log('Command executed');
   `;
 
-  const result = await quickRun(
-    {
+  const medium = await KernelMedium.open(__dirname, { domainPath: kernelDomainDir });
+  try {
+    const result = await medium.exec({
+      opId,
       execPath: process.execPath,
       args: ['-e', script, effectsLogPath],
       cwd: __dirname,
-    },
-    {
-      opId,
-      domainPath: kernelDomainDir,
-      name: `lg-${nodeName}`,
-    }
-  );
+    });
 
-  return {
-    commandOutput: result.stdout,
-    replayed: result.replayed ?? false,
-    status: 'command_finished',
-  };
+    return {
+      commandOutput: result.stdout,
+      replayed: result.replayed ?? false,
+      status: 'command_finished',
+    };
+  } finally {
+    await medium.close();
+  }
 }
 
 // 3. Node that simulates a mid-graph failure on first attempt

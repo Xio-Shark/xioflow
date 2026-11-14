@@ -3,40 +3,45 @@ import path from 'node:path';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const payloadPath = path.join(__dirname, 'payload.mjs');
 
-let quickRun;
+let KernelMedium;
 try {
-  ({ quickRun } = await import('@xioflow/kernel'));
+  ({ KernelMedium } = await import('@xioflow/kernel'));
 } catch {
-  ({ quickRun } = await import('../../dist/index.js'));
+  ({ KernelMedium } = await import('../../dist/index.js'));
 }
 
 export async function runKernel(timeoutMs = 800) {
-  const result = await quickRun(
-    {
+  const domainPath = path.join(__dirname, '.xioflow-kernel');
+  const medium = await KernelMedium.open(__dirname, { domainPath });
+  try {
+    const result = await medium.exec({
       execPath: process.execPath,
       args: [payloadPath],
       cwd: __dirname,
-    },
-    {
       timeoutMs,
-      maxOutputBytes: 4096,
-      domainPath: path.join(__dirname, '.xioflow-kernel'),
-    }
-  );
+      inlineMaxBytes: 4096,
+    });
 
-  return {
-    wrapper: 'xioflow-kernel',
-    durationMs: result.durationMs,
-    status: result.status,
-    signal: result.signal,
-    isTruncated: result.isTruncated,
-    stdoutLength: result.stdout?.length ?? 0,
-    headPreserved: result.stdout ? result.stdout.includes('=== HEAD OF OUTPUT ===') : false,
-    tailPreserved: result.stdout ? result.stdout.includes('=== TAIL OF OUTPUT ===') : false,
-    outputRef: result.outputRef,
-    stdoutRef: result.stdoutRef,
-    stdoutHash: result.stdoutHash,
-  };
+    const blobPath = result.stdoutBlob
+      ? path.join(domainPath, 'blobs', `${result.stdoutBlob.sha256.slice(0, 24)}.blob`)
+      : undefined;
+
+    return {
+      wrapper: 'xioflow-kernel',
+      durationMs: result.durationMs,
+      status: result.status,
+      signal: result.signal,
+      isTruncated: result.stdoutTruncated ?? false,
+      stdoutLength: result.stdout?.length ?? 0,
+      headPreserved: result.stdout ? result.stdout.includes('=== HEAD OF OUTPUT ===') : false,
+      tailPreserved: result.stdout ? result.stdout.includes('=== TAIL OF OUTPUT ===') : false,
+      outputRef: result.stdoutBlob?.blobRef,
+      stdoutRef: blobPath ?? result.stdoutBlob?.blobRef,
+      stdoutHash: result.stdoutBlob?.sha256,
+    };
+  } finally {
+    await medium.close();
+  }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

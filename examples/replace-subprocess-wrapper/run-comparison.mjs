@@ -42,7 +42,7 @@ killActiveIntervalWorkers();
 await new Promise((r) => setTimeout(r, 200));
 
 // 2. Run kernel wrapper
-console.log('\n2. Running @xioflow/kernel (quickRun with bounded drain + group kill)...');
+console.log('\n2. Running @xioflow/kernel (KernelMedium.exec with bounded drain + group kill)...');
 const baselineWorkers = countActiveIntervalWorkers();
 const kernelRes = await runKernel(800);
 await new Promise((r) => setTimeout(r, 200));

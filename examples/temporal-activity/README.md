@@ -5,8 +5,8 @@ This example demonstrates how to integrate `@xioflow/kernel` with the **Temporal
 ## Prerequisites
 
 - Node.js >= 22.13 and a built kernel checkout (`pnpm install && pnpm build` at the repository root).
-- `pnpm install` in this directory (pulls the `@temporalio/*` packages and links the kernel via `file:../../`).
-- Last verified 2026-10-13 on Linux, Node 22.23.3, kernel 0.7.0.
+- `npm install` (or `pnpm install --ignore-workspace`) in this directory (pulls the `@temporalio/*` packages and links the kernel via `file:../../`).
+- Verified 2026-11-14 on macOS, Node 26.12.0, `@xioflow/kernel` 0.8.0 (`KernelMedium.open` / `medium.exec`).
 
 ## The Problem in Temporal Activities
 
@@ -25,14 +25,19 @@ Combined, `${workflowExecution.workflowId}:${activityId}` yields an exact, stabl
 
 ```ts
 import { Context } from '@temporalio/activity';
-import { quickRun } from '@xioflow/kernel';
+import { KernelMedium } from '@xioflow/kernel';
 
 export async function myActivity() {
   const { workflowExecution, activityId } = Context.current().info;
   const opId = `${workflowExecution.workflowId}:${activityId}`;
 
-  // Executed with at-most-once semantics
-  return await quickRun(command, { opId });
+  const medium = await KernelMedium.open(process.cwd(), { domainPath: '.xioflow-kernel' });
+  try {
+    // Executed with at-most-once semantics across crashes and retries
+    return await medium.exec({ opId, execPath: '...', args: [...] });
+  } finally {
+    await medium.close();
+  }
 }
 ```
 

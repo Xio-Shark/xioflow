@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Context } from '@temporalio/activity';
-import { quickRun } from '@xioflow/kernel';
+import { KernelMedium } from '@xioflow/kernel';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const effectsLogPath = path.join(__dirname, 'effects.log');
@@ -35,23 +35,22 @@ export async function executeAppendActivity(customMessage = 'temporal-effect') {
     console.log('Appended to effects.log successfully');
   `;
 
-  const result = await quickRun(
-    {
+  const medium = await KernelMedium.open(__dirname, { domainPath });
+  try {
+    const result = await medium.exec({
+      opId,
       execPath: process.execPath,
       args: ['-e', script, effectsLogPath, customMessage],
       cwd: __dirname,
-    },
-    {
-      opId,
-      domainPath,
-      name: `temporal-activity-${activityId}`,
-    }
-  );
+    });
 
-  return {
-    opId,
-    status: result.status,
-    replayed: result.replayed ?? false,
-    durationMs: result.durationMs,
-  };
+    return {
+      opId,
+      status: result.status,
+      replayed: result.replayed ?? false,
+      durationMs: result.durationMs,
+    };
+  } finally {
+    await medium.close();
+  }
 }

@@ -6,10 +6,10 @@ source — not the npm release.
 
 | Example | You are building | Demonstrates | Contracts | Verified |
 |---|---|---|---|---|
-| [`replace-subprocess-wrapper`](./replace-subprocess-wrapper) | A coding agent replacing its `child_process.spawn` wrapper | Naive `spawn + timeout` vs `quickRun`, measured side by side: orphan leaks, lost output tails, spill | #1, #3, #8, #11 | 2026-10-13, Linux, Node 22.23.3, kernel 0.7.0 — pass |
-| [`temporal-activity`](./temporal-activity) | A Temporal worker with OS side-effecting activities | At-most-once activities across worker crash and retry; `workflowId:activityId` as `opId` | #45–#49 | 2026-10-13, Linux, Node 22.23.3, kernel 0.7.0 — pass |
-| [`langgraph-node`](./langgraph-node) | A LangGraph.js graph whose nodes run commands | Checkpoint resume without re-executing a command node | #45, #47 | 2026-10-13, Linux, Node 22.23.3, kernel 0.7.0 — pass |
-| [`mcp-stdio-transport`](./mcp-stdio-transport) | An MCP client that supervises stdio servers | `startService` with a `Transport` implementation over the kernel | #50–#52 | 2026-10-13, Linux, Node 22.23.3, kernel 0.7.0, MCP SDK 1.32.1 — pass |
+| [`replace-subprocess-wrapper`](./replace-subprocess-wrapper) | A coding agent replacing its `child_process.spawn` wrapper | Naive `spawn + timeout` vs `KernelMedium.exec`, measured side by side: orphan leaks, lost output tails, blob spill | #1, #3, #8, #11 | 2026-11-14, macOS, Node 26.12.0, kernel 0.8.0 — pass |
+| [`temporal-activity`](./temporal-activity) | A Temporal worker with OS side-effecting activities | At-most-once activities across worker crash and retry; `workflowId:activityId` as `opId` via `KernelMedium.exec` | #45–#49 | 2026-11-14, macOS, Node 26.12.0, kernel 0.8.0 — pass |
+| [`langgraph-node`](./langgraph-node) | A LangGraph.js graph whose nodes run commands | Checkpoint resume without re-executing a command node via `KernelMedium.exec` | #45, #47 | 2026-11-14, macOS, Node 26.12.0, kernel 0.8.0 — pass |
+| [`mcp-stdio-transport`](./mcp-stdio-transport) | An MCP client that supervises stdio servers | `startService` with a `Transport` implementation over the kernel | #50–#52 | 2026-11-14, macOS, Node 26.12.0, kernel 0.8.0 — pass |
 
 Contract numbers refer to ARCHITECTURE §7.2.
 
@@ -21,7 +21,7 @@ Contract numbers refer to ARCHITECTURE §7.2.
   `processGroupKill: false` and `descendantEnumeration: 'none'` instead of
   pretending it can contain processes.
 
-Then, inside the example directory: `pnpm install && node <entry>`.
+Then, inside the example directory: `npm install && node <entry>` (note: `npm install` symlinks `file:../../` to your local build, whereas `pnpm install --ignore-workspace` snapshots `file:../../` at install time and must be re-run after rebuilding the root).
 
 ## Onboarding acceptance
 

@@ -1,5 +1,7 @@
 # @xioflow/kernel
 
+[English](./README.md) | [简体中文](./README.zh-CN.md)
+
 [![CI](https://github.com/Xio-Shark/xioflow/actions/workflows/ci.yml/badge.svg)](https://github.com/Xio-Shark/xioflow/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@xioflow/kernel.svg)](https://www.npmjs.com/package/@xioflow/kernel)
 [![Node](https://img.shields.io/badge/Node.js-22.13%2B-green.svg)](https://nodejs.org/)
@@ -21,9 +23,12 @@ Agent runtimes usually call `spawn()` (or `exec()`) and hope for the best. When 
 
 Besides one-shot commands, the kernel supervises long-running services (MCP stdio servers, dev servers), makes operations idempotent by `opId` for durable engines (Temporal, LangGraph), and snapshots, rolls back and forks the workspace so an agent's file changes can be undone per step.
 
-You can use the kernel either as a library (`quickRun`, `ProcessSupervisor`) or directly from the CLI via `xio wrap` to supervise existing coding agents (`claude`, `codex`, `gemini`, `opencode`, `qwen`, `xio`) without modifying their code:
+You can embed the OS Medium directly (`connectWorkspace`, `KernelMedium`, `@xioflow/kernel/surface`), embed the low-level `ProcessSupervisor`, serve MCP (`xioflow mcp`), or use the CLI gateway (`xio wrap`) to supervise existing coding agents (`claude`, `codex`, `gemini`, `opencode`, `qwen`, `xio`) without modifying their code:
 
 ```bash
+# Check host readiness (native reaper, confinement drivers, cgroup v2, git)
+npx @xioflow/kernel doctor
+
 # Supervise an existing agent's child processes and cache LLM turns locally
 npx @xioflow/kernel wrap -- claude -p "Refactor subtotal helpers"
 
@@ -36,9 +41,12 @@ npx @xioflow/kernel race --mode merge --gate "pnpm test" -- "claude -p 'task A'"
 # Inspect recorded turns, snapshots, and processes, or branch from step N
 npx @xioflow/kernel trace <runId>
 npx @xioflow/kernel fork <runId> --at-step 4 -- gemini -p "Continue from step 4"
+
+# Clean expired artifacts, unreferenced output blobs, and orphaned forks
+npx @xioflow/kernel prune
 ```
 
-The package also includes an **experimental `AgentRuntime`**: kernel-owned agent lifecycle, cooperative scheduling, evidence-gated dispatch and persistent checkpoint/step budgets. Adapters can submit commands through a per-step context; the kernel tracks their ownership and waits for the batch before checkpointing. It accepts existing runner adapters rather than replacing their models or tools. See the [runtime contract](spec/agent-runtime.md) and [recovery experiments](audit/observation/RECOVERY.md). It is experimental: its API may change in any release.
+The root package surface exports at most **15 orthogonal runtime symbols** (`connectWorkspace`, `KernelMedium`, `SessionView`, `ExecutionDomain`, `ProcessSupervisor`, `RecoveryEngine`, platform/confinement drivers, and locking errors). Model-facing tool adapters live at `@xioflow/kernel/surface` (`run`, `edit`, `inspect`, `branch`).
 
 ## 5-minute path
 
@@ -65,14 +73,18 @@ result. The standalone CLI has no automatic side-effect binding.
 npm install @xioflow/kernel
 ```
 
-Then supervise your first command — one line, no domain bookkeeping:
+Then supervise your first command — one call, bounded output, causal tracking:
 
 ```js
-import { quickRun } from '@xioflow/kernel';
+import { KernelMedium } from '@xioflow/kernel';
 
-const result = await quickRun({ execPath: 'npm', args: ['test'], cwd: '/path/to/workspace' });
+const medium = await KernelMedium.open('/path/to/workspace');
+const result = await medium.exec({ cmd: 'npm test' });
 console.log(result.status, result.exitCode, result.stdout);
+await medium.close();
 ```
+
+For multiple concurrent clients or editors sharing one workspace ledger, use `connectWorkspace('/path/to/workspace')` (auto-connects via the workspace UDS Micro-Arbiter). To inspect host driver and confinement readiness before integrating, run `npx @xioflow/kernel doctor`.
 
 Then pick the integration that matches what you are building:
 
@@ -80,12 +92,12 @@ Then pick the integration that matches what you are building:
 
 | Example | You are building | Demonstrates |
 |---|---|---|
-| [`replace-subprocess-wrapper`](./examples/replace-subprocess-wrapper) | A coding agent replacing its `child_process.spawn` wrapper | Why naive `spawn + timeout` leaks orphans and loses output tails — measured against `quickRun` |
-| [`temporal-activity`](./examples/temporal-activity) | A Temporal worker with OS side-effecting activities | At-most-once activities across worker crash and retry |
+| [`replace-subprocess-wrapper`](./examples/replace-subprocess-wrapper) | A coding agent replacing its `child_process.spawn` wrapper | Why naive `spawn + timeout` leaks orphans and loses output tails — measured against `KernelMedium.exec` |
+| [`temporal-activity`](./examples/temporal-activity) | A Temporal worker with OS side-effecting activities | At-most-once activities across worker crash and retry via `opId` |
 | [`langgraph-node`](./examples/langgraph-node) | A LangGraph.js graph whose nodes run commands | Checkpoint resume without re-executing a command node |
 | [`mcp-stdio-transport`](./examples/mcp-stdio-transport) | An MCP client supervising stdio servers | `startService` with a `Transport` implementation over the kernel |
 
-Prerequisites: Node.js >= 22.13 and a built kernel checkout (`pnpm install && pnpm build` at the repository root). All four were verified passing on Linux on 2026-10-13 (Node 22.23.3, kernel 0.8.0); the recorded onboarding path — install plus first run — takes minutes, inside the one-day target. See [examples/README.md](./examples/README.md) for per-example contract mappings and the verification record.
+Prerequisites: Node.js >= 22.13 and a built kernel checkout (`pnpm install && pnpm build` at the repository root). All four were verified passing on 2026-11-14 (`KernelMedium.exec` on macOS, Node 26.12.0, `@xioflow/kernel` 0.8.0). See [examples/README.md](./examples/README.md) for per-example contract mappings and install notes (`npm install` vs `pnpm install --ignore-workspace`).
 
 ## Guarantees
 
@@ -115,37 +127,46 @@ See [recovery boundaries and migration](spec/current-contract.md#crash-recovery-
 
 - Node.js >= 22.13 (`node:sqlite` without a flag). CI covers Node 22.13 and 24 on Ubuntu and macOS. `node:sqlite` is still marked experimental upstream, so Node prints an `ExperimentalWarning`; that is expected.
 - Linux and macOS. The default driver enumerates descendants with `ps(1)` and terminates POSIX process groups; the optional native reaper holds the whole tree instead, and on Linux the cgroup v2 driver contains it and enforces hard memory and process limits (see [Holding the process tree](#holding-the-process-tree)).
-- Snapshots need `git` on `PATH` and a git working tree. Confinement is optional and uses `sandbox-exec` (macOS), `bubblewrap` (Linux) or `srt` when available.
+- Snapshots need `git` on `PATH` and a git working tree. Kernel write confinement uses `sandbox-exec` (macOS) and `landlock`, `bubblewrap`, or `srt` (Linux) when enabled (`exec({ confinement: true })`).
 - Windows is not supported. There the driver reports `processGroupKill: false` and `descendantEnumeration: 'none'` rather than pretending it can contain processes.
-- One process arbitrates one workspace domain. A second process opening the same domain fails with `DomainLockedError`; cross-process arbitration is not provided (the daemon direction was abandoned on 2026-10-13). Run concurrent agents on separate worktrees with separate domains — xiocode's worktree isolation is the reference pattern — or serialize access.
+- Single-writer domain lock + optional shared UDS Micro-Arbiter: `ExecutionDomain.acquire` enforces one owning process per domain (`DomainLockedError` on collision). For multi-client IDE/CLI/sub-agent sharing on one workspace without lock contention, `connectWorkspace()` (`mode: 'auto'`) spawns or attaches to an on-demand `0600` UDS Micro-Arbiter (`WorkspaceArbiterServer` / `WorkspaceArbiterClient`) that coordinates `SessionView` causal reads and auto-exits when idle.
 - WSL2: the full contract suite passes on WSL2 Ubuntu (704 passed / 8 cgroup-gated skipped, 2026-10-13, Node 22.23.3). The default `NodePlatformDriver` and the native reaper work there; the cgroup v2 driver requires `/sys/fs/cgroup` delegated to the invoking user (WSL2 does not delegate it by default), and reports `CgroupUnavailableError` instead of degrading — run the host under `systemd-run --user --scope -p Delegate=yes` or in a container with a private cgroup namespace to use it.
 
 ## Quickstart
 
-### 1. Simplest Usage (`quickRun`)
+### 1. OS Medium & 4 Golden LLM Primitives (`connectWorkspace` / `@xioflow/kernel/surface`)
 
-For standard tool calls and durable activity execution, `quickRun` automatically manages domain acquisition, Task and Run records, and lock lifecycles:
+Use `KernelMedium.open()` for single-owner embedding or `connectWorkspace()` when multiple clients share a workspace ledger over the local UDS Micro-Arbiter:
 
 ```js
-import { quickRun } from '@xioflow/kernel';
+import { connectWorkspace } from '@xioflow/kernel';
+import { createSurfaceDispatcher, toOpenAiTools } from '@xioflow/kernel/surface';
 
-// 1. One-line supervised execution
-const result = await quickRun({
-  execPath: 'npm',
-  args: ['test'],
-  cwd: '/path/to/workspace',
+const medium = await connectWorkspace('/path/to/workspace');
+const dispatch = createSurfaceDispatcher(medium);
+
+// 1. Expose the 4 golden primitives (run, edit, inspect, branch) to any LLM provider
+const tools = toOpenAiTools();
+
+// 2. Supervise a command with idempotent opId and bounded output spilling
+const res = await medium.exec({
+  opId: 'workflow-step-42',
+  cmd: 'pnpm test',
+  confinement: true,
+});
+if (res.replayed) {
+  console.log('Result replayed from journal without re-executing process');
+}
+
+// 3. Dispatch LLM tool calls causally with automatic gate rollback
+const out = await dispatch('edit', {
+  path: 'src/math.ts',
+  oldText: 'return a - b;',
+  newText: 'return a + b;',
+  gateCmd: 'pnpm test',
 });
 
-console.log(result.status, result.exitCode, result.stdout);
-
-// 2. Idempotent execution (safe retry for Temporal / LangGraph / durable workflows)
-const idemResult = await quickRun(
-  { execPath: 'git', args: ['commit', '-m', 'chore: update'], cwd: '/path/to/workspace' },
-  { opId: 'workflow-step-42' } // Passing opId guarantees at-most-once execution across retries
-);
-if (idemResult.replayed) {
-  console.log('Result retrieved from journal without re-executing process');
-}
+await medium.close();
 ```
 
 ### 2. Full Architecture & Fine-Grained Supervision
@@ -257,30 +278,32 @@ See [`audit/reports/wrap-before-after.md`](./audit/reports/wrap-before-after.md)
 
 ## Use it from any agent: MCP server
 
-The package ships a `xioflow` command that serves the kernel over MCP (stdio), so an agent that speaks MCP can run commands under supervision without writing an integration:
+The package ships a `xioflow` command that serves the OS Medium over MCP (stdio), so any MCP client shares the same workspace ledger via `connectWorkspace` and the workspace Micro-Arbiter:
 
 ```json
 {
   "mcpServers": {
-    "xioflow": { "command": "npx", "args": ["-y", "@xioflow/kernel", "mcp", "--domain", "/path/to/repo/.xioflow-kernel"] }
+    "xioflow": { "command": "npx", "args": ["-y", "@xioflow/kernel", "mcp", "--workspace", "/path/to/repo"] }
   }
 }
 ```
 
-The server acquires the domain and runs crash recovery before it answers anything. It then offers these tools:
+By default (`--surface v2`), the server connects through the workspace UDS Micro-Arbiter and exposes the **4 golden primitives** (cutting tool-list token overhead vs fragmented tools):
 
-- `run_command`: supervised execution; reusing an `opId` replays the recorded result instead of running again.
-- `operation_status` and `cancel_operation`.
-- `snapshot_workspace` and `rollback_workspace`.
-- `begin_transaction`, `commit_transaction` and `abort_transaction`.
+- `run`: foreground/background execution, readiness waits (`port_open`, `http_ready`, `output_match`, `file_change`), deterministic tree stop, and optional kernel write confinement (`sandbox-exec` / `landlock` / `bubblewrap` / `srt`).
+- `edit`: atomic single/multi-file writes & patches with causal `SessionView` dirty-read rejection and optional `gateCmd` auto-rollback.
+- `inspect`: workspace/git/process state, stale-read notices, 1-based file/blob slicing (with AST-hash symbol scoping), regex search, and structured tree inspection.
+- `branch`: isolated `git-shadow` worktree speculative execution (`dry_run` preview or OCC conflict-checked commit).
+
+For hosts expecting the older 0.7 tool set, pass `--surface legacy` (`run_command`, `operation_status`, `cancel_operation`, `snapshot_workspace`, `rollback_workspace`, `begin_transaction`, `commit_transaction`, `abort_transaction`).
 
 Client features map onto kernel semantics:
 
-- A request with a `progressToken` streams stdout/stderr as progress notifications.
-- `notifications/cancelled` stops the operation through the stop pipeline.
-- A result that is `indeterminate` is presented as "stop and ask a human".
+- A request with a `progressToken` streams progress notifications.
+- `notifications/cancelled` aborts/stops in-flight operations cleanly.
+- A result that is `indeterminate` is surfaced explicitly so the caller stops and adjudicates rather than blindly retrying.
 
-Adjudication is intentionally not exposed to the model. `--driver auto` (the default) uses the native reaper when its helper is present and says which driver it chose in the server instructions and in every result.
+Adjudication is intentionally omitted from default model-facing schemas. `--driver auto` (the default) uses the native reaper when its helper is present.
 
 ## OpenTelemetry
 
@@ -540,7 +563,7 @@ Reading order after the 5-minute path:
 
 ## Status
 
-0.8.0 on npm (`xio wrap` CLI gateway for black-box agents, local HTTP-304 prefix cache with Early Cutoff, `--shadow --gate` worktree isolation and `xio race` multi-agent reconciliation, `xio trace` / `xio fork --at-step N`, Linux cgroup v2 driver with hard memory and process limits, native tree-holding reaper, workspace transactions validated by file sets or replayed observations, read evidence for results, honest rollback coverage for ignored files, experimental AgentRuntime, MCP server, OpenTelemetry export, crash-point matrix and TLA+ model; see [`CHANGELOG.md`](./CHANGELOG.md)), pre-1.0: the API may change until the [ABI v1 freeze criteria](./ROADMAP.md#11-abi-v10-冻结判据) are met. Not implemented yet: hard CPU limits, enforced domain-wide memory budgets, artifact retrieval helpers, and schema migration (contract #27). The daemon mode and non-TypeScript bindings are **abandoned directions** (2026-10-13 ruling, appendix A of the roadmap), not pending work. Remaining gaps are tracked in [`ROADMAP.md`](./ROADMAP.md).
+0.8.0 pre-1.0 (`connectWorkspace` UDS Micro-Arbiter, 6 orthogonal `OsMedium` syscalls, 4 golden LLM primitives at `@xioflow/kernel/surface`, `SessionView` causal dirty-read & AST Early Cutoff protection, cross-platform kernel write confinement in `exec`, `xio doctor` / `xio prune` / `xio status`, `xio wrap` CLI gateway with local HTTP-304 prefix cache, `--shadow --gate` worktree isolation and `xio race` multi-agent reconciliation, `xio trace` / `xio fork --at-step N`, Linux cgroup v2 driver with hard memory and process limits, native tree-holding reaper, workspace transactions validated by file sets or replayed observations, read evidence for results, honest rollback coverage for ignored files, MCP server, OpenTelemetry export, crash-point matrix and TLA+ model; see [`CHANGELOG.md`](./CHANGELOG.md)). The API remains pre-1.0 until the [ABI v1 freeze criteria](./ROADMAP.md#11-abi-v10-冻结判据) are met. Remaining gaps toward 1.0 include hard CPU limits, enforced domain-wide memory budgets, schema migration (contract #27), Windows native support (out of v1 scope), and automated storage GC triggers; see [`ROADMAP.md`](./ROADMAP.md).
 
 ## Releasing
 
