@@ -24,7 +24,7 @@ import { NodePlatformDriver } from './node-driver.js';
 import { readStartTime } from './process-facts.js';
 import { computeCommandFingerprint, resolveExecutable } from './spawn-support.js';
 import { redactSecretStream, resolveCommandEnvironment } from './secret-env.js';
-import { parseVfsTraceFile } from './vfs-trace.js';
+import { inspectElfPreloadRisk, parseVfsTraceFile } from './vfs-trace.js';
 
 export interface ReaperProtocolInfo {
   protocol: string;
@@ -124,6 +124,7 @@ interface ReaperSession {
   rusage?: { rssBytes: number; cpuTimeMs: number };
   vfsTraceDir?: string;
   vfsTracePath?: string;
+  vfsRootUnobserved?: string;
   vfsEvents?: VfsSyscallEvents;
 }
 
@@ -247,7 +248,8 @@ export class ReaperPlatformDriver implements PlatformDriver {
     const resolvedEnvironment = await resolveCommandEnvironment(command, this.secretResolver, context);
     const childEnv = { ...resolvedEnvironment.env };
     // 与 NodePlatformDriver 相同：启动前确认可执行文件存在，缺失即显式失败（契约 #1）
-    if (!resolveExecutable(command.execPath, childEnv.PATH)) {
+    const resolvedExec = resolveExecutable(command.execPath, childEnv.PATH);
+    if (!resolvedExec) {
       const err = new Error(`spawn ${command.execPath} ENOENT`);
       Object.assign(err, { code: 'ENOENT', syscall: `spawn ${command.execPath}`, path: command.execPath });
       throw err;
@@ -255,7 +257,9 @@ export class ReaperPlatformDriver implements PlatformDriver {
 
     let vfsTraceDir: string | undefined;
     let vfsTracePath: string | undefined;
+    let vfsRootUnobserved: string | undefined;
     if (context.vfsTrace && this.shimPath) {
+      vfsRootUnobserved = (process.platform === 'linux' ? inspectElfPreloadRisk(resolvedExec) : null) ?? undefined;
       vfsTraceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xio-vfs-'));
       fs.chmodSync(vfsTraceDir, 0o700);
       vfsTracePath = path.join(vfsTraceDir, 'syscalls.trace');
@@ -297,6 +301,7 @@ export class ReaperPlatformDriver implements PlatformDriver {
     const session = this.openSession(helper, rootPid);
     session.vfsTraceDir = vfsTraceDir;
     session.vfsTracePath = vfsTracePath;
+    session.vfsRootUnobserved = vfsRootUnobserved;
 
     const bootId = await this.facts.readBootId();
     // root 此刻阻塞在门上，exec 不改变创建时间：读到的就是目标程序的 OS 创建时间
@@ -424,6 +429,21 @@ export class ReaperPlatformDriver implements PlatformDriver {
     if (session.vfsTracePath) {
       session.vfsEvents = parseVfsTraceFile(session.vfsTracePath) ?? session.vfsEvents;
       session.vfsTracePath = undefined;
+    }
+    if (session.vfsRootUnobserved) {
+      const base: VfsSyscallEvents = session.vfsEvents ?? {
+        reads: [],
+        listedDirs: [],
+        writes: [],
+        deletes: [],
+        denials: [],
+        shellExecs: [],
+        shimLoaded: false,
+      };
+      session.vfsEvents = {
+        ...base,
+        unobservedExecs: [...new Set([...(base.unobservedExecs ?? []), session.vfsRootUnobserved])].sort(),
+      };
     }
     if (session.vfsTraceDir) {
       try {

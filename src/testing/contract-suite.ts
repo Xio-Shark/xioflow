@@ -2378,8 +2378,9 @@ export function defineContractTestSuite(
       expect(supervisor.evidenceStatus('c61-a')).toEqual({ status: 'fresh', basis: 'tree_unchanged' });
       // Filesystem atime may include other readers. Check freshness against the
       // recorded conservative set, not assumed per-process attribution.
-      const reads = first.readEvidence?.tracking === 'atime'
-        ? JSON.parse(gunzipSync(fs.readFileSync(first.readEvidence.ref!)).toString('utf8')).roots[0].reads
+      const observed = first.readEvidence?.tracking === 'atime' || first.readEvidence?.tracking === 'vfs';
+      const reads = observed
+        ? JSON.parse(gunzipSync(fs.readFileSync(first.readEvidence!.ref!)).toString('utf8')).roots[0].reads
         : null;
       if (reads) expect(reads).toHaveProperty('input.txt');
       const otherWasRead = reads !== null && Object.hasOwn(reads, 'other.txt');
@@ -2389,13 +2390,13 @@ export function defineContractTestSuite(
       expect(outside.status).toBe(otherWasRead ? 'stale' : 'unknown');
       if (otherWasRead) expect(outside).toEqual({ status: 'stale', changed: [path.join(fs.realpathSync(root), 'other.txt')], truncated: false });
       if (outside.status === 'unknown') {
-        expect(outside.reason).toBe(first.readEvidence?.tracking === 'atime' ? 'changed_outside_read_set' : 'reads_unobserved');
+        expect(outside.reason).toBe(observed ? 'changed_outside_read_set' : 'reads_unobserved');
       }
 
       fs.writeFileSync(path.join(root, 'input.txt'), 'two\n');
       const after = supervisor.evidenceStatus('c61-a');
       expect(after.status).not.toBe('fresh');
-      if (first.readEvidence?.tracking === 'atime') {
+      if (observed) {
         expect(after).toEqual({ status: 'stale', changed: ['input.txt', ...(otherWasRead ? ['other.txt'] : [])].map((name) => path.join(fs.realpathSync(root), name)), truncated: false });
       }
     });

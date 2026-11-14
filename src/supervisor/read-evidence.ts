@@ -249,7 +249,7 @@ export class ReadTracker {
           const perRoot: RootEvidence[] = roots.map((root) => {
             if (useVfs) {
               const { tree, pathDependencies } = scanTreeOnly(root);
-              if (!vfsEvents) {
+              if (!vfsEvents || vfsEvents.shimLoaded === false || (vfsEvents.unobservedExecs?.length ?? 0) > 0) {
                 return { root, reads: null, tree, pathDependencies };
               }
               const vfsReads = new Set<string>();
