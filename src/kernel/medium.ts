@@ -8,7 +8,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { isPathContained } from '../capability/path-utils.js';
-import { LandlockConfinementDriver } from '../confinement/landlock.js';
+import { createConfinementDriver, LandlockConfinementDriver } from '../confinement/index.js';
 import { ExecutionDomain } from '../domain.js';
 import { NodePlatformDriver } from '../driver/node-driver.js';
 import { ReaperPlatformDriver } from '../driver/reaper-driver.js';
@@ -31,6 +31,8 @@ import type {
   BlobSyscallResult,
   ExecSyscallRequest,
   ExecSyscallResult,
+  KernelPruneOptions,
+  KernelPruneResult,
   LeafAwaitCondition,
   ManagedProcessSummary,
   ObserveSyscallRequest,
@@ -48,6 +50,8 @@ const SUPERVISOR_CAPTURE_BYTES = 64 * 1024;
 const PREVIEW_HEAD_LINES = 30;
 const PREVIEW_TAIL_LINES = 30;
 const PREVIEW_SIDE_MAX_BYTES = 4096;
+const MAX_RETAINED_EXITED_BG = 64;
+const DEFAULT_PRUNE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const GREP_SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', '.next', 'coverage', '.xiotask']);
 
 interface StoredBlobEntry {
@@ -448,14 +452,16 @@ export class KernelMedium implements OsMedium {
     if (req.confinement) {
       if (process.platform === 'linux') {
         await LandlockConfinementDriver.probe();
-        if (LandlockConfinementDriver.isAvailable()) {
-          confinementDriver = new LandlockConfinementDriver();
-          mutationRoots =
-            typeof req.confinement === 'object' && req.confinement.writableRoots
-              ? req.confinement.writableRoots
-              : [this.workspaceRoot, '/tmp'];
-        }
       }
+      const driver = createConfinementDriver();
+      if (!driver) {
+        throw new Error('Confinement was requested but no confinement driver is available on this platform');
+      }
+      confinementDriver = driver;
+      mutationRoots =
+        typeof req.confinement === 'object' && req.confinement.writableRoots
+          ? req.confinement.writableRoots
+          : [this.workspaceRoot, '/tmp'];
     }
 
     if (req.background) {
@@ -566,6 +572,7 @@ export class KernelMedium implements OsMedium {
               stderr: bg.stderrTail.slice(0, 4096),
               isTruncated: bg.stdoutBytes > 4096 || bg.stderrBytes > 4096,
               identityVerification: 'not_original_process',
+              ...(confinementDriver ? { confined: true, confinementDriver: confinementDriver.name } : {}),
               durationMs: Date.now() - Date.parse(bg.startedAt),
               completedAt: bg.completedAt,
             };
@@ -573,6 +580,7 @@ export class KernelMedium implements OsMedium {
           } catch {}
         }
         events.emit('exit', exitFacts);
+        this.evictExitedBackgroundProcs();
       });
 
       let waitOutcome: AwaitSyscallResult | undefined;
@@ -601,6 +609,7 @@ export class KernelMedium implements OsMedium {
         pgid: handle.identity.pgid,
         stdout: bg.stdoutTail,
         stderr: bg.stderrTail,
+        ...(confinementDriver ? { confined: true, confinementDriver: confinementDriver.name } : {}),
         durationMs: Date.now() - startMs,
         waitOutcome,
         staleReads: session.checkStaleReads(),
@@ -651,6 +660,8 @@ export class KernelMedium implements OsMedium {
       signal: res.signal,
       stdout: outFormatted.text,
       stderr: errFormatted.text,
+      ...(res.confined ? { confined: true } : {}),
+      ...(res.confinementDriver ? { confinementDriver: res.confinementDriver } : {}),
       ...(outFormatted.truncated ? { stdoutTruncated: true, stdoutBlob: outFormatted.blob } : {}),
       ...(errFormatted.truncated ? { stderrTruncated: true, stderrBlob: errFormatted.blob } : {}),
       durationMs: res.durationMs,
@@ -1704,6 +1715,89 @@ export class KernelMedium implements OsMedium {
     return { adjudication };
   }
 
+  /**
+   * Prune expired artifacts, unreferenced spill/log blobs, and orphaned transaction forks.
+   * Active background process logs and in-flight current-epoch forks are always preserved.
+   */
+  public prune(options?: KernelPruneOptions): KernelPruneResult {
+    const maxAgeMs = Math.max(0, options?.maxAgeMs ?? DEFAULT_PRUNE_MAX_AGE_MS);
+    const now = Date.now();
+    const artRes = this.domain.pruneArtifacts({ olderThanMs: maxAgeMs, nowMs: now });
+
+    const activeLogPaths = new Set<string>();
+    for (const bg of this.backgroundProcs.values()) {
+      if (bg.status === 'running') {
+        activeLogPaths.add(path.resolve(bg.stdoutPath));
+        activeLogPaths.add(path.resolve(bg.stderrPath));
+      }
+    }
+
+    let deletedBlobs = 0;
+    let deletedForks = 0;
+    let freedBytes = 0;
+
+    if (fs.existsSync(this.blobsDir)) {
+      for (const entry of fs.readdirSync(this.blobsDir, { withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        const fullPath = path.resolve(this.blobsDir, entry.name);
+        if (activeLogPaths.has(fullPath)) continue;
+        try {
+          const st = fs.lstatSync(fullPath);
+          if (maxAgeMs > 0 && now - st.mtimeMs < maxAgeMs) continue;
+          fs.rmSync(fullPath, { force: true });
+          deletedBlobs += 1;
+          freedBytes += st.size;
+          for (const [ref, meta] of this.blobIndex.entries()) {
+            if (path.resolve(meta.filePath) === fullPath) {
+              this.blobIndex.delete(ref);
+            }
+          }
+        } catch {}
+      }
+    }
+
+    if (fs.existsSync(this.forksDir)) {
+      const store = this.domain.getStore();
+      for (const entry of fs.readdirSync(this.forksDir, { withFileTypes: true })) {
+        const forkPath = path.join(this.forksDir, entry.name);
+        try {
+          const st = fs.lstatSync(forkPath);
+          const events = store.getTransactionEvents(this.domain.domainId, entry.name);
+          const beginEvt = events.find((e) => e.type === 'TX_BEGUN');
+          const hasEnded = events.some((e) => e.type === 'TX_COMMITTED' || e.type === 'TX_ABORTED');
+          const isCurrentRun = beginEvt?.runId === this.systemRunId;
+          const orphaned = hasEnded || (!isCurrentRun && (maxAgeMs === 0 || now - st.mtimeMs >= maxAgeMs));
+          if (!orphaned) continue;
+          freedBytes += dirSizeBytes(forkPath);
+          fs.rmSync(forkPath, { recursive: true, force: true });
+          deletedForks += 1;
+        } catch {}
+      }
+    }
+
+    return {
+      deletedArtifacts: artRes.deleted.length,
+      deletedBlobs,
+      deletedForks,
+      freedBytes,
+    };
+  }
+
+  private evictExitedBackgroundProcs(): void {
+    const exited: Array<[string, BackgroundManagedProcess]> = [];
+    for (const entry of this.backgroundProcs.entries()) {
+      if (entry[1].status === 'exited') exited.push(entry);
+    }
+    if (exited.length <= MAX_RETAINED_EXITED_BG) return;
+    exited.sort(
+      (a, b) => Date.parse(a[1].completedAt ?? a[1].startedAt) - Date.parse(b[1].completedAt ?? b[1].startedAt),
+    );
+    const excess = exited.length - MAX_RETAINED_EXITED_BG;
+    for (let i = 0; i < excess; i += 1) {
+      this.backgroundProcs.delete(exited[i]![0]);
+    }
+  }
+
   public async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -1851,4 +1945,17 @@ function probeHttpUrl(urlStr: string, timeoutMs: number): Promise<{ ok: boolean;
       resolve({ ok: false, status: 0, body: '' });
     });
   });
+}
+
+function dirSizeBytes(targetPath: string): number {
+  let total = 0;
+  try {
+    const st = fs.lstatSync(targetPath);
+    if (st.isFile() || st.isSymbolicLink()) return st.size;
+    if (!st.isDirectory()) return 0;
+    for (const entry of fs.readdirSync(targetPath, { withFileTypes: true })) {
+      total += dirSizeBytes(path.join(targetPath, entry.name));
+    }
+  } catch {}
+  return total;
 }

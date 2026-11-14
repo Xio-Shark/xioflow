@@ -134,6 +134,14 @@ describe('Workspace-scoped on-demand UDS Micro-Arbiter', () => {
     expect(fs.existsSync(path.join(workspace, 'src/from-b.ts'))).toBe(true);
     expect(fs.existsSync(path.join(workspace, 'src/from-c.ts'))).toBe(true);
 
+    // 4b. Remote prune over live UDS Micro-Arbiter RPC
+    const orphanFork = path.join(domainPath, 'forks', 'tx-arbiter-orphan');
+    fs.mkdirSync(orphanFork, { recursive: true });
+    fs.writeFileSync(path.join(orphanFork, 'stale.txt'), 'orphan', 'utf8');
+    const pruneRes = await clientA.prune({ maxAgeMs: 0 });
+    expect(pruneRes.deletedForks).toBe(1);
+    expect(fs.existsSync(orphanFork)).toBe(false);
+
     // 5. Close all 3 clients -> Arbiter automatically shuts down after idleTimeoutMs (300ms)!
     await Promise.all([clientA.close(), clientB.close(), clientC.close()]);
 

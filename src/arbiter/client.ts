@@ -14,6 +14,8 @@ import type {
   BlobSyscallResult,
   ExecSyscallRequest,
   ExecSyscallResult,
+  KernelPruneOptions,
+  KernelPruneResult,
   ObserveSyscallRequest,
   ObserveSyscallResult,
   OsMedium,
@@ -116,6 +118,10 @@ export class WorkspaceArbiterClient implements OsMedium {
 
   public async adjudicate(req: AdjudicateSyscallRequest): Promise<AdjudicateSyscallResult> {
     return this.rpc('adjudicate', { ...req }, 15_000);
+  }
+
+  public async prune(options?: KernelPruneOptions): Promise<KernelPruneResult> {
+    return this.rpc('prune', { ...(options ?? {}) }, 30_000);
   }
 
   public async shutdownArbiter(): Promise<void> {

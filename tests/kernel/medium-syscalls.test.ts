@@ -4,6 +4,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createConfinementDriver, LandlockConfinementDriver } from '../../src/confinement/index.js';
 import { KernelMedium } from '../../src/kernel/index.js';
 
 function getFreePort(): Promise<number> {
@@ -238,5 +239,79 @@ describe('KernelMedium 6 orthogonal syscalls & SessionView causal protection', (
     expect(branchOk.changedFiles).toEqual(['src/generated.txt', 'src/math.ts']);
     expect(fs.readFileSync(path.join(workspace, 'src/generated.txt'), 'utf8')).toBe('ok\n');
     expect(fs.readFileSync(path.join(workspace, 'src/math.ts'), 'utf8')).toContain('return a + b + 0;');
+  });
+
+  it('5. enforces cross-platform kernel write confinement in exec when requested', async () => {
+    if (process.platform === 'linux') {
+      await LandlockConfinementDriver.probe();
+    }
+    const driver = createConfinementDriver();
+    const outsideDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'xio-outside-')));
+    try {
+      const insideFile = path.join(workspace, 'src/confined-ok.txt');
+      const outsideFile = path.join(outsideDir, 'blocked.txt');
+      if (!driver) {
+        await expect(
+          medium.exec({
+            cmd: `${JSON.stringify(process.execPath)} -e "require('fs').writeFileSync(${JSON.stringify(insideFile)}, 'ok')"`,
+            confinement: true,
+          }),
+        ).rejects.toThrow(/confinement/i);
+        return;
+      }
+
+      const okRes = await medium.exec({
+        execPath: process.execPath,
+        args: ['-e', "require('fs').writeFileSync(process.argv[1], 'ok')", insideFile],
+        confinement: { writableRoots: [workspace] },
+      });
+      expect(okRes.status, okRes.stderr).toBe('succeeded');
+      expect(okRes.confined).toBe(true);
+      expect(okRes.confinementDriver).toBe(driver.name);
+      expect(fs.readFileSync(insideFile, 'utf8')).toBe('ok');
+
+      const blockedRes = await medium.exec({
+        execPath: process.execPath,
+        args: ['-e', "require('fs').writeFileSync(process.argv[1], 'nope')", outsideFile],
+        confinement: { writableRoots: [workspace] },
+      });
+      expect(blockedRes.status).toBe('failed');
+      expect(blockedRes.confined).toBe(true);
+      expect(blockedRes.confinementDriver).toBe(driver.name);
+      expect(fs.existsSync(outsideFile)).toBe(false);
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('6. prunes stale spilled blobs and orphaned forks while preserving live background logs', async () => {
+    const spilled = await medium.exec({
+      cmd: `${JSON.stringify(process.execPath)} -e "process.stdout.write('A'.repeat(20000))"`,
+    });
+    expect(spilled.stdoutTruncated).toBe(true);
+    const blobRef = spilled.stdoutBlob!.blobRef;
+
+    const bg = await medium.exec({
+      opId: 'bg-prune-test',
+      background: true,
+      cmd: `${JSON.stringify(process.execPath)} -e "console.log('LIVE'); setTimeout(() => {}, 10000)"`,
+      waitUntil: { kind: 'output_match', opId: 'bg-prune-test', pattern: 'LIVE', stream: 'stdout' },
+      timeoutMs: 5000,
+    });
+    expect(bg.status).toBe('running');
+
+    const orphanFork = path.join(domainPath, 'forks', 'tx-orphan-prune');
+    fs.mkdirSync(orphanFork, { recursive: true });
+    fs.writeFileSync(path.join(orphanFork, 'stale.txt'), 'orphan', 'utf8');
+
+    const pruned = medium.prune({ maxAgeMs: 0 });
+    expect(pruned.deletedBlobs).toBeGreaterThanOrEqual(1);
+    expect(pruned.deletedForks).toBe(1);
+    expect(pruned.freedBytes).toBeGreaterThan(20000);
+    expect(fs.existsSync(orphanFork)).toBe(false);
+    expect(fs.existsSync(path.join(domainPath, 'blobs', `${bg.opId}.stdout.log`))).toBe(true);
+    await expect(medium.blob({ op: 'stat', target: blobRef })).rejects.toThrow();
+
+    await medium.exec({ stopOpId: bg.opId, graceMs: 300 });
   });
 });

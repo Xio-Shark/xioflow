@@ -130,7 +130,7 @@ export const GOLDEN_SURFACE_SCHEMAS: readonly SurfaceToolSchema[] = [
         },
         confinement: {
           type: 'boolean',
-          description: 'Restrict writes to workspace + /tmp via OS kernel confinement (Landlock on Linux).',
+          description: 'Restrict writes to workspace + /tmp via OS kernel confinement (sandbox-exec on macOS, Landlock/bubblewrap/srt on Linux).',
         },
         trackReads: {
           type: 'boolean',

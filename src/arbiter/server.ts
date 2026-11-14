@@ -6,6 +6,7 @@ import type {
   AwaitSyscallRequest,
   BlobSyscallRequest,
   ExecSyscallRequest,
+  KernelPruneOptions,
   ObserveSyscallRequest,
   VfsTxSyscallRequest,
 } from '../kernel/syscalls.js';
@@ -183,6 +184,8 @@ export class WorkspaceArbiterServer {
           return await this.medium.observe(payload as ObserveSyscallRequest);
         case 'adjudicate':
           return await this.medium.adjudicate(payload as AdjudicateSyscallRequest);
+        case 'prune':
+          return this.medium.prune(payload as KernelPruneOptions | undefined);
         case 'shutdown':
           setImmediate(() => {
             void this.close().then(() => this.onIdleShutdown?.());

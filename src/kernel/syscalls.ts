@@ -56,7 +56,7 @@ export interface ExecSyscallRequest {
   stopOpId?: string;
   graceMs?: number;
   signal?: NodeJS.Signals;
-  /** Enable kernel write confinement (Landlock on Linux, sandbox-exec on macOS if configured). */
+  /** Enable kernel write confinement (sandbox-exec on macOS, Landlock/bubblewrap/srt on Linux). */
   confinement?: boolean | { writableRoots?: string[] };
   /** Record content read evidence (VFS syscall trace on Linux, atime fallback elsewhere). */
   trackReads?: boolean;
@@ -73,6 +73,8 @@ export interface ExecSyscallResult {
   pgid?: number;
   stdout: string;
   stderr: string;
+  confined?: boolean;
+  confinementDriver?: string;
   stdoutTruncated?: boolean;
   stderrTruncated?: boolean;
   stdoutBlob?: BlobDescriptor;
@@ -290,6 +292,18 @@ export interface AdjudicateSyscallRequest {
 
 export interface AdjudicateSyscallResult {
   adjudication: AdjudicationRecord;
+}
+
+export interface KernelPruneOptions {
+  /** Minimum age in milliseconds before unreferenced blobs and orphaned forks are deleted (default 24h; 0 deletes all non-active items). */
+  maxAgeMs?: number;
+}
+
+export interface KernelPruneResult {
+  deletedArtifacts: number;
+  deletedBlobs: number;
+  deletedForks: number;
+  freedBytes: number;
 }
 
 /**
