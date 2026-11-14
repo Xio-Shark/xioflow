@@ -44,7 +44,14 @@ describe('MCP argument admission', () => {
         responses.delete(response.id);
       }
     });
-    serving = new KernelMcpServer({ domainPath: path.join(root, 'domain'), driver: 'node', input, output, log: () => {} }).serve();
+    serving = new KernelMcpServer({
+      domainPath: path.join(root, 'domain'),
+      driver: 'node',
+      surface: 'legacy',
+      input,
+      output,
+      log: () => {},
+    }).serve();
   });
 
   afterEach(async () => {

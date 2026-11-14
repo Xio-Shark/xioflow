@@ -3,8 +3,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { ExecutionDomain, ProcessSupervisor, quickRun } from '../../src/index.js';
-import type { QuickRunOptions, StructuredCommand } from '../../src/index.js';
+import { ExecutionDomain, ProcessSupervisor, type StructuredCommand } from '../../src/index.js';
+import { quickRun, type QuickRunOptions } from '../../src/quick-run.js';
 
 describe('内核 0.3.0: quickRun 便捷入口与自动生命周期 [Step 4]', () => {
   let tempDir: string;

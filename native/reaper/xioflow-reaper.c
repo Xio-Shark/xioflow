@@ -100,6 +100,7 @@ struct xio_landlock_path_beneath_attr {
 #endif
 
 #define CTL_FD 3
+#define XIO_REAPER_PROTOCOL "xio-reaper/1"
 #define EXIT_GATE_CLOSED 125
 #define EXIT_EXEC_FAILED 127
 
@@ -605,6 +606,8 @@ static int handle_command(char *line, proc_list *table, proc_list *tree) {
   } else if (strncmp(line, "signal ", 7) == 0) {
     int sig = (int)strtol(line + 7, NULL, 10);
     if (!root_reaped && sig > 0) (void)kill(root_pid, sig); /* unreaped: pid cannot be recycled */
+  } else if (strcmp(line, "version") == 0) {
+    ctl_send("protocol %s %s", XIO_REAPER_PROTOCOL, TREE_SCOPE);
   } else {
     ctl_send("error unknown command");
   }
@@ -613,8 +616,24 @@ static int handle_command(char *line, proc_list *table, proc_list *tree) {
 
 int main(int argc, char **argv) {
   if (argc < 2) {
-    fprintf(stderr, "usage: xioflow-reaper <file> [args...]\n");
+    fprintf(stderr, "usage: xioflow-reaper [--protocol-info | --check-landlock | --landlock-exec ...] <file> [args...]\n");
     return 64;
+  }
+  if (strcmp(argv[1], "--protocol-info") == 0) {
+#ifdef __linux__
+    int abi = landlock_abi_version();
+    if (abi < 0) abi = 0;
+    printf(
+        "{\"protocol\":\"%s\",\"platform\":\"linux\",\"treeScope\":\"%s\",\"landlockAbi\":%d,"
+        "\"features\":[\"gate\",\"stop_ladder\",\"rusage\",\"signal\",\"subreaper\"%s]}\n",
+        XIO_REAPER_PROTOCOL, TREE_SCOPE, abi, abi >= 1 ? ",\"landlock\"" : "");
+#else
+    printf(
+        "{\"protocol\":\"%s\",\"platform\":\"darwin\",\"treeScope\":\"%s\",\"landlockAbi\":0,"
+        "\"features\":[\"gate\",\"stop_ladder\",\"rusage\",\"signal\"]}\n",
+        XIO_REAPER_PROTOCOL, TREE_SCOPE);
+#endif
+    return 0;
   }
   if (strcmp(argv[1], "--check-landlock") == 0) {
 #ifdef __linux__

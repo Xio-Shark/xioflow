@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ExecutionDomain, ProcessSupervisor, DuplicateOperationError } from '../../src/index.js';
+import { ExecutionDomain, ProcessSupervisor } from '../../src/index.js';
+import { DuplicateOperationError } from '../../src/types.js';
 
 describe('domain-wide operation identity admission', () => {
   let root: string;

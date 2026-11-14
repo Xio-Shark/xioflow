@@ -25,7 +25,6 @@ export interface KernelUnsupportedResult {
 
 const supported = new Set(['workspace.snapshot', 'workspace.rollback', 'control.status', 'control.health']);
 const coordinators = new WeakMap<ExecutionDomain, PipelineDomainCoordinator>();
-const BINDING_EVENT = 'ISA_INSTRUCTION_BOUND';
 
 function rejected(input: unknown, issues: ValidationIssue[]): PipelineRunResult {
   const program = input as Partial<Program> | null;
@@ -83,26 +82,27 @@ function fingerprint(binding: KernelExecutionBinding, program: Program, instruct
   } as unknown as JsonObject, { canonical: true })).digest('hex');
 }
 
-/** Binding records map ISA input identity to existing core operations; they are not an execution state machine. */
+/** Binding records map ISA input identity to existing core operations via indexed state lookup (O(1)). */
 function bindOperation(binding: KernelExecutionBinding, program: Program, instruction: Instruction): void {
   const { domain } = binding;
   const store = domain.getStore();
   const digest = fingerprint(binding, program, instruction);
-  const existing = store.getJournalEvents(domain.domainId, 0, Number.MAX_SAFE_INTEGER, [BINDING_EVENT])
-    .find((event) => event.operationId === instruction.opId);
+  const existing = store.getOperationBinding(domain.domainId, instruction.opId!);
   if (existing) {
-    const payload = existing.payload as Record<string, unknown>;
-    if (existing.runId !== program.programId || payload.fingerprint !== digest) {
+    if (existing.runId !== program.programId || existing.fingerprint !== digest) {
       throw new Error(`Operation id '${instruction.opId}' is bound to different ISA input`);
     }
     return;
   }
   if (store.getOperation(instruction.opId!)) throw new Error(`Operation id '${instruction.opId}' already belongs to an unbound core operation`);
-  store.recordJournalEvent({
-    domainId: domain.domainId, runId: program.programId, operationId: instruction.opId,
-    type: BINDING_EVENT,
-    payload: { programId: program.programId, instructionId: instruction.id, opcode: instruction.op, fingerprint: digest },
-    timestamp: new Date().toISOString(),
+  store.saveOperationBinding({
+    domainId: domain.domainId,
+    opId: instruction.opId!,
+    runId: program.programId,
+    programId: program.programId,
+    instructionId: instruction.id,
+    opcode: instruction.op,
+    fingerprint: digest,
   });
 }
 
@@ -111,9 +111,10 @@ function controlTarget(binding: KernelExecutionBinding, program: Program, args: 
   const store = binding.domain.getStore();
   if (args.instruction) {
     const declared = program.instructions.find((instruction) => instruction.id === args.instruction);
-    const bound = declared?.opId && store.getJournalEvents(binding.domain.domainId, 0, Number.MAX_SAFE_INTEGER, [BINDING_EVENT])
-      .some((event) => event.runId === program.programId && event.operationId === declared.opId
-        && (event.payload as Record<string, unknown>).instructionId === declared.id);
+    const bound = Boolean(
+      declared?.opId &&
+        store.hasInstructionBinding(binding.domain.domainId, program.programId, declared.id, declared.opId)
+    );
     if (!declared?.opId || !bound) throw new Error(`Instruction '${args.instruction}' has no durable binding in this Program`);
     target.instruction = declared.opId;
   }

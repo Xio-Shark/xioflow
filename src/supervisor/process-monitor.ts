@@ -101,9 +101,11 @@ export async function superviseActive(
   }
 
   if (plan.readTracking) {
+    const vfsEvents = plan.readTracking.useVfs ? ctx.driver.consumeVfsEvents?.(handle.identity) : undefined;
     result.readEvidence = plan.readTracking.collect(
       capture.artifactsDir,
       (artifact, facts) => recordArtifactCreated(ctx.domain, options.opId, artifact, facts),
+      vfsEvents,
     );
   }
 

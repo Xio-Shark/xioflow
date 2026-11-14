@@ -242,9 +242,9 @@ export interface ProcessOperationResult extends BaseResult {
  * `tracking` 不是 `atime` 时没有读集，证据只剩命令结束时的全树 stat 清单。
  */
 export interface ReadEvidence {
-  tracking: 'atime' | 'unobserved' | 'failed';
-  /** unobserved 的原因：文件系统不推进 atime，或同一个根上另一条被观测的命令正在运行。 */
-  reason?: 'no_atime' | 'roots_busy';
+  tracking: 'vfs' | 'atime' | 'unobserved' | 'failed';
+  /** unobserved 的原因：文件系统不推进 atime、驱动无 VFS 追踪，或同一个根上另一条 atime 观测命令正在运行。 */
+  reason?: 'no_atime' | 'no_vfs' | 'roots_busy';
   scope: 'content_reads';
   /** 调用方是否声明已排除只靠 stat 校验的缓存。`possible` 时读集之外的改动只能答 `unknown`。 */
   statCaches: 'ruled_out' | 'possible';
@@ -311,55 +311,85 @@ export interface OwnerRecord {
 }
 
 export class UnsupportedCapabilityError extends Error {
+  public readonly capability: string;
+  public readonly platform: string;
+  public readonly requestedEnforcement: string;
+
   constructor(
-    public readonly capability: string,
-    public readonly platform: string,
-    public readonly requestedEnforcement: string = 'hard'
+    capability: string,
+    platform: string,
+    requestedEnforcement: string = 'hard'
   ) {
     super(
       `Unsupported capability: '${capability}' with enforcement '${requestedEnforcement}' is not supported on platform '${platform}'`
     );
     this.name = 'UnsupportedCapabilityError';
+    this.capability = capability;
+    this.platform = platform;
+    this.requestedEnforcement = requestedEnforcement;
   }
 }
 
 export class EpochFencedError extends Error {
+  public readonly domainId: string;
+  public readonly expectedEpoch: number;
+  public readonly actualEpoch: number;
+
   constructor(
-    public readonly domainId: string,
-    public readonly expectedEpoch: number,
-    public readonly actualEpoch: number
+    domainId: string,
+    expectedEpoch: number,
+    actualEpoch: number
   ) {
     super(
       `Epoch fenced: write rejected in domain '${domainId}'. Expected epoch ${expectedEpoch}, but current epoch is ${actualEpoch}`
     );
     this.name = 'EpochFencedError';
+    this.domainId = domainId;
+    this.expectedEpoch = expectedEpoch;
+    this.actualEpoch = actualEpoch;
   }
 }
 
 export class DomainLockedError extends Error {
+  public readonly domainId: string;
+  public readonly ownerPid: number;
+  public readonly acquiredAt: string;
+
   constructor(
-    public readonly domainId: string,
-    public readonly ownerPid: number,
-    public readonly acquiredAt: string
+    domainId: string,
+    ownerPid: number,
+    acquiredAt: string
   ) {
     super(
       `Execution domain '${domainId}' is already locked by process ${ownerPid} (acquired at ${acquiredAt})`
     );
     this.name = 'DomainLockedError';
+    this.domainId = domainId;
+    this.ownerPid = ownerPid;
+    this.acquiredAt = acquiredAt;
   }
 }
 
 export class ResourceConflictError extends Error {
+  public readonly resourceId: string;
+  public readonly existingOwnerOpId: string;
+  public readonly requestingOpId: string;
+  public readonly waitedDurationMs: number;
+
   constructor(
-    public readonly resourceId: string,
-    public readonly existingOwnerOpId: string,
-    public readonly requestingOpId: string,
-    public readonly waitedDurationMs: number = 0
+    resourceId: string,
+    existingOwnerOpId: string,
+    requestingOpId: string,
+    waitedDurationMs: number = 0
   ) {
     super(
       `Resource conflict: resource '${resourceId}' is held by operation '${existingOwnerOpId}', requested by '${requestingOpId}' (waited ${waitedDurationMs}ms)`
     );
     this.name = 'ResourceConflictError';
+    this.resourceId = resourceId;
+    this.existingOwnerOpId = existingOwnerOpId;
+    this.requestingOpId = requestingOpId;
+    this.waitedDurationMs = waitedDurationMs;
   }
 }
 
@@ -447,9 +477,12 @@ export function sanitizeConfigSnapshot(config?: Record<string, unknown>): Record
  * 对非活跃操作发起停止时抛出的显式异常（契约 #12）
  */
 export class OperationNotActiveError extends Error {
+  public readonly opId: string;
+  public readonly reason: 'not_found' | 'already_completed' | 'domain_closed';
+
   constructor(
-    public readonly opId: string,
-    public readonly reason: 'not_found' | 'already_completed' | 'domain_closed',
+    opId: string,
+    reason: 'not_found' | 'already_completed' | 'domain_closed',
     message?: string
   ) {
     super(
@@ -457,6 +490,8 @@ export class OperationNotActiveError extends Error {
         `Operation "${opId}" is not active (reason: ${reason}). Stop requests must target active operations.`
     );
     this.name = 'OperationNotActiveError';
+    this.opId = opId;
+    this.reason = reason;
   }
 }
 
@@ -766,8 +801,23 @@ export interface Capability {
 }
 
 export class CapabilityViolationError extends Error {
+  public readonly reason:
+    | 'expired'
+    | 'revoked'
+    | 'epoch_mismatch'
+    | 'out_of_scope_resource'
+    | 'out_of_scope_path'
+    | 'out_of_scope_opcode'
+    | 'out_of_scope_workspace'
+    | 'out_of_scope_secret'
+    | 'budget_exceeded'
+    | 'concurrency_exceeded'
+    | 'policy_mismatch'
+    | 'domain_mismatch'
+    | 'attenuation_widened';
+
   constructor(
-    public readonly reason:
+    reason:
       | 'expired'
       | 'revoked'
       | 'epoch_mismatch'
@@ -785,6 +835,7 @@ export class CapabilityViolationError extends Error {
   ) {
     super(message);
     this.name = 'CapabilityViolationError';
+    this.reason = reason;
   }
 }
 

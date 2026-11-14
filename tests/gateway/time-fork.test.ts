@@ -150,6 +150,7 @@ describe('P4: Flight Recorder Trace (xio trace), OTLP Export & Cross-Protocol Ti
       runId: origRunId,
       cwd: workspaceRoot,
       domainPath,
+      persistRawPrompts: true,
       command: process.execPath,
       args: [openAiAgentScript],
       env: {
@@ -338,5 +339,67 @@ describe('P4: Flight Recorder Trace (xio trace), OTLP Export & Cross-Protocol Ti
     expect(fs.readFileSync(path.join(forkRes.forkWorktreePath, 'src/stage2-fixed.ts'), 'utf8')).toContain(
       'fixed by claude'
     );
+  });
+
+  it('redacts raw prompts and responses on disk by default (persistRawPrompts: false) while keeping causal tool & snapshot hashes', async () => {
+    const workspaceRoot = initGitWorkspace({ 'src/secret.ts': 'export const ok = true;\n' });
+    const domainDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xio-redact-domain-'));
+    const domainPath = path.join(domainDir, 'kernel');
+    tempDirs.push(workspaceRoot, domainDir);
+
+    const SECRET_PROMPT = 'TOP_SECRET_USER_PROMPT_TOKEN_99481';
+    const SECRET_REPLY = 'TOP_SECRET_ASSISTANT_REPLY_77210';
+
+    const upstream = await startWireProxy({
+      tape: {
+        name: 'redact-tape',
+        turns: [{ steps: [{ type: 'delta', chunks: [SECRET_REPLY] }] }],
+      },
+    });
+    handles.push(upstream);
+
+    const agentScript = path.join(domainDir, 'agent.mjs');
+    fs.writeFileSync(
+      agentScript,
+      `
+      const tools = [{
+        type: 'function',
+        function: { name: 'bash', parameters: { type: 'object', properties: { command: { type: 'string' } } } }
+      }];
+      const res = await fetch(process.env.OPENAI_BASE_URL + '/chat/completions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          stream: true,
+          tools,
+          messages: [{ role: 'user', content: ${JSON.stringify(SECRET_PROMPT)} }],
+        }),
+      });
+      await res.text();
+      `,
+    );
+
+    const runRes = await wrapAgent({
+      runId: 'run-redacted-default',
+      cwd: workspaceRoot,
+      domainPath,
+      command: process.execPath,
+      args: [agentScript],
+      env: { ...process.env, OPENAI_BASE_URL: `${upstream.baseUrl}/v1` },
+    });
+    expect(runRes.exitCode).toBe(0);
+
+    const traceDisk = fs.readFileSync(path.join(domainPath, 'gateway-traces', 'run-redacted-default.json'), 'utf8');
+    const cacheDisk = fs.readFileSync(path.join(domainPath, 'http304-cache.json'), 'utf8');
+
+    expect(traceDisk).not.toContain(SECRET_PROMPT);
+    expect(traceDisk).not.toContain(SECRET_REPLY);
+    expect(traceDisk).toContain('[redacted:sha256=');
+    expect(cacheDisk).not.toContain(SECRET_PROMPT);
+    expect(cacheDisk).not.toContain(SECRET_REPLY);
+
+    const trace = await traceGatewayRun({ runId: 'run-redacted-default', workspaceRoot, domainPath });
+    expect(trace.steps[0]?.promptSummary).toMatch(/^\[redacted prompt: sha256=/);
   });
 });

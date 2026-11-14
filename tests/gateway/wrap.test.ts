@@ -10,8 +10,9 @@ import {
   parseWireResponse,
   readGatewayInterruptedTool,
   wrapAgent,
-} from '../../src/index.js';
+} from '@xioflow/kernel/wrap';
 import { SqliteStore } from '../../src/store/sqlite.js';
+import { LandlockConfinementDriver } from '../../src/confinement/landlock.js';
 
 const tempDirs: string[] = [];
 
@@ -588,8 +589,13 @@ console.log(JSON.stringify(procJson));
       expect(res.proxyStats.turns[0].opIds.length).toBeGreaterThanOrEqual(1);
       expect(res.proxyStats.turns[0].readFiles).toContain('input.txt');
       if (process.platform === 'linux') {
+        await LandlockConfinementDriver.probe();
         expect(procInfo.ldPreloadShimActive).toBe(true);
-        expect(procInfo.confinementDrivers).toContain('landlock');
+        if (LandlockConfinementDriver.isAvailable()) {
+          expect(procInfo.confinementDrivers).toContain('landlock');
+        } else {
+          expect(procInfo.confinementDrivers).not.toContain('landlock');
+        }
         expect(res.proxyStats.turns[0].writeFiles).toContain('output.txt');
       }
     } finally {

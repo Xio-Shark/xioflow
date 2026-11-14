@@ -4,11 +4,12 @@ import path from 'node:path';
 import type { ExecutionDomain } from '../domain.js';
 import { WorkspaceCausalGraph } from '../workspace/causal-graph.js';
 import { computeDiscoverySetCutoff, computeSymbolSliceCutoffHash } from '../workspace/observation-replay.js';
-import type {
-  Http304CacheAdapter,
-  Http304LookupResult,
-  ParsedWireRequest,
-  RecordedGatewayTurn,
+import {
+  type Http304CacheAdapter,
+  type Http304LookupResult,
+  type ParsedWireRequest,
+  type RecordedGatewayTurn,
+  redactTurnForPersistence,
 } from './wire-proxy.js';
 
 export interface FileObservationStamp {
@@ -44,6 +45,8 @@ export interface Http304CacheOptions {
   workspaceRoot?: string;
   /** Optional symbol hints per relative file path for fine-grained AST/symbol-slice Early Cutoff. */
   symbolHints?: Record<string, string[]>;
+  /** Persist raw LLM prompts/responses on disk in http304-cache.json (default: false). */
+  persistRawPrompts?: boolean;
 }
 
 function sha256Hex(input: string | Buffer): string {
@@ -216,7 +219,10 @@ export class Http304CausalCache implements Http304CacheAdapter {
   private saveToDisk(): void {
     if (!this.cacheFilePath) return;
     try {
-      fs.writeFileSync(this.cacheFilePath, JSON.stringify({ entries: this.entries }, null, 2));
+      const persistedEntries = this.options.persistRawPrompts
+        ? this.entries
+        : this.entries.map((entry) => ({ ...entry, turn: redactTurnForPersistence(entry.turn) }));
+      fs.writeFileSync(this.cacheFilePath, JSON.stringify({ entries: persistedEntries }, null, 2), { mode: 0o600 });
     } catch {}
   }
 
@@ -306,18 +312,32 @@ export class Http304CausalCache implements Http304CacheAdapter {
     const toolCallsSig = (tcs: ParsedWireRequest['toolCalls']) =>
       JSON.stringify(tcs.map((c) => ({ id: c.id, name: c.name, args: c.args })));
     const currentSig = toolCallsSig(parsed.toolCalls);
+    const canReplayCandidate = (e: CachedTurnEntry) =>
+      !(
+        e.turn.promptsRedacted &&
+        (e.turn.parsedResponse?.toolCalls?.length ?? 0) === 0 &&
+        Boolean(e.turn.parsedResponse?.text)
+      );
+
     const candidate =
       this.entries.find(
-        (e) => e.wire === parsed.wire && e.turnIndex === turnIndex && e.prefixDigest === prefixDigest
+        (e) =>
+          e.wire === parsed.wire &&
+          e.turnIndex === turnIndex &&
+          e.prefixDigest === prefixDigest &&
+          canReplayCandidate(e)
       ) ??
-      this.entries.find((e) => e.wire === parsed.wire && e.prefixDigest === prefixDigest) ??
+      this.entries.find(
+        (e) => e.wire === parsed.wire && e.prefixDigest === prefixDigest && canReplayCandidate(e)
+      ) ??
       (parsed.toolCalls.length > 0
         ? this.entries.find(
             (e) =>
               e.wire === parsed.wire &&
               e.turnIndex === turnIndex &&
               e.readStamps.length > 0 &&
-              toolCallsSig(e.turn.parsedRequest.toolCalls) === currentSig
+              toolCallsSig(e.turn.parsedRequest.toolCalls) === currentSig &&
+              canReplayCandidate(e)
           )
         : undefined);
 

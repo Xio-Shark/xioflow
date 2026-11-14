@@ -18,6 +18,18 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./surface": {
+      "types": "./dist/surface/index.d.ts",
+      "default": "./dist/surface/index.js"
+    },
+    "./wrap": {
+      "types": "./dist/wrap/index.d.ts",
+      "default": "./dist/wrap/index.js"
+    },
+    "./otel": {
+      "types": "./dist/otel/index.d.ts",
+      "default": "./dist/otel/index.js"
+    },
     "./isa": {
       "types": "./dist/isa/public.d.ts",
       "default": "./dist/isa/public.js"

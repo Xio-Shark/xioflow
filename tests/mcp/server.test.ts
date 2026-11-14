@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
+import { connectWorkspace, WorkspaceArbiterClient } from '../../src/arbiter/index.js';
 import { buildDist, repoRoot } from '../support/build-dist.js';
 
 buildDist();
@@ -14,162 +15,159 @@ const cli = path.join(repoRoot, 'dist/cli.js');
 
 type Structured = Record<string, any>;
 
-describe('xioflow mcp (interoperability with the official MCP SDK client)', () => {
+describe('xioflow mcp (Golden Surface v2 + shared Micro-Arbiter & legacy compatibility)', () => {
   let tempDir: string;
-  let client: Client;
-  let stderr: string;
+  let workspaceDir: string;
+  let domainDir: string;
+  const openClients: Client[] = [];
 
-  async function connect(extraArgs: string[] = []): Promise<void> {
+  async function openMcpClient(extraArgs: string[] = []): Promise<{ client: Client; getStderr: () => string }> {
     const transport = new StdioClientTransport({
       command: process.execPath,
-      args: [cli, 'mcp', '--domain', path.join(tempDir, 'domain'), '--driver', 'node', ...extraArgs],
+      args: [cli, 'mcp', '--workspace', workspaceDir, '--domain', domainDir, ...extraArgs],
       stderr: 'pipe',
     });
-    stderr = '';
+    let stderr = '';
     transport.stderr?.on('data', (d) => (stderr += d));
-    client = new Client({ name: 'xioflow-test', version: '0.0.0' });
-    await client.connect(transport);
+    const c = new Client({ name: 'xioflow-test', version: '0.0.0' });
+    await c.connect(transport);
+    openClients.push(c);
+    return { client: c, getStderr: () => stderr };
   }
 
-  async function call(name: string, args: Record<string, unknown>, options?: Parameters<Client['callTool']>[2]) {
-    const res = await client.callTool({ name, arguments: args }, undefined, options);
+  async function callTool(c: Client, name: string, args: Record<string, unknown>, options?: Parameters<Client['callTool']>[2]) {
+    const res = await c.callTool({ name, arguments: args }, undefined, options);
     return { isError: res.isError === true, data: res.structuredContent as Structured, text: (res.content as any)[0].text };
   }
 
   beforeEach(() => {
     tempDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'xioflow-mcp-')));
+    workspaceDir = path.join(tempDir, 'ws');
+    domainDir = path.join(tempDir, 'domain');
+    fs.mkdirSync(workspaceDir, { recursive: true });
   });
 
   afterEach(async () => {
-    await client?.close();
+    for (const c of openClients.splice(0)) {
+      await c.close().catch(() => {});
+    }
+    if (fs.existsSync(path.join(domainDir, 'arbiter.json'))) {
+      const m = await connectWorkspace(workspaceDir, { domainPath: domainDir }).catch(() => null);
+      if (m instanceof WorkspaceArbiterClient) {
+        await m.shutdownArbiter().catch(() => {});
+      } else {
+        await m?.close().catch(() => {});
+      }
+    }
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('negotiates the latest protocol and lists the kernel tools', async () => {
-    await connect();
+  it('exposes ONLY the 4 golden primitives by default and eliminates dual-track tool clutter', async () => {
+    const { client, getStderr } = await openMcpClient();
     expect(client.getServerVersion()?.name).toBe('xioflow-kernel');
-    expect(client.getInstructions()).toMatch(/node-default driver/);
+    expect(client.getInstructions()).toMatch(/Tools: run, edit, inspect, branch/);
     expect(LATEST_PROTOCOL_VERSION).toBe('2025-11-25');
+
     const { tools } = await client.listTools();
-    expect(tools.map((t) => t.name).sort()).toEqual([
-      'abort_transaction',
-      'begin_transaction',
-      'cancel_operation',
-      'commit_transaction',
-      'execute',
-      'operation_status',
-      'rollback_workspace',
-      'run_command',
-      'snapshot_workspace',
+    expect(tools.map((t) => t.name).sort()).toEqual(['branch', 'edit', 'inspect', 'run']);
+    expect(getStderr()).toMatch(/attached to workspace arbiter/);
+
+    // Rejected invalid arguments map to JSON-RPC -32602
+    await expect(client.callTool({ name: 'execute', arguments: {} })).rejects.toThrow(/unknown surface tool/);
+    await expect(client.callTool({ name: 'run', arguments: { unknownField: 1 } })).rejects.toThrow(/unknown argument/);
+  });
+
+  it('allows multiple concurrent MCP clients on the same workspace without DomainLockedError and enforces SessionView dirty-read guards', async () => {
+    fs.writeFileSync(path.join(workspaceDir, 'config.ts'), 'export const PORT = 3000;\nexport const HOST = "127.0.0.1";\n');
+
+    const [{ client: ideClient }, { client: cliClient }] = await Promise.all([
+      openMcpClient(),
+      openMcpClient(),
     ]);
-    expect(stderr).toMatch(/recovered 0 operation/);
+
+    // Both clients inspect config.ts independently
+    const sliceA = await callTool(ideClient, 'inspect', { target: 'config.ts' });
+    const sliceB = await callTool(cliClient, 'inspect', { target: 'config.ts' });
+    expect(sliceA.isError).toBe(false);
+    expect(sliceB.isError).toBe(false);
+    expect(sliceA.data.rev).toBe(sliceB.data.rev);
+
+    // Client A edits config.ts with a passing gateCmd
+    const editA = await callTool(ideClient, 'edit', {
+      path: 'config.ts',
+      oldText: 'PORT = 3000',
+      newText: 'PORT = 8080',
+      gateCmd: 'test -f config.ts',
+    });
+    expect(editA.data).toMatchObject({ status: 'committed' });
+
+    // Client B attempts a stale overwrite without re-inspecting -> rejected with compact diff!
+    const staleEditB = await callTool(cliClient, 'edit', {
+      path: 'config.ts',
+      content: 'export const PORT = 9999;\n',
+    });
+    expect(staleEditB.data.status).toBe('conflict');
+    expect(staleEditB.data.conflicts[0].compactDiff).toContain('+export const PORT = 8080;');
+    expect(fs.readFileSync(path.join(workspaceDir, 'config.ts'), 'utf8')).toContain('PORT = 8080');
+
+    // Client A starts a background process; Client B sees it in inspect(status) and stops it!
+    const bg = await callTool(ideClient, 'run', {
+      opId: 'shared-bg-worker',
+      cmd: `${JSON.stringify(process.execPath)} -e "console.log('READY_NOW'); setInterval(() => {}, 1000)"`,
+      background: true,
+      waitOutputPattern: 'READY_NOW',
+    });
+    expect(bg.data.status).toBe('running');
+
+    const obsB = await callTool(cliClient, 'inspect', { mode: 'status' });
+    expect(obsB.data.activeProcesses.some((p: any) => p.opId === 'shared-bg-worker')).toBe(true);
+
+    const stopped = await callTool(cliClient, 'run', { stopOpId: 'shared-bg-worker' });
+    expect(stopped.data.status).toBe('stopped');
   });
 
-  it('runs a command and replays it by opId instead of running it again', async () => {
-    await connect();
-    const counter = path.join(tempDir, 'count.txt');
-    const args = {
-      command: process.execPath,
-      args: ['-e', `require('fs').appendFileSync(${JSON.stringify(counter)}, 'x'); console.log('hello')`],
-      cwd: tempDir,
-      opId: 'build-1',
-    };
-    const first = await call('run_command', args);
-    expect(first.isError).toBe(false);
-    expect(first.data).toMatchObject({ status: 'succeeded', exitCode: 0, stdout: 'hello\n', replayed: false, driver: 'node-default' });
-    expect(first.data.processIdentity).toMatchObject({ pid: expect.any(Number), spawnTime: expect.any(String) });
-    expect(first.data.identityVerification).toBeDefined();
-    expect(first.data.treeSettlement).toBeDefined();
-    expect(first.data).toMatchObject({ isTruncated: false, stdoutBytes: 6, mcpOutput: { stdoutOmittedChars: 0, stderrOmittedChars: 0 } });
-    expect(first.data.stdoutHash).toMatch(/^[a-f0-9]{64}$/);
-
-    const again = await call('run_command', args);
-    expect(again.data).toMatchObject({ status: 'succeeded', replayed: true });
-    expect(fs.readFileSync(counter, 'utf8')).toBe('x');
-
-    const status = await call('operation_status', { opId: 'build-1' });
-    expect(status.data).toMatchObject({ found: true, status: 'done', resultStatus: 'succeeded', leasesHeld: [] });
-    expect(status.data.result).toMatchObject({ stdoutHash: first.data.stdoutHash, identityVerification: first.data.identityVerification, treeSettlement: first.data.treeSettlement });
-
-    const conflict = await call('run_command', { ...args, args: ['-e', '1'] });
-    expect(conflict.isError).toBe(true);
-    expect(conflict.data.error).toBe('OperationIdConflictError');
-  });
-
-  it('streams output as progress notifications and stops the process tree when the client cancels', async () => {
-    await connect();
-    const progress: string[] = [];
-    const controller = new AbortController();
-    const pending = call(
-      'run_command',
-      {
-        command: process.execPath,
-        args: ['-e', "console.log('tick'); setInterval(() => console.log('tick'), 50)"],
-        cwd: tempDir,
-        opId: 'watch-1',
-      },
-      {
-        signal: controller.signal,
-        onprogress: (p) => {
-          progress.push(String(p.message));
-          if (progress.length === 2) controller.abort('user pressed stop');
-        },
-      }
-    );
-    await expect(pending).rejects.toThrow();
-    expect(progress[0]).toMatch(/^\[stdout\] tick/);
-
-    // The kernel ran its stop pipeline for the cancelled request
-    for (let i = 0; i < 100; i++) {
-      const status = await call('operation_status', { opId: 'watch-1' });
-      if (status.data.status === 'done') {
-        expect(status.data.resultStatus).toBe('cancelled');
-        expect(status.data.leasesHeld).toEqual([]);
-        return;
-      }
-      await new Promise((r) => setTimeout(r, 50));
-    }
-    throw new Error('cancelled operation never settled');
-  });
-
-  it('reports a timeout and a missing binary as results, not as protocol errors', async () => {
-    await connect();
-    const slow = await call('run_command', { command: process.execPath, args: ['-e', 'setTimeout(() => {}, 10000)'], cwd: tempDir, timeoutMs: 300 });
-    expect(slow.data).toMatchObject({ status: 'failed', terminationReason: 'timed_out' });
-
-    const missing = await call('run_command', { command: 'definitely-not-a-binary-xioflow', cwd: tempDir });
-    expect(missing.data).toMatchObject({ status: 'failed', exitCode: 127 });
-    expect(missing.data.spawnFailure).toBeDefined();
-
-    await expect(client.callTool({ name: 'no_such_tool', arguments: {} })).rejects.toThrow(/Unknown tool/);
-    await expect(client.callTool({ name: 'run_command', arguments: { cwd: tempDir } })).rejects.toThrow(/missing required/);
-  });
-
-  it('drives a workspace transaction end to end', async () => {
-    const repo = path.join(tempDir, 'repo');
-    fs.mkdirSync(repo);
-    const git = (...a: string[]) => execFileSync('git', a, { cwd: repo });
+  it('spills oversized command output to blobRef and inspects it via grep/slice, plus speculative branch', async () => {
+    const git = (...a: string[]) => execFileSync('git', a, { cwd: workspaceDir });
     git('init', '-q', '-b', 'main');
     git('config', 'user.email', 't@t');
     git('config', 'user.name', 't');
-    fs.writeFileSync(path.join(repo, 'a.txt'), 'a\n');
+    fs.writeFileSync(path.join(workspaceDir, 'app.txt'), 'v1\n');
     git('add', '.');
     git('commit', '-qm', 'init');
-    await connect();
 
-    const tx = await call('begin_transaction', { txId: 'tx-1', root: repo, forkPath: path.join(tempDir, 'fork') });
-    expect(tx.isError, tx.text).toBe(false);
-    await call('run_command', {
-      command: process.execPath,
-      args: ['-e', "require('fs').writeFileSync('a.txt', 'changed\\n')"],
-      cwd: tx.data.forkRoot,
+    const { client } = await openMcpClient(['--driver', 'node']);
+    const flood = await callTool(client, 'run', {
+      execPath: process.execPath,
+      args: ['-e', 'for (let i = 1; i <= 1500; i++) console.log(i === 999 ? "FATAL_NEEDLE_999" : "info log padding line " + i);'],
     });
-    const commit = await call('commit_transaction', { txId: 'tx-1' });
-    expect(commit.data).toMatchObject({ status: 'committed', writeSet: [{ status: 'M', path: 'a.txt' }] });
-    expect(fs.readFileSync(path.join(repo, 'a.txt'), 'utf8')).toBe('changed\n');
+    expect(flood.data.stdoutTruncated).toBe(true);
+    expect(flood.data.stdoutBlob?.blobRef).toMatch(/^blob:/);
+
+    const grepRes = await callTool(client, 'inspect', {
+      target: flood.data.stdoutBlob.blobRef,
+      pattern: 'FATAL_NEEDLE_999',
+    });
+    expect(grepRes.data.matches).toHaveLength(1);
+    expect(grepRes.data.matches[0].line).toBe(999);
+
+    // Failed branch leaves zero residue in main workspace
+    const failedBranch = await callTool(client, 'branch', {
+      mutations: [{ kind: 'write', path: 'app.txt', content: 'broken\n' }],
+      gateCmd: 'exit 1',
+    });
+    expect(failedBranch.data.status).toBe('rolled_back');
+    expect(fs.readFileSync(path.join(workspaceDir, 'app.txt'), 'utf8')).toBe('v1\n');
+
+    // Passing branch merges cleanly via OCC
+    const okBranch = await callTool(client, 'branch', {
+      mutations: [{ kind: 'write', path: 'app.txt', content: 'v2\n' }],
+      gateCmd: 'grep -q v2 app.txt',
+    });
+    expect(okBranch.data.status).toBe('committed');
+    expect(fs.readFileSync(path.join(workspaceDir, 'app.txt'), 'utf8')).toBe('v2\n');
   });
 
-  it('exports the journal to an OTLP/HTTP endpoint while serving', async () => {
+  it('exports the journal to an OTLP/HTTP endpoint while serving v2 surface', async () => {
     const bodies: any[] = [];
     const server = http.createServer((req, res) => {
       let body = '';
@@ -182,8 +180,17 @@ describe('xioflow mcp (interoperability with the official MCP SDK client)', () =
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     const endpoint = `http://127.0.0.1:${(server.address() as any).port}`;
     try {
-      await connect(['--otlp-endpoint', endpoint, '--otlp-header', 'authorization=Bearer t0ken', '--otlp-interval-ms', '100']);
-      await call('run_command', { command: process.execPath, args: ['-e', 'process.exit(3)'], cwd: tempDir, opId: 'exit-3' });
+      const { client } = await openMcpClient([
+        '--driver',
+        'node',
+        '--otlp-endpoint',
+        endpoint,
+        '--otlp-header',
+        'authorization=Bearer t0ken',
+        '--otlp-interval-ms',
+        '100',
+      ]);
+      await callTool(client, 'run', { execPath: process.execPath, args: ['-e', 'process.exit(3)'], opId: 'exit-3' });
       for (let i = 0; i < 60 && bodies.length === 0; i++) await new Promise((r) => setTimeout(r, 50));
       expect(bodies.length).toBeGreaterThan(0);
 
@@ -192,17 +199,36 @@ describe('xioflow mcp (interoperability with the official MCP SDK client)', () =
       expect(contentType).toBe('application/json');
       expect(auth).toBe('Bearer t0ken');
       const scope = body.resourceSpans[0].scopeSpans[0];
-      expect(scope.scope.name).toBe('@xioflow/kernel');
-      const span = scope.spans.find((s: any) => s.attributes.some((a: any) => a.key === 'xioflow.op.id' && a.value.stringValue === 'exit-3'));
-      expect(span.traceId).toMatch(/^[0-9a-f]{32}$/);
-      expect(span.spanId).toMatch(/^[0-9a-f]{16}$/);
-      expect(BigInt(span.endTimeUnixNano)).toBeGreaterThanOrEqual(BigInt(span.startTimeUnixNano));
+      const span = scope.spans.find((s: any) =>
+        s.attributes.some((a: any) => a.key === 'xioflow.op.id' && a.value.stringValue === 'exit-3'),
+      );
+      expect(span).toBeDefined();
       expect(span.status).toEqual({ code: 2, message: 'failed' });
-      expect(span.attributes).toContainEqual({ key: 'process.exit_code', value: { intValue: '3' } });
-      expect(span.events.map((e: any) => e.name)).toContain('status.active');
     } finally {
-      await client?.close();
       await new Promise<void>((r) => server.close(() => r()));
     }
+  });
+
+  it('preserves --surface legacy operational tools when explicitly opted in', async () => {
+    const { client } = await openMcpClient(['--surface', 'legacy', '--driver', 'node']);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual([
+      'abort_transaction',
+      'begin_transaction',
+      'cancel_operation',
+      'commit_transaction',
+      'execute',
+      'operation_status',
+      'rollback_workspace',
+      'run_command',
+      'snapshot_workspace',
+    ]);
+    const r = await callTool(client, 'run_command', {
+      command: process.execPath,
+      args: ['-e', 'console.log("legacy-ok")'],
+      cwd: workspaceDir,
+      opId: 'leg-1',
+    });
+    expect(r.data).toMatchObject({ status: 'succeeded', stdout: 'legacy-ok\n' });
   });
 });

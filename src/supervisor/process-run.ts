@@ -67,7 +67,10 @@ export async function runProcess(ctx: ProcessRunContext, plan: ProcessRunPlan): 
     try {
       // 读集观测的起点必须在进程能读到任何东西之前；归一失败按启动失败处理，不带着残缺的证据跑
       plan.readTracking?.begin();
-      handle = await ctx.driver.spawn(plan.command, { capabilityId: options.capabilityId });
+      handle = await ctx.driver.spawn(plan.command, {
+        capabilityId: options.capabilityId,
+        vfsTrace: plan.readTracking?.useVfs === true,
+      });
       opState.handle = handle;
       opState.command = plan.command;
     } catch (spawnError: any) {

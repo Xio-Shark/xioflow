@@ -23,6 +23,7 @@ import {
   Http304CacheAdapter,
   ParsedToolCall,
   RecordedGatewayTurn,
+  redactTurnForPersistence,
   ShellExecRequest,
   ShellExecResponse,
   startWireProxy,
@@ -62,6 +63,8 @@ export interface WrapAgentOptions {
   confinement?: boolean | string;
   /** Writable roots when `confinement` is enabled (defaults to `[cwd, os.tmpdir()]`). */
   writableRoots?: string[];
+  /** Persist raw user/system/assistant prompt text in gateway-traces & http304-cache on disk (default: false). */
+  persistRawPrompts?: boolean;
 }
 
 export interface WrapAgentResult {
@@ -728,15 +731,16 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
   const activeToolOpIds = new Set<string>();
   let isGitRepo: boolean | undefined;
   const dynamicUpstream: Partial<Record<WireProtocolName | 'default', string>> = {};
+  const persistRawPrompts = options.persistRawPrompts === true;
   const http304Cache =
     options.http304Cache === false
       ? undefined
-      : (options.http304Cache ?? new Http304CausalCache({ domain, domainPath, workspaceRoot: cwd }));
+      : (options.http304Cache ?? new Http304CausalCache({ domain, domainPath, workspaceRoot: cwd, persistRawPrompts }));
 
   const traceDir = path.join(domainPath, 'gateway-traces');
   const syscallTraceDir = path.join(domainPath, 'syscall-traces');
   try {
-    fs.mkdirSync(syscallTraceDir, { recursive: true });
+    fs.mkdirSync(syscallTraceDir, { recursive: true, mode: 0o700 });
   } catch {}
   const agentSyscallTracePath = path.join(syscallTraceDir, `${runId}-agent.trace`);
   const shimSoPath = locateNativeShimLibrary();
@@ -747,7 +751,8 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
 
   const saveTraceBundle = (turns: RecordedGatewayTurn[]) => {
     try {
-      fs.mkdirSync(traceDir, { recursive: true });
+      fs.mkdirSync(traceDir, { recursive: true, mode: 0o700 });
+      const turnsForDisk = persistRawPrompts ? turns : turns.map(redactTurnForPersistence);
       fs.writeFileSync(
         path.join(traceDir, `${runId}.json`),
         JSON.stringify(
@@ -756,12 +761,14 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
             domainId,
             domainPath,
             workspaceRoot: cwd,
+            promptsRedacted: !persistRawPrompts,
             updatedAt: new Date().toISOString(),
-            turns,
+            turns: turnsForDisk,
           },
           null,
           2
-        )
+        ),
+        { mode: 0o600 }
       );
     } catch {}
   };
@@ -834,6 +841,7 @@ export async function wrapAgent(options: WrapAgentOptions): Promise<WrapAgentRes
     workspaceRoot: cwd,
     upstreamUrl: dynamicUpstream,
     tape: options.tape,
+    persistRawPrompts,
     http304Cache,
     onBeforeMainRequest: cancelActiveTools,
     getKernelStatus: () => ({

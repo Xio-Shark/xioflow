@@ -4,24 +4,24 @@ import { createEventEnvelope, type EventEnvelope, type EventEnvelopeInput } from
 import { withRecoveryIdentity } from '../recovery/evidence.js';
 import { callerLabel, crashpoint, crashpointsEnabled } from '../fault/crashpoint.js';
 import {
-  Task,
-  Run,
-  Operation,
-  OperationResult,
-  OperationStatus,
-  KernelRunStatus,
-  TerminationReason,
-  ResourceLease,
-  JournalEvent,
-  OwnerRecord,
-  ResourceBudget,
+  type Task,
+  type Run,
+  type Operation,
+  type OperationResult,
+  type OperationStatus,
+  type KernelRunStatus,
+  type TerminationReason,
+  type ResourceLease,
+  type JournalEvent,
+  type OwnerRecord,
+  type ResourceBudget,
   EpochFencedError,
   DomainLockedError,
   sanitizeConfigSnapshot,
-  SnapshotRef,
-  Capability,
-  ArtifactRecord,
-  RequestConfigSnapshot,
+  type SnapshotRef,
+  type Capability,
+  type ArtifactRecord,
+  type RequestConfigSnapshot,
 } from '../types.js';
 import { assertRequestConfigSnapshot } from '../config/snapshot.js';
 
@@ -69,6 +69,62 @@ export class SqliteStore {
         throw new AggregateError([err, rollbackError], 'Transaction failed and rollback failed', { cause: err });
       }
       throw err;
+    } finally {
+      this.inTransaction = false;
+    }
+  }
+
+  /**
+   * Group Commit 批处理执行器：将并发到达的多笔写操作合并进单次外层事务（单次 WAL FULL fsync），
+   * 每笔子操作使用独立 SAVEPOINT 隔离，单笔业务校验失败仅回滚自身而不连坐同批合法操作。
+   */
+  public runGroupCommitBatch<T>(
+    items: ReadonlyArray<() => T>
+  ): Array<{ ok: true; value: T } | { ok: false; error: unknown }> {
+    if (items.length === 0) return [];
+    if (this.inTransaction) {
+      return items.map((fn) => {
+        try {
+          return { ok: true as const, value: fn() };
+        } catch (error) {
+          return { ok: false as const, error };
+        }
+      });
+    }
+    this.db.exec('BEGIN IMMEDIATE');
+    this.inTransaction = true;
+    try {
+      const outcomes: Array<{ ok: true; value: T } | { ok: false; error: unknown }> = [];
+      let anySucceeded = false;
+      for (let i = 0; i < items.length; i++) {
+        const sp = `xio_gc_${i}`;
+        this.db.exec(`SAVEPOINT ${sp}`);
+        try {
+          const value = items[i]!();
+          this.db.exec(`RELEASE SAVEPOINT ${sp}`);
+          outcomes.push({ ok: true, value });
+          anySucceeded = true;
+        } catch (error) {
+          this.db.exec(`ROLLBACK TO SAVEPOINT ${sp}`);
+          this.db.exec(`RELEASE SAVEPOINT ${sp}`);
+          outcomes.push({ ok: false, error });
+        }
+      }
+      if (anySucceeded) {
+        this.db.exec('COMMIT');
+      } else {
+        this.db.exec('ROLLBACK');
+      }
+      return outcomes;
+    } catch (commitError) {
+      try {
+        this.db.exec('ROLLBACK');
+      } catch (rollbackError) {
+        throw new AggregateError([commitError, rollbackError], 'Group commit and rollback both failed', {
+          cause: commitError,
+        });
+      }
+      throw commitError;
     } finally {
       this.inTransaction = false;
     }
@@ -976,15 +1032,41 @@ export class SqliteStore {
     domainId: string,
     fromSeq: number = 0,
     toSeq: number = Number.MAX_SAFE_INTEGER,
-    types?: readonly string[]
+    types?: readonly string[],
+    filter?: { txId?: string; operationId?: string }
   ): JournalEvent[] {
+    const clauses = ['domain_id = ?', 'seq >= ?', 'seq <= ?'];
+    const params: Array<string | number> = [domainId, fromSeq, toSeq];
+    if (types !== undefined) {
+      if (types.length === 0) {
+        clauses.push('0');
+      } else {
+        clauses.push(`type IN (${types.map(() => '?').join(',')})`);
+        params.push(...types);
+      }
+    }
+    if (filter?.txId !== undefined) {
+      clauses.push("json_extract(payload, '$.txId') = ?");
+      params.push(filter.txId);
+    }
+    if (filter?.operationId !== undefined) {
+      clauses.push('operation_id = ?');
+      params.push(filter.operationId);
+    }
+    const indexHint =
+      filter?.txId !== undefined
+        ? ''
+        : filter?.operationId !== undefined
+          ? ''
+          : types?.length
+            ? 'INDEXED BY idx_journal_events_domain_type_seq'
+            : '';
     const stmt = this.db.prepare(`
-      SELECT * FROM journal_events ${types?.length ? 'INDEXED BY idx_journal_events_domain_type_seq' : ''}
-      WHERE domain_id = ? AND seq >= ? AND seq <= ?
-        ${types === undefined ? '' : types.length === 0 ? 'AND 0' : `AND type IN (${types.map(() => '?').join(',')})`}
+      SELECT * FROM journal_events ${indexHint}
+      WHERE ${clauses.join(' AND ')}
       ORDER BY seq ASC
     `);
-    const rows = stmt.all(domainId, fromSeq, toSeq, ...(types ?? [])) as any[];
+    const rows = stmt.all(...params) as any[];
     return rows.map((row) => this.mapJournalEvent(row));
   }
 
@@ -1047,6 +1129,113 @@ export class SqliteStore {
     `);
     const rows = stmt.all(runId) as any[];
     return rows.map((row) => this.mapJournalEvent(row));
+  }
+
+  public getTransactionEvents(domainId: string, txId: string): JournalEvent[] {
+    return this.getJournalEvents(
+      domainId,
+      0,
+      Number.MAX_SAFE_INTEGER,
+      [
+        'TX_BEGUN',
+        'TX_READS',
+        'TX_REPLAY_STARTED',
+        'TX_VALIDATION_DOWNGRADED',
+        'TX_COMMITTING',
+        'TX_COMMITTED',
+        'TX_CONFLICTED',
+        'TX_ABORTED',
+      ],
+      { txId }
+    );
+  }
+
+  public getOperationBinding(
+    domainId: string,
+    opId: string
+  ): {
+    domainId: string;
+    opId: string;
+    runId: string;
+    programId: string;
+    instructionId: string;
+    opcode: string;
+    fingerprint: string;
+    createdAt: string;
+  } | null {
+    const row = this.db.prepare(`
+      SELECT * FROM operation_bindings
+      WHERE domain_id = ? AND op_id = ?
+    `).get(domainId, opId) as any;
+    if (!row) return null;
+    return {
+      domainId: row.domain_id,
+      opId: row.op_id,
+      runId: row.run_id,
+      programId: row.program_id,
+      instructionId: row.instruction_id,
+      opcode: row.opcode,
+      fingerprint: row.fingerprint,
+      createdAt: row.created_at,
+    };
+  }
+
+  public hasInstructionBinding(
+    domainId: string,
+    runId: string,
+    instructionId: string,
+    opId: string
+  ): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 AS present
+      FROM operation_bindings
+      WHERE domain_id = ? AND run_id = ? AND instruction_id = ? AND op_id = ?
+      LIMIT 1
+    `).get(domainId, runId, instructionId, opId) as { present?: number } | undefined;
+    return Boolean(row?.present);
+  }
+
+  public saveOperationBinding(record: {
+    domainId: string;
+    opId: string;
+    runId: string;
+    programId: string;
+    instructionId: string;
+    opcode: string;
+    fingerprint: string;
+    createdAt?: string;
+  }): void {
+    this.transaction(() => {
+      this.verifyEpochFencing(record.domainId);
+      const createdAt = record.createdAt ?? new Date().toISOString();
+      this.db.prepare(`
+        INSERT INTO operation_bindings (
+          domain_id, op_id, run_id, program_id, instruction_id, opcode, fingerprint, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        record.domainId,
+        record.opId,
+        record.runId,
+        record.programId,
+        record.instructionId,
+        record.opcode,
+        record.fingerprint,
+        createdAt
+      );
+      this.recordJournalEvent({
+        domainId: record.domainId,
+        runId: record.runId,
+        operationId: record.opId,
+        type: 'ISA_INSTRUCTION_BOUND',
+        payload: {
+          programId: record.programId,
+          instructionId: record.instructionId,
+          opcode: record.opcode,
+          fingerprint: record.fingerprint,
+        },
+        timestamp: createdAt,
+      });
+    });
   }
 
   public recordArtifact(record: ArtifactRecord): void {

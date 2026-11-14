@@ -119,6 +119,14 @@ export function validateExecuteProcessOptions(options: ExecuteProcessOptions): v
     if (options.trackReads.statCaches !== undefined && options.trackReads.statCaches !== 'ruled_out') {
       throw new TypeError('trackReads.statCaches must be ruled_out');
     }
+    if (
+      options.trackReads.mode !== undefined &&
+      options.trackReads.mode !== 'auto' &&
+      options.trackReads.mode !== 'vfs' &&
+      options.trackReads.mode !== 'atime'
+    ) {
+      throw new TypeError('trackReads.mode must be auto, vfs or atime');
+    }
   }
   if (options.onStreamChunk !== undefined && typeof options.onStreamChunk !== 'function') {
     throw new TypeError('onStreamChunk must be a function');

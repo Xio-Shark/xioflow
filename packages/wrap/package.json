@@ -1,0 +1,18 @@
+{
+  "name": "@xioflow/wrap",
+  "version": "0.8.0",
+  "description": "Dual-boundary LLM CLI wrapper, HTTP-304 causal cache, and git-shadow flight recorder (raw prompts redacted by default)",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    }
+  },
+  "peerDependencies": {
+    "@xioflow/kernel": "0.8.0"
+  }
+}

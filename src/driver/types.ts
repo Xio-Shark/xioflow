@@ -1,5 +1,8 @@
 import { IdentityVerificationResult, ResourceBudget } from '../types.js';
 import type { SecretRef } from '../isa/types.js';
+import type { VfsSyscallEvents } from './vfs-trace.js';
+
+export type { VfsSyscallEvents } from './vfs-trace.js';
 
 export interface SecretResolutionContext {
   /** Capability binding supplied by the supervisor; drivers may require it. */
@@ -11,7 +14,10 @@ export type SecretResolver = (
   context: SecretResolutionContext,
 ) => Promise<string> | string;
 
-export interface SpawnContext extends SecretResolutionContext {}
+export interface SpawnContext extends SecretResolutionContext {
+  /** Request per-process-tree VFS syscall tracing if supported by the driver. */
+  vfsTrace?: boolean;
+}
 
 export interface StructuredCommand {
   execPath: string;
@@ -122,6 +128,8 @@ export interface PlatformCapabilities {
   descendantEnumeration: 'full' | 'cgroup' | 'subreaper' | 'none'; // 后代枚举与逃逸检测能力（subreaper：孤儿必然回到持有者，可证明树空）
   /** True promises no command execution until releaseGate, and no exec on owner loss/EOF. Persisted per intent. */
   gatedSpawn?: boolean;
+  /** True when per-process VFS syscall interposition (LD_PRELOAD shim) is available without scanning workspace atime. */
+  vfsTracing?: boolean;
   confinement?: string[];          // 支持的写入限制驱动名称列表 (契约 #56)
 }
 
@@ -159,4 +167,8 @@ export interface PlatformDriver {
    * 异步读取指定进程组的所有成员与启动时间事实（N2 / 契约 #42）
    */
   getGroupEvidence?(pgid: number): Promise<{ pid: number; startTimeMs: number | null }[]>;
+  /**
+   * 读取并回收指定进程树的原生 VFS 系统调用追踪事件（仅在 SpawnContext.vfsTrace 开启且驱动支持时返回）。
+   */
+  consumeVfsEvents?(identity: ProcessIdentity): VfsSyscallEvents | undefined;
 }

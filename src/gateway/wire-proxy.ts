@@ -117,6 +117,7 @@ export interface RecordedGatewayTurn {
   deletedFiles?: string[];
   deniedFiles?: string[];
   toolExecutions?: RecordedToolExecution[];
+  promptsRedacted?: boolean;
   timestamp: string;
 }
 
@@ -170,6 +171,8 @@ export interface WireProxyOptions {
     turns: Array<{ steps: any[] }>;
   };
   transcriptPath?: string;
+  /** Persist raw user/system/assistant prompt text on disk (default: false — hashes/digests only). */
+  persistRawPrompts?: boolean;
   http304Cache?: Http304CacheAdapter;
   captureTurnSnapshot?: (turnIndex: number) => Promise<
     | {
@@ -1282,6 +1285,52 @@ export function readGatewayInterruptedTool(domainPath: string): InterruptedToolR
   }
 }
 
+export function redactPromptText(text: string): string {
+  if (!text) return '';
+  const digest = crypto.createHash('sha256').update(text, 'utf8').digest('hex').slice(0, 16);
+  const bytes = Buffer.byteLength(text, 'utf8');
+  return `[redacted:sha256=${digest}:bytes=${bytes}]`;
+}
+
+export function redactTurnForPersistence(turn: RecordedGatewayTurn): RecordedGatewayTurn {
+  if (turn.promptsRedacted) return turn;
+  const rawReqStr = JSON.stringify(turn.requestBody ?? {});
+  const reqDigest = crypto.createHash('sha256').update(rawReqStr, 'utf8').digest('hex').slice(0, 16);
+  return {
+    ...turn,
+    promptsRedacted: true,
+    requestBody: {
+      redacted: true,
+      sha256: reqDigest,
+      byteLength: Buffer.byteLength(rawReqStr, 'utf8'),
+    },
+    parsedRequest: {
+      ...turn.parsedRequest,
+      conversation: Array.isArray(turn.parsedRequest?.conversation)
+        ? turn.parsedRequest.conversation.map((item) => ({
+            redacted: true,
+            sha256: crypto
+              .createHash('sha256')
+              .update(JSON.stringify(item ?? null), 'utf8')
+              .digest('hex')
+              .slice(0, 16),
+          }))
+        : [],
+      toolResults: Array.isArray(turn.parsedRequest?.toolResults)
+        ? turn.parsedRequest.toolResults.map((r) => ({
+            ...r,
+            text: redactPromptText(r.text),
+          }))
+        : [],
+    },
+    rawResponseBody: '',
+    parsedResponse: {
+      ...turn.parsedResponse,
+      text: turn.parsedResponse?.text ? redactPromptText(turn.parsedResponse.text) : '',
+    },
+  };
+}
+
 export function writeGatewayInFlightTool(
   domainPath: string,
   inFlightToolCall: InterruptedToolRecord | null,
@@ -1323,8 +1372,20 @@ export async function startWireProxy(options: WireProxyOptions = {}): Promise<Wi
 
   const recordTranscript = (entry: Record<string, unknown>) => {
     if (!options.transcriptPath) return;
-    fs.mkdirSync(path.dirname(options.transcriptPath), { recursive: true });
-    fs.appendFileSync(options.transcriptPath, `${JSON.stringify(entry)}\n`);
+    fs.mkdirSync(path.dirname(options.transcriptPath), { recursive: true, mode: 0o700 });
+    const sanitized = options.persistRawPrompts
+      ? entry
+      : (() => {
+          const copy = { ...entry };
+          if ('body' in copy) {
+            copy.body = { redacted: true };
+          }
+          if ('served' in copy) {
+            delete copy.served;
+          }
+          return copy;
+        })();
+    fs.appendFileSync(options.transcriptPath, `${JSON.stringify(sanitized)}\n`, { mode: 0o600 });
   };
 
   const recordJournal = (type: string, payload: Record<string, unknown>): number | undefined => {
@@ -1714,17 +1775,17 @@ export async function startWireProxy(options: WireProxyOptions = {}): Promise<Wi
             return tc;
           });
 
-          if (cached.wire === wire) {
+          if (cached.wire === wire && cached.rawResponseBody && !cached.promptsRedacted) {
             res.writeHead(cached.responseStatus, headers);
             res.end(cached.rawResponseBody);
           } else {
-            // Cross-protocol 304 fast-forward: transcode cached turn into target wire protocol SSE stream
+            // Cross-protocol (or redacted-raw-body) 304 fast-forward: transcode structured turn into target wire protocol SSE stream
             const writer = openWireStream(wire, res, body, {
               'x-xio-cache': 'HIT-304',
               etag: lookup.etag,
               ...(lookup.cutoffUsed ? { 'x-xio-early-cutoff': 'true' } : {}),
             });
-            if (cached.parsedResponse.text) {
+            if (cached.parsedResponse.text && !cached.promptsRedacted) {
               writer.text(cached.parsedResponse.text);
             }
             for (const tc of mappedToolCalls) {

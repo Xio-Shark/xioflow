@@ -3,12 +3,9 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import {
-  ExecutionDomain,
-  Http304CausalCache,
-  startWireProxy,
-  WorkspaceCausalGraph,
-} from '../../src/index.js';
+import { ExecutionDomain } from '@xioflow/kernel';
+import { Http304CausalCache, startWireProxy } from '@xioflow/kernel/wrap';
+import { WorkspaceCausalGraph } from '../../src/workspace/causal-graph.js';
 
 const tempDirs: string[] = [];
 

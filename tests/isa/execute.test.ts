@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { execute } from '../../src/index.js';
+import { execute } from '@xioflow/kernel/isa';
 import type { Capability, Program } from '../../src/isa/index.js';
 
 const capability: Capability = {

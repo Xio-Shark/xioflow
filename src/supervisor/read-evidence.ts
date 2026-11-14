@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { artifactPath, readArtifact, removeOwnedArtifact, writeArtifact, type ArtifactFacts, type OwnedArtifact } from '../artifacts.js';
 import { isPathContained } from '../capability/path-utils.js';
+import type { VfsSyscallEvents } from '../driver/vfs-trace.js';
 import { EvidenceStatus, ReadEvidence } from '../types.js';
 import { probeReadTracking, resetAccessTime, wasAccessed } from '../workspace/read-tracking.js';
 
@@ -23,6 +24,8 @@ export interface TrackReadsSpec {
   roots: string[];
   /** 调用方保证命令不使用只靠 stat 校验的缓存（例如给 Python 指了一个空的字节码缓存目录）。 */
   statCaches?: 'ruled_out';
+  /** 读集采集方式：默认 `auto`（驱动支持进程级 VFS 追踪时优先走零扫盘 `vfs`，否则回退 `atime`）。 */
+  mode?: 'auto' | 'vfs' | 'atime';
 }
 
 interface RootEvidence {
@@ -117,44 +120,110 @@ function scan(root: string): { reads: string[]; tree: Record<string, string>; pa
   return { reads: reads.sort(), tree, pathDependencies };
 }
 
+function scanTreeOnly(root: string): { tree: Record<string, string>; pathDependencies: Record<string, string> } {
+  const tree: Record<string, string> = Object.create(null);
+  const pathDependencies: Record<string, string> = Object.create(null);
+  walk(root, (abs, rel, st) => {
+    if (st.isSymbolicLink()) {
+      pathDependencies[rel] = sha(fs.readlinkSync(abs));
+      tree[rel] = `link:${pathDependencies[rel]}`;
+      return;
+    }
+    if (!st.isDirectory()) tree[rel] = `${st.size}:${st.mtimeNs}`;
+  });
+  return { tree, pathDependencies };
+}
+
+function resolveVfsEntry(root: string, candidatePath: string, forceDir: boolean): string | null {
+  let resolved: string;
+  let isDir = forceDir;
+  try {
+    const st = fs.lstatSync(candidatePath);
+    if (st.isSymbolicLink()) return null;
+    isDir = isDir || st.isDirectory();
+    resolved = fs.realpathSync(candidatePath);
+  } catch {
+    resolved = path.resolve(candidatePath);
+  }
+  if (!isPathContained(root, resolved)) return null;
+  const rel = path.relative(root, resolved).split(path.sep).join('/');
+  if (rel.startsWith('..')) return null;
+  const top = rel.split('/')[0];
+  if (top && SKIP_TOP.has(top)) return null;
+  if (isDir) return `${rel || '.'}/`;
+  if (!rel) return './';
+  return rel;
+}
+
 export interface ReadTrackingSession {
-  /** 在进程启动之前调用：归一访问时间。 */
+  readonly useVfs: boolean;
+  /** 在进程启动之前调用：atime 模式归一访问时间；vfs 模式为零开销空操作。 */
   begin(): void;
   /** 在进程退出之后调用：收集读集、写证据文件，返回放进操作结果的摘要。不抛错。 */
-  collect(artifactsDir: string, onArtifactCreated?: (artifact: OwnedArtifact, facts: ArtifactFacts) => void): ReadEvidence;
+  collect(
+    artifactsDir: string,
+    onArtifactCreated?: (artifact: OwnedArtifact, facts: ArtifactFacts) => void,
+    vfsEvents?: VfsSyscallEvents
+  ): ReadEvidence;
   close(): void;
 }
 
 /**
- * 同一个根上同时只能有一条命令被观测：后来者的归一会抹掉先来者的读取痕迹。
- * 后来者不做归一，如实标为没有观测到（`roots_busy`）；先来者不受影响，只会多记几条别人的读取。
+ * 同一个根上同时只能有一条 atime 命令被观测：后来者的归一会抹掉先来者的读取痕迹。
+ * VFS 模式按进程树独立输出 syscall trace，不受并发干扰且无需启动前扫盘重置 atime。
  */
 export class ReadTracker {
   private readonly active = new Map<string, string[]>();
 
-  public open(opId: string, spec: TrackReadsSpec): ReadTrackingSession {
+  public open(opId: string, spec: TrackReadsSpec, options?: { useVfs?: boolean }): ReadTrackingSession {
     const roots = spec.roots.map((root) => {
       if (!path.isAbsolute(root) || !fs.statSync(root, { throwIfNoEntry: false })?.isDirectory()) {
         throw new Error(`trackReads: root "${root}" must be an absolute path to an existing directory`);
       }
       return fs.realpathSync(root);
     });
-    const busy = [...this.active.values()].flat().some((held) => roots.some((root) => isPathContained(held, root) || isPathContained(root, held)));
-    if (!busy) this.active.set(opId, roots);
+    const useVfs = options?.useVfs === true || spec.mode === 'vfs';
+    const busy = useVfs
+      ? false
+      : [...this.active.values()].flat().some((held) => roots.some((root) => isPathContained(held, root) || isPathContained(root, held)));
+    if (!useVfs && !busy) this.active.set(opId, roots);
     const observed = new Map<string, boolean>();
     const base = { scope: 'content_reads' as const, statCaches: spec.statCaches ?? ('possible' as const), roots };
 
     return {
+      useVfs,
       begin: () => {
-        if (busy) return;
+        if (useVfs || busy) return;
         for (const root of roots) {
           observed.set(root, probeReadTracking(root) === 'atime');
           if (observed.get(root)) normalizeAccessTimesOnePass(root);
         }
       },
-      collect: (artifactsDir, onArtifactCreated) => {
+      collect: (artifactsDir, onArtifactCreated, vfsEvents) => {
         try {
           const perRoot: RootEvidence[] = roots.map((root) => {
+            if (useVfs) {
+              const { tree, pathDependencies } = scanTreeOnly(root);
+              if (!vfsEvents) {
+                return { root, reads: null, tree, pathDependencies };
+              }
+              const vfsReads = new Set<string>();
+              for (const p of vfsEvents.reads) {
+                const entry = resolveVfsEntry(root, p, false);
+                if (entry) vfsReads.add(entry);
+              }
+              for (const d of vfsEvents.listedDirs) {
+                const entry = resolveVfsEntry(root, d, true);
+                if (entry) vfsReads.add(entry);
+              }
+              const sorted = [...vfsReads].sort();
+              return {
+                root,
+                reads: Object.fromEntries(sorted.map((entry) => [entry, fingerprint(root, entry)])),
+                tree,
+                pathDependencies,
+              };
+            }
             const { reads, tree, pathDependencies } = scan(root);
             if (!observed.get(root)) return { root, reads: null, tree, pathDependencies };
             return { root, reads: Object.fromEntries(reads.map((entry) => [entry, fingerprint(root, entry)])), tree, pathDependencies };
@@ -178,8 +247,16 @@ export class ReadTracker {
           const tracked = perRoot.every((r) => r.reads !== null);
           return {
             ...base,
-            tracking: tracked ? 'atime' : 'unobserved',
-            ...(tracked ? {} : { reason: busy ? ('roots_busy' as const) : ('no_atime' as const) }),
+            tracking: tracked ? (useVfs ? 'vfs' : 'atime') : 'unobserved',
+            ...(tracked
+              ? {}
+              : {
+                  reason: useVfs
+                    ? ('no_vfs' as const)
+                    : busy
+                      ? ('roots_busy' as const)
+                      : ('no_atime' as const),
+                }),
             entryCount: perRoot.reduce((sum, r) => sum + Object.keys(r.reads ?? {}).length, 0),
             digest: evidenceDigest(perRoot),
             ref,
@@ -190,7 +267,7 @@ export class ReadTracker {
         }
       },
       close: () => {
-        this.active.delete(opId);
+        if (!useVfs) this.active.delete(opId);
       },
     };
   }

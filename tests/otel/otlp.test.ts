@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { journalToOtlpTraces, JournalEvent, Operation } from '@xioflow/kernel';
+import type { JournalEvent, Operation } from '@xioflow/kernel';
+import { journalToOtlpTraces } from '@xioflow/kernel/otel';
 
 const at = (s: number) => new Date(Date.UTC(2026, 8, 29, 10, 0, s)).toISOString();
 

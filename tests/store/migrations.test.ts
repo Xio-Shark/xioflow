@@ -19,15 +19,16 @@ function openDb(): DatabaseSync {
 describe('store migration runner', () => {
   it('migrates a new database and records version/checksum atomically', () => {
     const db = openDb();
-    expect(runMigrations(db)).toBe(6);
-    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(6);
+    expect(runMigrations(db)).toBe(7);
+    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(7);
     expect(db.prepare('SELECT state, checksum FROM xio_schema_migrations WHERE version = 1').get()).toMatchObject({ state: 'applied', checksum: STORE_MIGRATIONS[0]!.checksum });
     expect(db.prepare('SELECT state, checksum FROM xio_schema_migrations WHERE version = 2').get()).toMatchObject({ state: 'applied', checksum: STORE_MIGRATIONS[1]!.checksum });
     expect(db.prepare('SELECT state, checksum FROM xio_schema_migrations WHERE version = 3').get()).toMatchObject({ state: 'applied', checksum: STORE_MIGRATIONS[2]!.checksum });
     expect(db.prepare('SELECT state, checksum FROM xio_schema_migrations WHERE version = 4').get()).toMatchObject({ state: 'applied', checksum: STORE_MIGRATIONS[3]!.checksum });
     expect(db.prepare('SELECT state, checksum FROM xio_schema_migrations WHERE version = 5').get()).toMatchObject({ state: 'applied', checksum: STORE_MIGRATIONS[4]!.checksum });
     expect(db.prepare('SELECT state, checksum FROM xio_schema_migrations WHERE version = 6').get()).toMatchObject({ state: 'applied', checksum: STORE_MIGRATIONS[5]!.checksum });
-    expect(runMigrations(db)).toBe(6);
+    expect(db.prepare('SELECT state, checksum FROM xio_schema_migrations WHERE version = 7').get()).toMatchObject({ state: 'applied', checksum: STORE_MIGRATIONS[6]!.checksum });
+    expect(runMigrations(db)).toBe(7);
   });
 
   it('upgrades a 0.x database with missing columns', () => {
@@ -45,7 +46,7 @@ describe('store migration runner', () => {
         created_at TEXT, tree_size_bytes INTEGER
       );
     `);
-    expect(runMigrations(db)).toBe(6);
+    expect(runMigrations(db)).toBe(7);
     const operationColumns = (db.prepare('PRAGMA table_info(operations)').all() as Array<{ name: string }>).map((column) => column.name);
     const snapshotColumns = (db.prepare('PRAGMA table_info(snapshots)').all() as Array<{ name: string }>).map((column) => column.name);
     const capabilityColumns = (db.prepare('PRAGMA table_info(capabilities)').all() as Array<{ name: string }>).map((column) => column.name);

@@ -1,9 +1,12 @@
-import { spawn, ChildProcess } from 'node:child_process';
+import { spawn, execFile, ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import type { Socket } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 import {
   PlatformDriver,
   PlatformCapabilities,
@@ -14,12 +17,22 @@ import {
   TreeSettlement,
   SecretResolver,
   SpawnContext,
+  VfsSyscallEvents,
 } from './types.js';
 import { IdentityVerificationResult } from '../types.js';
 import { NodePlatformDriver } from './node-driver.js';
 import { readStartTime } from './process-facts.js';
 import { computeCommandFingerprint, resolveExecutable } from './spawn-support.js';
 import { redactSecretStream, resolveCommandEnvironment } from './secret-env.js';
+import { parseVfsTraceFile } from './vfs-trace.js';
+
+export interface ReaperProtocolInfo {
+  protocol: string;
+  platform: 'linux' | 'darwin';
+  treeScope: 'subreaper_tree' | 'tracked_tree';
+  landlockAbi: number;
+  features: string[];
+}
 
 type ExitFacts = { exitCode: number | null; signal: NodeJS.Signals | null };
 
@@ -79,6 +92,8 @@ export function locateNativeShimLibrary(): string | null {
 export interface ReaperDriverOptions {
   /** helper 可执行文件路径；缺省按 locateReaperHelper() 解析。 */
   helperPath?: string;
+  /** Linux LD_PRELOAD VFS 追踪库路径；缺省按 locateNativeShimLibrary() 解析。 */
+  shimPath?: string | null;
   /** stop 应答的额外等待上限（在 grace + 3s 信号阶梯之外），超过即判 cannot_determine。 */
   stopReplyMarginMs?: number;
   /** Driver-local SecretRef resolver. Secret values never leave this driver. */
@@ -107,6 +122,9 @@ interface ReaperSession {
   stopPromise?: Promise<StopProcessResult>;
   lastError?: string;
   rusage?: { rssBytes: number; cpuTimeMs: number };
+  vfsTraceDir?: string;
+  vfsTracePath?: string;
+  vfsEvents?: VfsSyscallEvents;
 }
 
 /**
@@ -126,13 +144,19 @@ export class ReaperPlatformDriver implements PlatformDriver {
   public readonly capabilities: PlatformCapabilities;
   private readonly secretResolver?: SecretResolver;
   private readonly helperPath: string;
+  private readonly shimPath: string | null;
   private readonly stopReplyMarginMs: number;
   private readonly facts = new NodePlatformDriver();
   private readonly sessions = new Map<number, ReaperSession>();
   // A completed identity needs only its terminal fact, never its streams/helper.
   private readonly terminalFacts = new WeakMap<
     ProcessIdentity,
-    { pid: number; startTimeMonotonic?: number; rusage?: { rssBytes: number; cpuTimeMs: number } }
+    {
+      pid: number;
+      startTimeMonotonic?: number;
+      rusage?: { rssBytes: number; cpuTimeMs: number };
+      vfsEvents?: VfsSyscallEvents;
+    }
   >();
 
   public static isAvailable(): boolean {
@@ -151,14 +175,33 @@ export class ReaperPlatformDriver implements PlatformDriver {
       );
     }
     this.helperPath = helperPath;
+    this.shimPath = options.shimPath === undefined ? locateNativeShimLibrary() : options.shimPath;
     this.stopReplyMarginMs = options.stopReplyMarginMs ?? 2000;
     this.secretResolver = options.resolveSecret;
     this.capabilities = {
       ...this.facts.capabilities,
       processGroupKill: true,
       gatedSpawn: true,
+      vfsTracing: this.shimPath !== null,
       descendantEnumeration: process.platform === 'linux' ? 'subreaper' : 'full',
     };
+  }
+
+  public async getProtocolInfo(): Promise<ReaperProtocolInfo> {
+    const { stdout } = await execFileAsync(this.helperPath, ['--protocol-info'], {
+      encoding: 'utf8',
+      timeout: 3000,
+    });
+    return JSON.parse(stdout.trim()) as ReaperProtocolInfo;
+  }
+
+  public consumeVfsEvents(identity: ProcessIdentity): VfsSyscallEvents | undefined {
+    const session = this.sessions.get(identity.pid);
+    if (session && this.matchesSession(session, identity)) {
+      this.harvestVfsTrace(session);
+      return session.vfsEvents;
+    }
+    return this.terminalFacts.get(identity)?.vfsEvents;
   }
 
   public get secretResolution(): boolean {
@@ -202,12 +245,31 @@ export class ReaperPlatformDriver implements PlatformDriver {
 
   public async spawn(command: StructuredCommand, context: SpawnContext = {}): Promise<ManagedProcessHandle> {
     const resolvedEnvironment = await resolveCommandEnvironment(command, this.secretResolver, context);
-    const childEnv = resolvedEnvironment.env;
+    const childEnv = { ...resolvedEnvironment.env };
     // 与 NodePlatformDriver 相同：启动前确认可执行文件存在，缺失即显式失败（契约 #1）
     if (!resolveExecutable(command.execPath, childEnv.PATH)) {
       const err = new Error(`spawn ${command.execPath} ENOENT`);
       Object.assign(err, { code: 'ENOENT', syscall: `spawn ${command.execPath}`, path: command.execPath });
       throw err;
+    }
+
+    let vfsTraceDir: string | undefined;
+    let vfsTracePath: string | undefined;
+    if (context.vfsTrace && this.shimPath) {
+      vfsTraceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xio-vfs-'));
+      fs.chmodSync(vfsTraceDir, 0o700);
+      vfsTracePath = path.join(vfsTraceDir, 'syscalls.trace');
+      childEnv.XIO_SYSCALL_TRACE_PATH = vfsTracePath;
+      if (!childEnv.XIO_SHIM_DIR && childEnv.XIO_SHIM_BYPASS === undefined) {
+        childEnv.XIO_SHIM_BYPASS = '1';
+      }
+      const existingPreload = childEnv.LD_PRELOAD ?? '';
+      if (!existingPreload.split(/[:\s]+/).includes(this.shimPath)) {
+        childEnv.LD_PRELOAD = existingPreload ? `${this.shimPath}:${existingPreload}` : this.shimPath;
+      }
+      if (childEnv.XIOFLOW_LANDLOCK_WRITE_ROOTS) {
+        childEnv.XIOFLOW_LANDLOCK_WRITE_ROOTS = `${childEnv.XIOFLOW_LANDLOCK_WRITE_ROOTS}:${vfsTraceDir}`;
+      }
     }
 
     const stdinPayload =
@@ -223,8 +285,18 @@ export class ReaperPlatformDriver implements PlatformDriver {
       detached: true,
       stdio: [isStreamStdin || stdinPayload !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe', 'pipe'],
     });
-    const rootPid = await this.awaitSpawned(helper);
+    let rootPid: number;
+    try {
+      rootPid = await this.awaitSpawned(helper);
+    } catch (err) {
+      if (vfsTraceDir) {
+        try { fs.rmSync(vfsTraceDir, { recursive: true, force: true }); } catch {}
+      }
+      throw err;
+    }
     const session = this.openSession(helper, rootPid);
+    session.vfsTraceDir = vfsTraceDir;
+    session.vfsTracePath = vfsTracePath;
 
     const bootId = await this.facts.readBootId();
     // root 此刻阻塞在门上，exec 不改变创建时间：读到的就是目标程序的 OS 创建时间
@@ -348,12 +420,31 @@ export class ReaperPlatformDriver implements PlatformDriver {
     return fact?.pid === identity.pid && fact.startTimeMonotonic === identity.startTimeMonotonic;
   }
 
+  private harvestVfsTrace(session: ReaperSession): void {
+    if (session.vfsTracePath) {
+      session.vfsEvents = parseVfsTraceFile(session.vfsTracePath) ?? session.vfsEvents;
+      session.vfsTracePath = undefined;
+    }
+    if (session.vfsTraceDir) {
+      try {
+        fs.rmSync(session.vfsTraceDir, { recursive: true, force: true });
+      } catch {}
+      session.vfsTraceDir = undefined;
+    }
+    if (session.identity && this.terminalFacts.has(session.identity) && session.vfsEvents) {
+      const prev = this.terminalFacts.get(session.identity)!;
+      this.terminalFacts.set(session.identity, { ...prev, vfsEvents: session.vfsEvents });
+    }
+  }
+
   private rememberTerminal(session: ReaperSession): void {
+    this.harvestVfsTrace(session);
     if (session.treeEmpty && session.identity) {
       this.terminalFacts.set(session.identity, {
         pid: session.rootPid,
         startTimeMonotonic: session.identity.startTimeMonotonic,
         rusage: session.rusage,
+        vfsEvents: session.vfsEvents,
       });
     }
   }

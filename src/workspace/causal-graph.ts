@@ -59,16 +59,7 @@ export class WorkspaceCausalGraph {
       throw new Error('An observation cannot declare writes');
     }
 
-    const events = this.domain
-      .getStore()
-      .getJournalEvents(this.domain.domainId, 0, Number.MAX_SAFE_INTEGER, [
-        'TX_BEGUN',
-        'TX_COMMITTING',
-        'TX_COMMITTED',
-        'TX_CONFLICTED',
-        'TX_ABORTED',
-      ]);
-    const history = events.filter((event) => event.payload.txId === step.txId);
+    const history = this.domain.getStore().getTransactionEvents(this.domain.domainId, step.txId);
     const begun = history.find((event) => event.type === 'TX_BEGUN');
     const isGatewaySession = step.txId.startsWith('gateway:') && history.length === 0;
     if (

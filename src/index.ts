@@ -1,46 +1,57 @@
-export * from './types.js';
-/** Preview ISA façade; legacy exports remain compatibility surface until I-09 adapter migration completes. */
-export { execute } from './isa/execute.js';
-export type { ExecuteOptions, ExecuteResponse, UnsupportedExecuteResult } from './isa/execute.js';
+/**
+ * @xioflow/kernel — OS Medium & Supervised Execution Kernel for LLMs.
+ *
+ * Root value surface is intentionally capped at <= 15 orthogonal symbols.
+ * LLM tool schemas & dispatchers live at `@xioflow/kernel/surface` (`@xioflow/surface`),
+ * external CLI agent wrapping at `@xioflow/kernel/wrap` (`@xioflow/wrap`),
+ * OpenTelemetry trace export at `@xioflow/kernel/otel`, and ISA preview at `@xioflow/kernel/isa`.
+ */
+
+// 1-5: OS Medium, Workspace Micro-Arbiter & Causal Session View
+export {
+  connectWorkspace,
+  WorkspaceArbiterClient,
+  WorkspaceArbiterServer,
+} from './arbiter/index.js';
+export { KernelMedium } from './kernel/medium.js';
+export { SessionView } from './kernel/session-view.js';
+
+// 6-8: Core Execution Domain, Process Supervisor & Honest Recovery Engine
+export { ExecutionDomain } from './domain.js';
+export { ProcessSupervisor } from './supervisor/supervisor.js';
+export { RecoveryEngine } from './recovery/engine.js';
+
+// 9-13: OS Process Tree & Filesystem Confinement Drivers
+export { ReaperPlatformDriver } from './driver/reaper-driver.js';
+export { NodePlatformDriver } from './driver/node-driver.js';
+export { CgroupPlatformDriver, CgroupUnavailableError } from './driver/cgroup-driver.js';
+export { LandlockConfinementDriver } from './confinement/landlock.js';
+
+// 14-15: Core Domain Fencing & Resource Contention Errors
+export { DomainLockedError, ResourceConflictError } from './types.js';
+
+// Pure TypeScript types (zero runtime footprint)
+export type * from './types.js';
+export type * from './driver/types.js';
+export type * from './kernel/syscalls.js';
 export type {
-  ArtifactRef,
-  CapabilityLimits,
-  CapabilityRef,
-  EventCursor,
-  ExecutionResult,
-  Evidence,
-  Instruction,
-  InstructionResult,
-  IsaVersion,
-  Opcode,
-  Program,
-  ProcessRef,
-  SnapshotRef,
-  WorkspaceRef,
-} from './isa/types.js';
-export type { Capability as IsaCapability, CapabilityScope as IsaCapabilityScope } from './isa/types.js';
-export * from './isa/control.js';
-export * from './domain.js';
-export * from './store/schema.js';
-export * from './store/migrations.js';
-export { createEventEnvelope, redactEventPayload } from './store/event-envelope.js';
-export type { EventEnvelope, EventEnvelopeInput, EventSensitivity } from './store/event-envelope.js';
-export * from './store/sqlite.js';
-export * from './driver/types.js';
-export * from './driver/contract.js';
-export { SecretResolutionError } from './driver/secret-env.js';
-export { ProcessObservationError } from './driver/observation.js';
-export * from './driver/node-driver.js';
-export * from './driver/reaper-driver.js';
-export * from './driver/cgroup-driver.js';
-export * from './supervisor/supervisor.js';
-export * from './recovery/engine.js';
-export * from './quick-run.js';
-export * from './agents/runtime.js';
-export * from './agents/run-budget.js';
-export type { AgentExecution, AgentCommandOptions, AgentCommandResult } from './agents/execution.js';
-export * from './agents/workspace-recovery.js';
-export * from './snapshot/git-shadow.js';
+  FileReadRecord,
+  MutationValidationFailure,
+  StaleReadNotice,
+} from './kernel/session-view.js';
+export type { KernelMediumOptions } from './kernel/medium.js';
+export type {
+  ArbiterManifest,
+  ConnectWorkspaceOptions,
+  WorkspaceArbiterServerOptions,
+} from './arbiter/index.js';
+export type {
+  CaptureSnapshotOptions,
+  ExecuteProcessOptions,
+  RollbackOptions,
+} from './supervisor/supervisor.js';
+export type { TrackReadsSpec } from './supervisor/read-evidence.js';
+export type { ReadTracking } from './workspace/read-tracking.js';
 export type {
   CommitOptions,
   CommitResult,
@@ -51,31 +62,7 @@ export type {
   ObservationValidation,
   TransactionConflict,
   TransactionEffects,
+  WorkspaceIndexHints,
   WorkspaceTransaction,
   WriteEntry,
 } from './workspace/transactions.js';
-export {
-  replayObservationLog,
-  computeSymbolSliceCutoffHash,
-  computeDiscoverySetCutoff,
-} from './workspace/observation-replay.js';
-export type { ObservationReplayResult } from './workspace/observation-replay.js';
-export type { ReadTracking } from './workspace/read-tracking.js';
-export type { TrackReadsSpec } from './supervisor/read-evidence.js';
-export * from './workspace/incremental-index.js';
-export type { WorkspaceIndexHints } from './workspace/transactions.js';
-export * from './capability/index.js';
-export * from './ipc/index.js';
-export * from './config/snapshot.js';
-export { createConfigOverlay } from './config/overlay.js';
-export type { ConfigOverlay } from './config/overlay.js';
-export * from './confinement/index.js';
-export * from './otel/otlp.js';
-export { KernelMcpServer, SUPPORTED_PROTOCOL_VERSIONS } from './mcp/server.js';
-export type { KernelMcpServerOptions } from './mcp/server.js';
-export * from './workspace/causal-graph.js';
-export * from './gateway/wire-proxy.js';
-export * from './gateway/shell-shim.js';
-export * from './gateway/http304-cache.js';
-export * from './gateway/virtual-workspace.js';
-export * from './gateway/time-fork.js';

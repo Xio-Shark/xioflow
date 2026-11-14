@@ -10,6 +10,7 @@ import { LandlockConfinementDriver } from './confinement/landlock.js';
 import { raceAgentsInVirtualWorkspaces, runInVirtualWorkspace } from './gateway/virtual-workspace.js';
 import { forkGatewayRunAtStep, formatGatewayRunTrace, traceGatewayRun } from './gateway/time-fork.js';
 import { executeIsaProgram, isaResultExitCode } from './adapters/isa.js';
+import { connectWorkspace, WorkspaceArbiterClient, WorkspaceArbiterServer } from './arbiter/index.js';
 
 const USAGE = `usage:
   xio plan --input <program.json|->
@@ -25,9 +26,13 @@ const USAGE = `usage:
       Inspect the Flight Recorder Trace (LLM turns, tool calls, git-shadow snapshots, and HTTP-304 status) for a run.
   xio fork <runId> --at-step <N> [--fork-path <dir>] [--domain <dir>] [--domain-id <id>] [-- <new-agent-cmd> [args...]]
       Materialize the workspace snapshot from step N into an isolated worktree and fast-forward steps 1..N-1 via HTTP-304.
-  xioflow mcp [--domain <dir>] [--domain-id <id>] [--driver auto|node|reaper]
-              [--otlp-endpoint <url>] [--otlp-header k=v ...] [--otlp-interval-ms <n>]
-      Serve the kernel as an MCP server on stdio (recovers the domain first).
+  xio status [--domain <dir>] [--json]
+      Connect to (or start) the workspace Micro-Arbiter and print live workspace, git, and managed process state.
+  xio arbiter <serve|stop> [--domain <dir>] [--domain-id <id>] [--idle-timeout-ms <n>]
+      Explicitly serve or stop the workspace-scoped UDS Micro-Arbiter.
+  xioflow mcp [--workspace <dir>] [--domain <dir>] [--domain-id <id>] [--surface v2|legacy]
+              [--driver auto|node|reaper] [--otlp-endpoint <url>] [--otlp-header k=v ...] [--otlp-interval-ms <n>]
+      Serve the OS medium as an MCP server on stdio (4 golden primitives by default via shared Micro-Arbiter).
   xioflow otel-export --otlp-endpoint <url> [--domain <dir>] [--domain-id <id>] [--from-seq <n>]
                       [--otlp-header k=v ...] [--service-name <name>]
       Export the domain journal as OTLP traces once (read-only; works while a server holds the domain).
@@ -60,7 +65,7 @@ const WRAP_VALUE_FLAGS = new Set([
   '--service-name',
 ]);
 
-const WRAP_BOOLEAN_FLAGS = new Set(['--shadow', '--json']);
+const WRAP_BOOLEAN_FLAGS = new Set(['--shadow', '--json', '--persist-raw-prompts']);
 
 function splitWrapArgs(args: string[]): { wrapArgs: string[]; agentArgv: string[] } {
   const wrapArgs: string[] = [];
@@ -106,6 +111,79 @@ async function main(): Promise<void> {
   }
   await LandlockConfinementDriver.probe();
 
+  if (command === 'status') {
+    const { values } = parseArgs({
+      args: rest,
+      options: {
+        domain: { type: 'string' },
+        'domain-id': { type: 'string' },
+        json: { type: 'boolean' },
+      },
+      strict: true,
+    });
+    const medium = await connectWorkspace(process.cwd(), {
+      domainPath: values.domain ? path.resolve(values.domain) : undefined,
+      domainId: values['domain-id'],
+    });
+    try {
+      const obs = await medium.observe();
+      if (values.json) {
+        process.stdout.write(`${JSON.stringify(obs, null, 2)}\n`);
+      } else {
+        process.stdout.write(
+          [
+            `workspace: ${obs.workspaceRoot}`,
+            `domain:    ${obs.domainId} (epoch ${obs.epoch})`,
+            `git:       ${obs.git.isRepo ? `${obs.git.branch ?? 'detached'}@${obs.git.head ?? 'unborn'} (${obs.git.dirtyFiles.length} dirty)` : 'not a git repository'}`,
+            `processes: ${obs.activeProcesses.length} running`,
+          ].join('\n') + '\n',
+        );
+      }
+    } finally {
+      await medium.close();
+    }
+    return;
+  }
+
+  if (command === 'arbiter') {
+    const [sub, ...arbArgs] = rest;
+    const { values } = parseArgs({
+      args: arbArgs,
+      options: {
+        domain: { type: 'string' },
+        'domain-id': { type: 'string' },
+        'idle-timeout-ms': { type: 'string' },
+      },
+      strict: true,
+    });
+    if (sub === 'stop') {
+      const medium = await connectWorkspace(process.cwd(), {
+        domainPath: values.domain ? path.resolve(values.domain) : undefined,
+        domainId: values['domain-id'],
+      });
+      if (medium instanceof WorkspaceArbiterClient) {
+        await medium.shutdownArbiter();
+      } else {
+        await medium.close();
+      }
+      process.stdout.write('arbiter stopped\n');
+      return;
+    }
+    if (sub === 'serve') {
+      const server = new WorkspaceArbiterServer({
+        workspaceRoot: process.cwd(),
+        domainPath: values.domain ? path.resolve(values.domain) : undefined,
+        domainId: values['domain-id'],
+        idleTimeoutMs: values['idle-timeout-ms'] ? Number(values['idle-timeout-ms']) : 300_000,
+        onIdleShutdown: () => process.exit(0),
+      });
+      const manifest = await server.start();
+      process.stdout.write(`${JSON.stringify(manifest)}\n`);
+      return;
+    }
+    throw new Error('arbiter expects subcommand: serve | stop');
+  }
+
   if (command === 'wrap') {
     const { wrapArgs, agentArgv } = splitWrapArgs(rest);
     if (agentArgv.length === 0) {
@@ -122,6 +200,7 @@ async function main(): Promise<void> {
         'max-output-bytes': { type: 'string' },
         shadow: { type: 'boolean' },
         gate: { type: 'string' },
+        'persist-raw-prompts': { type: 'boolean' },
         'otlp-endpoint': { type: 'string' },
         'otlp-header': { type: 'string', multiple: true },
         'service-name': { type: 'string' },
@@ -141,6 +220,7 @@ async function main(): Promise<void> {
         timeoutMs: values['timeout-ms'] ? Number(values['timeout-ms']) : undefined,
         maxOutputBytes: values['max-output-bytes'] ? Number(values['max-output-bytes']) : undefined,
         gateCommand: values.gate,
+        persistRawPrompts: values['persist-raw-prompts'] === true,
         inheritStdio: true,
       });
       process.exitCode = shadowRes.status === 'committed' ? 0 : 1;
@@ -156,6 +236,7 @@ async function main(): Promise<void> {
       upstreamUrl: values['upstream-url'],
       timeoutMs: values['timeout-ms'] ? Number(values['timeout-ms']) : undefined,
       maxOutputBytes: values['max-output-bytes'] ? Number(values['max-output-bytes']) : undefined,
+      persistRawPrompts: values['persist-raw-prompts'] === true,
       inheritStdio: true,
     });
     process.exitCode = result.exitCode ?? (result.signal ? 128 : 0);
@@ -264,9 +345,11 @@ async function main(): Promise<void> {
   const { values } = parseArgs({
     args: rest,
     options: {
+      workspace: { type: 'string' },
       domain: { type: 'string' },
       'domain-id': { type: 'string' },
       driver: { type: 'string' },
+      surface: { type: 'string' },
       'otlp-endpoint': { type: 'string' },
       'otlp-header': { type: 'string', multiple: true },
       'otlp-interval-ms': { type: 'string' },
@@ -275,17 +358,21 @@ async function main(): Promise<void> {
     },
     strict: true,
   });
-  const domainPath = path.resolve(values.domain ?? '.xioflow-kernel');
-  const domainId = values['domain-id'] ?? 'default';
+  const domainPath = values.domain ? path.resolve(values.domain) : undefined;
+  const domainId = values['domain-id'];
 
   if (command === 'mcp') {
     const driver = values.driver ?? 'auto';
     if (driver !== 'auto' && driver !== 'node' && driver !== 'reaper') throw new Error(`--driver must be auto, node or reaper`);
+    const surface = values.surface ?? 'v2';
+    if (surface !== 'v2' && surface !== 'legacy') throw new Error(`--surface must be v2 or legacy`);
     const endpoint = values['otlp-endpoint'];
     await new KernelMcpServer({
-      domainPath,
+      workspaceRoot: values.workspace ? path.resolve(values.workspace) : process.cwd(),
+      domainPath: domainPath ?? (surface === 'legacy' ? path.resolve('.xioflow-kernel') : undefined),
       domainId,
       driver,
+      surface,
       otlp: endpoint
         ? {
             endpoint,
@@ -301,12 +388,13 @@ async function main(): Promise<void> {
   if (command === 'otel-export') {
     const endpoint = values['otlp-endpoint'];
     if (!endpoint) throw new Error('otel-export needs --otlp-endpoint');
-    const dbPath = path.join(domainPath, 'domain.db');
-    if (!fs.existsSync(dbPath)) throw new Error(`no kernel domain at ${domainPath} (missing domain.db)`);
+    const resolvedDomain = domainPath ?? path.resolve('.xioflow-kernel');
+    const dbPath = path.join(resolvedDomain, 'domain.db');
+    if (!fs.existsSync(dbPath)) throw new Error(`no kernel domain at ${resolvedDomain} (missing domain.db)`);
     const store = new SqliteStore(dbPath);
     try {
       const res = await exportJournalToOtlp(
-        { domainId, getStore: () => store },
+        { domainId: domainId ?? 'default', getStore: () => store },
         {
           endpoint,
           headers: headers(values['otlp-header']),

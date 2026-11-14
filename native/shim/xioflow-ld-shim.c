@@ -13,6 +13,7 @@
  *    SYS_openat/SYS_write/SYS_close syscalls without re-entering libc.
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <limits.h>
@@ -32,6 +33,9 @@
 #define O_TRUNC 01000
 #define O_APPEND 02000
 #define O_CLOEXEC 02000000
+#endif
+#ifndef O_DIRECTORY
+#define O_DIRECTORY 0200000
 #endif
 #ifndef AT_FDCWD
 #define AT_FDCWD -100
@@ -242,8 +246,9 @@ static int handle_openat_common(int (*real_fn)(int, const char *, int, mode_t), 
   if (!in_shim && pathname) {
     in_shim = 1;
     int is_write = (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC | O_APPEND)) != 0;
+    int is_dir = (flags & O_DIRECTORY) != 0;
     if (ret >= 0) {
-      trace_vfs_event(is_write ? 'W' : 'R', dirfd, pathname);
+      trace_vfs_event(is_write ? 'W' : (is_dir ? 'L' : 'R'), dirfd, pathname);
     } else if (is_write && (saved == EACCES || saved == EPERM || saved == EROFS)) {
       trace_vfs_event('E', dirfd, pathname);
     }
@@ -430,4 +435,19 @@ int renameat(int olddirfd, const char *oldpath, int newdirfd, const char *newpat
   }
   errno = saved;
   return ret;
+}
+
+DIR *opendir(const char *name) {
+  typedef DIR *(*fn_t)(const char *);
+  static fn_t real_fn = NULL;
+  if (!real_fn) *(void **)(&real_fn) = dlsym(RTLD_NEXT, "opendir");
+  DIR *dirp = real_fn(name);
+  int saved = errno;
+  if (!in_shim && dirp != NULL) {
+    in_shim = 1;
+    trace_vfs_event('L', AT_FDCWD, name);
+    in_shim = 0;
+  }
+  errno = saved;
+  return dirp;
 }

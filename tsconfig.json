@@ -12,7 +12,11 @@
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "paths": {
-      "@xioflow/kernel": ["./src/index.ts"]
+      "@xioflow/kernel": ["./src/index.ts"],
+      "@xioflow/kernel/surface": ["./src/surface/index.ts"],
+      "@xioflow/kernel/wrap": ["./src/wrap/index.ts"],
+      "@xioflow/kernel/otel": ["./src/otel/index.ts"],
+      "@xioflow/kernel/isa": ["./src/isa/public.ts"]
     }
   },
   "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.ts"]

@@ -13,26 +13,27 @@ const execFileAsync = util.promisify(execFile);
 import { resolveTestEnvironment } from './plain-runner.js';
 import {
   ExecutionDomain,
-  SqliteStore,
-  PlatformDriver,
   ProcessSupervisor,
   RecoveryEngine,
   ResourceConflictError,
-  UnsupportedCapabilityError,
-  EpochFencedError,
-  OperationNotActiveError,
-  DuplicateOperationError,
-  OperationIdConflictError,
-  RecoveryRequiredError,
-  computeInputFingerprint,
-  normalizeResourceName,
-  ProcessOperationResult,
-  IndeterminateResult,
-  CapabilityViolationError,
-  ObservationEntry,
-  ObservationValidation,
-  GitShadowSnapshotDriver,
+  type IndeterminateResult,
+  type ObservationEntry,
+  type ObservationValidation,
+  type PlatformDriver,
+  type ProcessOperationResult,
 } from '../index.js';
+import { GitShadowSnapshotDriver } from '../snapshot/git-shadow.js';
+import { SqliteStore } from '../store/sqlite.js';
+import { computeInputFingerprint, normalizeResourceName } from '../supervisor/supervisor.js';
+import {
+  CapabilityViolationError,
+  DuplicateOperationError,
+  EpochFencedError,
+  OperationIdConflictError,
+  OperationNotActiveError,
+  RecoveryRequiredError,
+  UnsupportedCapabilityError,
+} from '../types.js';
 
 export interface ConsumerContext {
   domain: ExecutionDomain;

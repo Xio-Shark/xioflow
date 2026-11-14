@@ -11,15 +11,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import * as kernelRoot from '@xioflow/kernel';
 import {
-  AgentRuntime,
   DomainLockedError,
   ExecutionDomain,
+  KernelMedium,
   NodePlatformDriver,
   ProcessSupervisor,
   ReaperPlatformDriver,
   RecoveryEngine,
+  WorkspaceArbiterClient,
+  connectWorkspace,
 } from '@xioflow/kernel';
+import { createSurfaceDispatcher, toMcpTools } from '@xioflow/kernel/surface';
+import { redactPromptText } from '@xioflow/kernel/wrap';
 import { execute as executeIsa } from '@xioflow/kernel/isa';
 
 let checks = 0;
@@ -73,79 +78,41 @@ try {
   assert.equal(store.getJournalEvents(domain.domainId).length, eventsBeforePlan);
   ok('packaged ISA preview SDK', 'public subpath resolves; structural plan does not write journal');
 
-  ensureRun('agent-smoke');
-  let commandContext;
-  const agents = new AgentRuntime(domain, {
-    maxConcurrentAgents: 1,
-    step: async (agent, execution) => {
-      commandContext = execution;
-      for (const opId of ['packaged-command-1', 'packaged-command-2']) {
-        void execution.executeProcess({
-          opId, name: opId,
-          command: { execPath: process.execPath, args: ['-e', 'process.stdout.write("managed")'], cwd: workspace },
-        });
-      }
-      return { status: 'completed', checkpoint: { prior: agent.checkpoint } };
-    },
-  });
-  agents.create({ id: 'packaged-agent', runId: 'agent-smoke', input: null, checkpoint: { turn: 0 }, maxSteps: 2 });
-  agents.pause('packaged-agent');
-  await agents.recoverCheckpoint('packaged-agent', async (checkpoints) => ({ seq: checkpoints[0].seq }));
-  assert.equal(agents.get('packaged-agent').status, 'paused');
-  agents.resume('packaged-agent');
-  await agents.drain();
-  assert.equal(agents.get('packaged-agent').status, 'completed');
-  assert.equal(agents.get('packaged-agent').stepsUsed, 1);
-  agents.close();
-  ok('packaged agent runtime', 'recovery, checkpoint and step budget persisted');
-  for (const opId of ['packaged-command-1', 'packaged-command-2']) {
-    assert.equal(store.getOperation(opId).result.status, 'succeeded');
-    assert.equal(store.getOperation(opId).runId, 'agent-smoke');
-    assert.equal(store.getJournalEvents(domain.domainId).find((event) => event.type === 'AGENT_OPERATION_REQUESTED' && event.operationId === opId).payload.agentId, 'packaged-agent');
+  const rootExports = Object.keys(kernelRoot);
+  assert.ok(rootExports.length <= 15, `expected <= 15 root exports, got ${rootExports.length}: ${rootExports.join(', ')}`);
+  assert.equal('SqliteStore' in kernelRoot, false);
+  assert.equal('AgentRuntime' in kernelRoot, false);
+  ok('narrowed @xioflow/kernel root surface', `${rootExports.length} symbols (<=15)`);
+
+  assert.deepEqual(toMcpTools().map((t) => t.name), ['run', 'edit', 'inspect', 'branch']);
+  assert.match(redactPromptText('secret-prompt'), /^\[redacted:sha256=[0-9a-f]{16}:bytes=13\]$/);
+  ok('packaged @xioflow/kernel/surface & /wrap subpaths', '4 golden primitives + prompt redaction');
+
+  const mediumWs = path.join(workspace, 'medium-ws');
+  const mediumDom = path.join(workspace, 'medium-dom');
+  fs.mkdirSync(mediumWs, { recursive: true });
+  fs.writeFileSync(path.join(mediumWs, 'hello.txt'), 'line-1\nline-2\n');
+  const clientA = await connectWorkspace(mediumWs, { domainPath: mediumDom });
+  const clientB = await connectWorkspace(mediumWs, { domainPath: mediumDom });
+  try {
+    const surfA = createSurfaceDispatcher(clientA);
+    const surfB = createSurfaceDispatcher(clientB);
+    const inspected = await surfB.call('inspect', { target: 'hello.txt' });
+    assert.ok(String(inspected.content).includes('1|line-1'));
+    const edited = await surfA.call('edit', { path: 'hello.txt', oldText: 'line-1', newText: 'updated-1' });
+    assert.equal(edited.status, 'committed');
+    const stale = await surfB.call('edit', { path: 'hello.txt', content: 'blind\n' });
+    assert.equal(stale.status, 'conflict');
+  } finally {
+    await clientB.close();
+    if (clientA instanceof WorkspaceArbiterClient) {
+      await clientA.shutdownArbiter();
+    } else {
+      await clientA.close();
+    }
   }
-  await assert.rejects(commandContext.executeProcess({
-    opId: 'late-command', name: 'late', command: { execPath: process.execPath, args: [], cwd: workspace },
-  }), /context is closed/);
-  ok('packaged agent commands', 'unawaited batch settled, ownership persisted, expired context rejected');
-
-  const stoppingAgents = new AgentRuntime(domain, {
-    maxConcurrentAgents: 1,
-    step: async () => { throw new Error('Shutdown must not dispatch queued work'); },
-  });
-  stoppingAgents.create({ id: 'packaged-shutdown', runId: 'agent-smoke', input: null, checkpoint: 0, maxSteps: 2 });
-  const stopping = stoppingAgents.shutdown();
-  assert.equal(stoppingAgents.shutdown(), stopping);
-  assert.throws(() => stoppingAgents.drain(), /shutting down/);
-  await stopping;
-  const reopenedAgents = new AgentRuntime(domain, {
-    maxConcurrentAgents: 1,
-    step: async () => ({ status: 'completed', checkpoint: 1 }),
-  });
-  assert.equal(reopenedAgents.get('packaged-shutdown').status, 'paused');
-  assert.equal(reopenedAgents.get('packaged-shutdown').reason, 'shutdown');
-  assert.equal(reopenedAgents.get('packaged-shutdown').stepsUsed, 0);
-  reopenedAgents.close();
-  ok('packaged agent shutdown', 'admission closed before dispatch, queued state persisted, runtime ownership released');
-
-  ensureRun('scope-smoke');
-  const scopes = new AgentRuntime(domain, {
-    maxConcurrentAgents: 1,
-    runBudget: { maxSteps: 2, maxAgents: 2, maxPendingCommands: 1 },
-    validate: async () => 'valid', workspaceVersion: () => 'tree-1',
-    step: async (agent) => {
-      assert.equal(agent.validatedWorkspaceVersion, 'tree-1');
-      if (agent.id === 'scope-parent') scopes.create({ id: 'scope-child', parentId: agent.id, runId: 'scope-smoke', input: null, checkpoint: 0, maxSteps: 2 });
-      else assert.equal(scopes.get('scope-parent').status, 'waiting');
-      return { status: 'completed', checkpoint: 1 };
-    },
-  });
-  scopes.create({ id: 'scope-parent', runId: 'scope-smoke', input: null, checkpoint: 0, maxSteps: 2 });
-  await scopes.drain();
-  assert.equal(scopes.get('scope-parent').status, 'completed');
-  assert.equal(scopes.getRunUsage('scope-smoke').stepsUsed, 2);
-  assert.throws(() => scopes.create({ id: 'scope-overflow', runId: 'scope-smoke', input: null, checkpoint: 0, maxSteps: 2 }), /Run agent budget/);
-  await scopes.shutdown();
-  ok('packaged agent scopes', 'single-slot join, shared budget and validated revision');
+  assert.equal(typeof KernelMedium.open, 'function');
+  ok('packaged connectWorkspace + Micro-Arbiter + Golden Surface', 'concurrent clients + dirty-read guard');
 
   // 0. Boundary failure is actionable: operations cannot attach to an unknown run.
   assert.throws(

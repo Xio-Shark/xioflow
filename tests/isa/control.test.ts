@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ExecutionDomain, IsaControlPlane } from '../../src/index.js';
+import { ExecutionDomain } from '../../src/index.js';
+import { IsaControlPlane } from '../../src/isa/control.js';
 
 describe('ISA control plane', () => {
   const roots: string[] = [];

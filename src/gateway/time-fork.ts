@@ -76,6 +76,7 @@ export interface ForkGatewayRunOptions {
   tape?: WrapAgentOptions['tape'];
   forkRunId?: string;
   inheritStdio?: boolean;
+  persistRawPrompts?: boolean;
 }
 
 export interface ForkGatewayRunResult {
@@ -92,6 +93,10 @@ export interface ForkGatewayRunResult {
 }
 
 function summarizePrompt(turn: Partial<RecordedGatewayTurn>): string {
+  if (turn.promptsRedacted) {
+    const reqHash = (turn.requestBody as any)?.sha256 ?? 'redacted';
+    return `[redacted prompt: sha256=${reqHash}]`;
+  }
   const conv = turn.parsedRequest?.conversation;
   if (Array.isArray(conv) && conv.length > 0) {
     for (let i = conv.length - 1; i >= 0; i--) {
@@ -392,6 +397,7 @@ export async function forkGatewayRunAtStep(options: ForkGatewayRunOptions): Prom
         tape: options.tape,
         http304Cache: forkCacheAdapter,
         inheritStdio: options.inheritStdio,
+        persistRawPrompts: options.persistRawPrompts,
         async onShellExecOverride({ turnIndex, defaultExec }) {
           if (turnIndex < prefixTurnLimit) {
             const origStep = trace.steps[turnIndex];

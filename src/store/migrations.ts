@@ -16,7 +16,7 @@ interface MigrationRow {
   state: 'applying' | 'applied';
 }
 
-export const STORE_SCHEMA_VERSION = 6;
+export const STORE_SCHEMA_VERSION = 7;
 
 function columns(db: DatabaseSync, table: string): Set<string> {
   return new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((column) => column.name));
@@ -87,20 +87,56 @@ function migrateConfigSnapshots(db: DatabaseSync): void {
   ensureColumn(db, 'operations', 'config_snapshot', 'TEXT');
 }
 
+function migrateOperationBindingsAndIndexes(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS operation_bindings (
+      domain_id TEXT NOT NULL,
+      op_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      program_id TEXT NOT NULL,
+      instruction_id TEXT NOT NULL,
+      opcode TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (domain_id, op_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_operation_bindings_program_inst ON operation_bindings(domain_id, run_id, instruction_id);
+    CREATE INDEX IF NOT EXISTS idx_journal_events_domain_op ON journal_events(domain_id, operation_id, seq);
+    CREATE INDEX IF NOT EXISTS idx_journal_events_domain_tx ON journal_events(domain_id, json_extract(payload, '$.txId'), seq);
+    INSERT OR IGNORE INTO operation_bindings (
+      domain_id, op_id, run_id, program_id, instruction_id, opcode, fingerprint, created_at
+    )
+    SELECT
+      domain_id,
+      operation_id,
+      COALESCE(run_id, json_extract(payload, '$.programId'), ''),
+      COALESCE(json_extract(payload, '$.programId'), run_id, ''),
+      COALESCE(json_extract(payload, '$.instructionId'), ''),
+      COALESCE(json_extract(payload, '$.opcode'), ''),
+      COALESCE(json_extract(payload, '$.fingerprint'), ''),
+      timestamp
+    FROM journal_events
+    WHERE type = 'ISA_INSTRUCTION_BOUND' AND operation_id IS NOT NULL
+    ORDER BY seq ASC;
+  `);
+}
+
 const checksum = crypto.createHash('sha256').update('xioflow-store-migration:1:legacy-schema').digest('hex');
 const eventEnvelopeChecksum = crypto.createHash('sha256').update('xioflow-store-migration:2:event-envelope').digest('hex');
 const recoveryEvidenceChecksum = crypto.createHash('sha256').update('xioflow-store-migration:3:recovery-evidence').digest('hex');
 const capabilityV1Checksum = crypto.createHash('sha256').update('xioflow-store-migration:4:capability-v1').digest('hex');
 const artifactOwnershipChecksum = crypto.createHash('sha256').update('xioflow-store-migration:5:artifact-ownership').digest('hex');
 const configSnapshotsChecksum = crypto.createHash('sha256').update('xioflow-store-migration:6:config-snapshots').digest('hex');
+const operationBindingsChecksum = crypto.createHash('sha256').update('xioflow-store-migration:7:operation-bindings-and-indexes').digest('hex');
 
 export const STORE_MIGRATIONS: readonly StoreMigration[] = Object.freeze([
   { version: 1, name: 'legacy-schema', checksum, up: migrateLegacySchema },
-  { version: 2, name: 'event-envelope', checksum: eventEnvelopeChecksum, up: migrateEventEnvelope },
-  { version: 3, name: 'recovery-evidence', checksum: recoveryEvidenceChecksum, up: migrateRecoveryEvidence },
-  { version: 4, name: 'capability-v1', checksum: capabilityV1Checksum, up: migrateCapabilityV1 },
-  { version: 5, name: 'artifact-ownership', checksum: artifactOwnershipChecksum, up: migrateArtifactOwnership },
-  { version: 6, name: 'config-snapshots', checksum: configSnapshotsChecksum, up: migrateConfigSnapshots },
+  { version: 2, name: 'event-envelope', checksum, up: migrateEventEnvelope },
+  { version: 3, name: 'recovery-evidence', checksum, up: migrateRecoveryEvidence },
+  { version: 4, name: 'capability-v1', checksum, up: migrateCapabilityV1 },
+  { version: 5, name: 'artifact-ownership', checksum, up: migrateArtifactOwnership },
+  { version: 6, name: 'config-snapshots', checksum, up: migrateConfigSnapshots },
+  { version: 7, name: 'operation-bindings-and-indexes', checksum: operationBindingsChecksum, up: migrateOperationBindingsAndIndexes },
 ]);
 
 function userVersion(db: DatabaseSync): number {

@@ -1,0 +1,10 @@
+{
+  "name": "@xioflow/xio-reaper",
+  "version": "1.0.0",
+  "description": "Standalone C11 process-tree subreaper, pidfd/kqueue supervisor, and LD_PRELOAD VFS tracer speaking xio-reaper/1",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "node ./build.mjs"
+  }
+}

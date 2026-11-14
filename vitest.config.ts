@@ -14,8 +14,12 @@ export default defineConfig({
     globals: true,
   },
   resolve: {
-    alias: {
-      '@xioflow/kernel': path.resolve(import.meta.dirname, './src/index.ts'),
-    },
+    alias: [
+      { find: '@xioflow/kernel/surface', replacement: path.resolve(import.meta.dirname, './src/surface/index.ts') },
+      { find: '@xioflow/kernel/wrap', replacement: path.resolve(import.meta.dirname, './src/wrap/index.ts') },
+      { find: '@xioflow/kernel/otel', replacement: path.resolve(import.meta.dirname, './src/otel/index.ts') },
+      { find: '@xioflow/kernel/isa', replacement: path.resolve(import.meta.dirname, './src/isa/public.ts') },
+      { find: '@xioflow/kernel', replacement: path.resolve(import.meta.dirname, './src/index.ts') },
+    ],
   },
 });

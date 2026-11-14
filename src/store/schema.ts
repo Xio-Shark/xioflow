@@ -141,9 +141,24 @@ CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status);
 CREATE INDEX IF NOT EXISTS idx_resource_leases_op ON resource_leases(operation_id);
 CREATE INDEX IF NOT EXISTS idx_journal_events_domain ON journal_events(domain_id);
 CREATE INDEX IF NOT EXISTS idx_journal_events_domain_type_seq ON journal_events(domain_id, type, seq);
+CREATE INDEX IF NOT EXISTS idx_journal_events_domain_op ON journal_events(domain_id, operation_id, seq);
+CREATE INDEX IF NOT EXISTS idx_journal_events_domain_tx ON journal_events(domain_id, json_extract(payload, '$.txId'), seq);
 CREATE INDEX IF NOT EXISTS idx_snapshots_domain ON snapshots(domain_id);
 CREATE INDEX IF NOT EXISTS idx_snapshots_journal_seq ON snapshots(journal_seq);
 CREATE INDEX IF NOT EXISTS idx_capabilities_domain ON capabilities(domain_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_domain_path ON artifacts(domain_id, path);
 CREATE INDEX IF NOT EXISTS idx_artifacts_domain_state ON artifacts(domain_id, deletion_state);
+
+CREATE TABLE IF NOT EXISTS operation_bindings (
+  domain_id TEXT NOT NULL,
+  op_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  program_id TEXT NOT NULL,
+  instruction_id TEXT NOT NULL,
+  opcode TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (domain_id, op_id)
+);
+CREATE INDEX IF NOT EXISTS idx_operation_bindings_program_inst ON operation_bindings(domain_id, run_id, instruction_id);
 `;

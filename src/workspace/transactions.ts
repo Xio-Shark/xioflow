@@ -657,10 +657,7 @@ export class WorkspaceTransactions {
 
   private journal(txId: string): JournalEvent[] {
     const { domain } = this.host;
-    return domain
-      .getStore()
-      .getJournalEvents(domain.domainId)
-      .filter((e) => e.type.startsWith('TX_') && e.payload.txId === txId);
+    return domain.getStore().getTransactionEvents(domain.domainId, txId);
   }
 
   /** 内存里没有时从 journal 重建（例如 TX_COMMITTING 之后监督进程崩溃重启），已结束的事务不可再用。 */

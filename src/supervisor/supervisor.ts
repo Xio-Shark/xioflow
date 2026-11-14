@@ -297,7 +297,13 @@ export class ProcessSupervisor {
         waitTimeoutMs: options.waitTimeoutMs,
         resourceBudget: options.resourceBudget,
         confinement: typeof options.confinement === 'string' ? options.confinement : options.confinement === true ? 'default' : undefined,
-        trackReads: options.trackReads ? { roots: [...options.trackReads.roots].sort(), statCaches: options.trackReads.statCaches } : undefined,
+        trackReads: options.trackReads
+          ? {
+              roots: [...options.trackReads.roots].sort(),
+              statCaches: options.trackReads.statCaches,
+              ...(options.trackReads.mode ? { mode: options.trackReads.mode } : {}),
+            }
+          : undefined,
       },
     });
     this.domain.getStore().bindRunConfigSnapshot(options.runId, configSnapshot);
@@ -329,7 +335,11 @@ export class ProcessSupervisor {
       configSnapshot,
       status: 'pending',
     };
-    const readTracking = options.trackReads ? this.readTracker.open(options.opId, options.trackReads) : undefined;
+    const useVfs =
+      options.trackReads !== undefined &&
+      options.trackReads.mode !== 'atime' &&
+      (options.trackReads.mode === 'vfs' || this.driver.capabilities.vfsTracing === true);
+    const readTracking = options.trackReads ? this.readTracker.open(options.opId, options.trackReads, { useVfs }) : undefined;
     const opState = this.trackOperation(options, inputFingerprint, startTime);
     const executionPromise = runProcess(this.runContext, {
       options,

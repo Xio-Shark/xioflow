@@ -4,14 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from 'vitest';
-import {
-  ExecutionDomain,
-  ProcessSupervisor,
-  computeInputFingerprint,
-  quickRun,
-} from '../../src/index.js';
+import { ExecutionDomain, ProcessSupervisor } from '../../src/index.js';
+import { computeInputFingerprint } from '../../src/supervisor/supervisor.js';
+import { quickRun } from '../../src/quick-run.js';
 import type {
-  AgentCommandResult,
   IndeterminateResult,
   ProcessExecutionResult,
   ProcessOperationResult,
@@ -65,7 +61,6 @@ describe('public process execution result contract', () => {
   it('exports the same complete union from every execution facade while preserving exact finalization types', () => {
     expectTypeOf<ReturnType<ProcessSupervisor['executeProcess']>>().toEqualTypeOf<Promise<ProcessExecutionResult>>();
     expectTypeOf<ReturnType<typeof quickRun>>().toEqualTypeOf<Promise<ProcessExecutionResult>>();
-    expectTypeOf<AgentCommandResult>().toEqualTypeOf<ProcessExecutionResult>();
     expectTypeOf(finalizeOperation<ProcessOperationResult>).returns.toEqualTypeOf<ProcessOperationResult>();
     expectTypeOf(finalizeOperation<IndeterminateResult>).returns.toEqualTypeOf<IndeterminateResult>();
 
