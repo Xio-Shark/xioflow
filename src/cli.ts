@@ -1,43 +1,244 @@
 #!/usr/bin/env node
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { parseArgs } from 'node:util';
+import { fileURLToPath } from 'node:url';
+import { parseArgs, promisify } from 'node:util';
 import { SqliteStore } from './store/sqlite.js';
 import { KernelMcpServer } from './mcp/server.js';
 import { exportJournalToOtlp } from './otel/otlp.js';
 import { wrapAgent } from './gateway/shell-shim.js';
-import { LandlockConfinementDriver } from './confinement/landlock.js';
+import { createConfinementDriver, detectAvailableConfinementDrivers, LandlockConfinementDriver } from './confinement/index.js';
+import { CgroupPlatformDriver } from './driver/cgroup-driver.js';
+import { locateNativeShimLibrary, locateReaperHelper, ReaperPlatformDriver } from './driver/reaper-driver.js';
+import { defaultDomainPathForWorkspace, KernelMedium } from './kernel/medium.js';
+import { isProcessAlive, readArbiterManifest } from './arbiter/protocol.js';
 import { raceAgentsInVirtualWorkspaces, runInVirtualWorkspace } from './gateway/virtual-workspace.js';
 import { forkGatewayRunAtStep, formatGatewayRunTrace, traceGatewayRun } from './gateway/time-fork.js';
 import { executeIsaProgram, isaResultExitCode } from './adapters/isa.js';
 import { connectWorkspace, WorkspaceArbiterClient, WorkspaceArbiterServer } from './arbiter/index.js';
 
-const USAGE = `usage:
-  xio plan --input <program.json|->
-      Preview: structurally validate an ISA Program without acquiring a domain or executing effects; no execution authority is implied.
-  xio execute --input <program.json|->
-      Submit an ISA Program through the preview adapter. Pipeline execution requires a host binding; the standalone CLI does not create one.
-  xio wrap [--domain <dir>] [--domain-id <id>] [--run-id <id>] [--upstream-url <url>]
-           [--shadow] [--gate <cmd>] [--timeout-ms <n>] [--max-output-bytes <n>] [--] <agent-cmd> [args...]
-      Wrap an external agent process in a dual-boundary supervised gateway (optionally inside a shadow worktree).
-  xio race [--domain <dir>] [--domain-id <id>] [--gate <cmd>] [--mode winner|merge] -- <cmd1> <cmd2> [...]
-      Run multiple candidate agent commands in isolated shadow worktrees and reconcile via OCC + Early Cutoff.
-  xio trace <runId> [--domain <dir>] [--domain-id <id>] [--json]
-      Inspect the Flight Recorder Trace (LLM turns, tool calls, git-shadow snapshots, and HTTP-304 status) for a run.
-  xio fork <runId> --at-step <N> [--fork-path <dir>] [--domain <dir>] [--domain-id <id>] [-- <new-agent-cmd> [args...]]
-      Materialize the workspace snapshot from step N into an isolated worktree and fast-forward steps 1..N-1 via HTTP-304.
-  xio status [--domain <dir>] [--json]
-      Connect to (or start) the workspace Micro-Arbiter and print live workspace, git, and managed process state.
-  xio arbiter <serve|stop> [--domain <dir>] [--domain-id <id>] [--idle-timeout-ms <n>]
-      Explicitly serve or stop the workspace-scoped UDS Micro-Arbiter.
-  xioflow mcp [--workspace <dir>] [--domain <dir>] [--domain-id <id>] [--surface v2|legacy]
-              [--driver auto|node|reaper] [--otlp-endpoint <url>] [--otlp-header k=v ...] [--otlp-interval-ms <n>]
-      Serve the OS medium as an MCP server on stdio (4 golden primitives by default via shared Micro-Arbiter).
-  xioflow otel-export --otlp-endpoint <url> [--domain <dir>] [--domain-id <id>] [--from-seq <n>]
-                      [--otlp-header k=v ...] [--service-name <name>]
-      Export the domain journal as OTLP traces once (read-only; works while a server holds the domain).
+const execFileAsync = promisify(execFile);
 
-  --domain defaults to ./.xioflow-kernel`;
+const USAGE = `usage:
+  OS Medium & Arbiter:
+    xioflow mcp [--workspace <dir>] [--domain <dir>] [--domain-id <id>] [--surface v2|legacy]
+                [--driver auto|node|reaper] [--otlp-endpoint <url>] [--otlp-header k=v ...] [--otlp-interval-ms <n>]
+        Serve the OS medium as an MCP server on stdio (4 golden primitives by default via shared Micro-Arbiter).
+    xio status [--domain <dir>] [--domain-id <id>] [--json]
+        Connect to (or start) the workspace Micro-Arbiter and print live workspace, git, and managed process state.
+    xio doctor [--workspace <dir>] [--domain <dir>] [--json]
+        Inspect Node, git, native reaper/shim, OS confinement drivers, cgroup v2, and arbiter socket readiness.
+    xio prune [--workspace <dir>] [--domain <dir>] [--domain-id <id>] [--max-age-hours <n>] [--json]
+        Prune expired artifacts, unreferenced spill/log blobs, and orphaned transaction forks (default >24h).
+    xio arbiter <serve|stop> [--domain <dir>] [--domain-id <id>] [--idle-timeout-ms <n>]
+        Explicitly serve or stop the workspace-scoped UDS Micro-Arbiter.
+
+  Agent Gateway & Time-Travel:
+    xio wrap [--domain <dir>] [--domain-id <id>] [--run-id <id>] [--upstream-url <url>]
+             [--shadow] [--gate <cmd>] [--timeout-ms <n>] [--max-output-bytes <n>] [--] <agent-cmd> [args...]
+        Wrap an external agent process in a dual-boundary supervised gateway (optionally inside a shadow worktree).
+    xio race [--domain <dir>] [--domain-id <id>] [--gate <cmd>] [--mode winner|merge] -- <cmd1> <cmd2> [...]
+        Run multiple candidate agent commands in isolated shadow worktrees and reconcile via OCC + Early Cutoff.
+    xio trace <runId> [--domain <dir>] [--domain-id <id>] [--json]
+        Inspect the Flight Recorder Trace (LLM turns, tool calls, git-shadow snapshots, and HTTP-304 status) for a run.
+    xio fork <runId> --at-step <N> [--fork-path <dir>] [--domain <dir>] [--domain-id <id>] [-- <new-agent-cmd> [args...]]
+        Materialize the workspace snapshot from step N into an isolated worktree and fast-forward steps 1..N-1 via HTTP-304.
+    xioflow otel-export --otlp-endpoint <url> [--domain <dir>] [--domain-id <id>] [--from-seq <n>]
+                        [--otlp-header k=v ...] [--service-name <name>]
+        Export the domain journal as OTLP traces once (read-only; works while a server holds the domain).
+
+  Preview Adapter:
+    xio plan --input <program.json|->
+        Preview: structurally validate an ISA Program without acquiring a domain or executing effects.
+    xio execute --input <program.json|->
+        Submit an ISA Program through the preview adapter (requires host binding).
+
+  General:
+    xio --help | -h          Show this help text
+    xio --version | -v       Show package version
+
+  --domain defaults to the workspace domain under ~/.xioflow/domains/<hash> (or ./.xioflow-kernel for legacy/gateway commands)`;
+
+function readPackageMeta(): { name: string; version: string } {
+  try {
+    const pkgPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../package.json');
+    const raw = JSON.parse(fs.readFileSync(pkgPath, 'utf8')) as { name?: string; version?: string };
+    return { name: raw.name ?? '@xioflow/kernel', version: raw.version ?? '0.0.0' };
+  } catch {
+    return { name: '@xioflow/kernel', version: '0.0.0' };
+  }
+}
+
+async function runDoctorCommand(rest: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: rest,
+    options: {
+      workspace: { type: 'string' },
+      domain: { type: 'string' },
+      json: { type: 'boolean' },
+    },
+    strict: true,
+  });
+  const meta = readPackageMeta();
+  const workspace = path.resolve(values.workspace ?? process.cwd());
+  const resolvedDomain = values.domain ? path.resolve(values.domain) : defaultDomainPathForWorkspace(workspace);
+  const directSocket = path.join(resolvedDomain, 'arb.sock');
+  const directSocketBytes = Buffer.byteLength(directSocket, 'utf8');
+
+  const [majorStr, minorStr] = process.versions.node.split('.');
+  const nodeMajor = Number(majorStr);
+  const nodeMinor = Number(minorStr);
+  const nodeOk = nodeMajor > 22 || (nodeMajor === 22 && nodeMinor >= 13);
+
+  let gitVersion: string | null = null;
+  try {
+    const { stdout } = await execFileAsync('git', ['--version'], { timeout: 2000, encoding: 'utf8' });
+    gitVersion = stdout.trim();
+  } catch {}
+
+  const reaperPath = locateReaperHelper();
+  const shimPath = locateNativeShimLibrary();
+  const reaperAvailable = ReaperPlatformDriver.isAvailable();
+  let reaperProtocol: unknown = null;
+  if (reaperAvailable) {
+    try {
+      reaperProtocol = await new ReaperPlatformDriver().getProtocolInfo();
+    } catch {}
+  }
+
+  if (process.platform === 'linux') {
+    await LandlockConfinementDriver.probe();
+  }
+  const confinementDrivers = detectAvailableConfinementDrivers();
+  const recommendedConfinement = createConfinementDriver()?.name ?? null;
+  const cgroupReason = CgroupPlatformDriver.unavailableReason();
+
+  const warnings: string[] = [];
+  if (!nodeOk) warnings.push(`Node ${process.version} is below >=22.13.0`);
+  if (!gitVersion) warnings.push('git executable not found (git-shadow snapshots & vfs_tx isolated branches unavailable)');
+  if (!reaperAvailable) warnings.push('native xioflow-reaper not found; falling back to NodePlatformDriver');
+  if (confinementDrivers.length === 0) warnings.push('no OS write confinement driver detected');
+
+  const report = {
+    package: meta.name,
+    version: meta.version,
+    platform: `${process.platform}-${process.arch}`,
+    node: { version: process.version, supported: nodeOk },
+    git: { available: gitVersion !== null, version: gitVersion },
+    driver: {
+      default: reaperAvailable ? 'reaper' : 'node',
+      reaperAvailable,
+      reaperPath,
+      reaperProtocol,
+      nativeShimPath: shimPath,
+      cgroupV2: { available: cgroupReason === null, unavailableReason: cgroupReason },
+    },
+    confinement: {
+      availableDrivers: confinementDrivers,
+      recommended: recommendedConfinement,
+      landlockAbi: LandlockConfinementDriver.getAbiVersion(),
+    },
+    arbiterSocket: {
+      domainPath: resolvedDomain,
+      directPath: directSocket,
+      directPathBytes: directSocketBytes,
+      usesShortRunFallback: directSocketBytes > 96,
+    },
+    ready: nodeOk && gitVersion !== null,
+    warnings,
+  };
+
+  if (values.json) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  } else {
+    const lines = [
+      `${meta.name} v${meta.version} (${report.platform})`,
+      `node:        ${report.node.version} (${report.node.supported ? 'ok' : 'unsupported <22.13.0'})`,
+      `git:         ${report.git.version ?? 'MISSING'}`,
+      `driver:      ${report.driver.default} (reaper=${reaperAvailable ? 'yes' : 'no'}, shim=${shimPath ? 'yes' : 'no'})`,
+      `confinement: ${confinementDrivers.length > 0 ? confinementDrivers.join(', ') : 'none'} (recommended=${recommendedConfinement ?? 'none'})`,
+      `cgroup v2:   ${report.driver.cgroupV2.available ? 'available' : `unavailable (${cgroupReason ?? 'unknown'})`}`,
+      `arbiter ipc: ${report.arbiterSocket.usesShortRunFallback ? 'short fallback (~/.xioflow/run)' : directSocket} (${directSocketBytes} bytes)`,
+      ...(warnings.length > 0 ? [`warnings:    ${warnings.join('; ')}`] : []),
+    ];
+    process.stdout.write(`${lines.join('\n')}\n`);
+  }
+  process.exitCode = report.ready ? 0 : 1;
+}
+
+async function runPruneCommand(rest: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: rest,
+    options: {
+      workspace: { type: 'string' },
+      domain: { type: 'string' },
+      'domain-id': { type: 'string' },
+      'max-age-hours': { type: 'string' },
+      json: { type: 'boolean' },
+    },
+    strict: true,
+  });
+  const workspace = fs.realpathSync(path.resolve(values.workspace ?? process.cwd()));
+  const domainPath = values.domain ? path.resolve(values.domain) : defaultDomainPathForWorkspace(workspace);
+  const maxAgeHours = values['max-age-hours'] !== undefined ? Number(values['max-age-hours']) : 24;
+  if (!Number.isFinite(maxAgeHours) || maxAgeHours < 0) {
+    throw new Error('--max-age-hours must be a non-negative number');
+  }
+  const maxAgeMs = Math.round(maxAgeHours * 60 * 60 * 1000);
+
+  const manifest = readArbiterManifest(domainPath);
+  const liveArbiter = manifest !== null && isProcessAlive(manifest.pid);
+  const dbExists = fs.existsSync(path.join(domainPath, 'domain.db'));
+
+  if (!liveArbiter && !dbExists) {
+    const emptyRes = {
+      skipped: true,
+      reason: 'no kernel domain found',
+      domainPath,
+      deletedArtifacts: 0,
+      deletedBlobs: 0,
+      deletedForks: 0,
+      freedBytes: 0,
+    };
+    process.stdout.write(
+      values.json ? `${JSON.stringify(emptyRes, null, 2)}\n` : `prune skipped: no kernel domain at ${domainPath}\n`,
+    );
+    return;
+  }
+
+  let res: { deletedArtifacts: number; deletedBlobs: number; deletedForks: number; freedBytes: number };
+  if (liveArbiter) {
+    const medium = await connectWorkspace(workspace, {
+      domainPath,
+      domainId: values['domain-id'],
+      mode: 'arbiter',
+    });
+    try {
+      res = await (medium as WorkspaceArbiterClient).prune({ maxAgeMs });
+    } finally {
+      await medium.close();
+    }
+  } else {
+    const medium = await KernelMedium.open(workspace, {
+      domainPath,
+      domainId: values['domain-id'],
+    });
+    try {
+      res = medium.prune({ maxAgeMs });
+    } finally {
+      await medium.close();
+    }
+  }
+
+  if (values.json) {
+    process.stdout.write(`${JSON.stringify({ domainPath, maxAgeHours, ...res }, null, 2)}\n`);
+  } else {
+    process.stdout.write(
+      `pruned ${domainPath}: ${res.deletedArtifacts} artifacts, ${res.deletedBlobs} blobs, ${res.deletedForks} forks (${res.freedBytes} bytes freed)\n`,
+    );
+  }
+}
 
 function headers(values: string[] | undefined): Record<string, string> {
   const out: Record<string, string> = {};
@@ -97,8 +298,39 @@ function splitWrapArgs(args: string[]): { wrapArgs: string[]; agentArgv: string[
   return { wrapArgs, agentArgv: [] };
 }
 
+const HELP_SUBCOMMANDS = new Set(['status', 'doctor', 'prune', 'arbiter', 'mcp', 'otel-export', 'trace', 'plan', 'execute']);
+
 async function main(): Promise<void> {
   const [command, ...rest] = process.argv.slice(2);
+  if (!command) {
+    process.stderr.write(`${USAGE}\n`);
+    process.exitCode = 0;
+    return;
+  }
+  if (command === '--help' || command === '-h' || command === 'help') {
+    process.stdout.write(`${USAGE}\n`);
+    process.exitCode = 0;
+    return;
+  }
+  if (command === '--version' || command === '-v' || command === 'version') {
+    const meta = readPackageMeta();
+    process.stdout.write(`${meta.name} v${meta.version}\n`);
+    process.exitCode = 0;
+    return;
+  }
+  if (HELP_SUBCOMMANDS.has(command) && (rest.includes('--help') || rest.includes('-h'))) {
+    process.stdout.write(`${USAGE}\n`);
+    process.exitCode = 0;
+    return;
+  }
+  if (command === 'doctor') {
+    await runDoctorCommand(rest);
+    return;
+  }
+  if (command === 'prune') {
+    await runPruneCommand(rest);
+    return;
+  }
   if (command === 'plan' || command === 'execute') {
     const { values } = parseArgs({ args: rest, options: { input: { type: 'string' } }, strict: true });
     if (!values.input) throw new Error(`${command} requires --input <program.json|->`);
