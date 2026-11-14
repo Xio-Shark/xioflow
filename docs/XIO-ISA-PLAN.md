@@ -1274,6 +1274,7 @@ XIO-ISA v1 不做：
 ## 十九、执行版 TODO 与完整执行路径
 
 本节把路线图变成可跟踪的工程计划。所有任务默认在当前 TypeScript/Node.js 单宿主内核上完成。
+> **2026-11-05 状态核对**：`594ff0a` 已把 ISA preview（`@xioflow/kernel/isa`、CLI `plan`/`execute`、MCP `execute`、conformance 报告与交互研究套件）提交并推送到 `origin/main` 与 `forge/main`，未 bump version、未发 preview。服务器 `soft:/root/xf/xioflow-soak` 上另有一次独立 24h soak 跑满 86400s 且 PASS（16068 轮、零残留 PID / 租约泄漏 / 管线失败），结果已同步到本地 `audit/results/isa-soak-24h.json`；其 `source_head=3ce020a` 与 D-07 冻结的 `d7db412` 不同，7d profile 从未启动，因此 Gate 3 的 24h/7d 条件仍不能标完成。本清单 I-09、AD-04/05、Q-09/10、E-01~E-05 共 10 项保持 `[ ]`；FUTURE-01~04 按 §19.1 定义改用 `[!]`（复活条件，非当前欠账）。
 
 ### 19.1 状态标记与当前基线
 
@@ -1528,10 +1529,10 @@ Gate 5 通过条件：关键故障没有假成功、盲重放和未解释资源�
 
 ### 19.10 明确延后的方向
 
-- [ ] **FUTURE-01 Rust/语言绑定**：只有出现真实非 Node 宿主需求、性能瓶颈或独立实现压力，并完成 RFC、维护者和迁移预算后重开。
-- [ ] **FUTURE-02 daemon/跨进程仲裁**：只有多个外部框架在同一工作区真实冲突且 worktree 分域无法解决时重开；必须先补 IPC 身份、租约、client_lost 和威胁模型。
-- [ ] **FUTURE-03 Windows/远程执行**：先定义平台事实、隔离、artifact/secret 传输和 conformance；不能以 API 形状相同代替能力证明。
-- [ ] **FUTURE-04 分布式 opcode/driver 生态**：稳定 ABI、第三方 conformance 和维护治理完成前不建立中心注册表。
+- [!] **FUTURE-01 Rust/语言绑定**：只有出现真实非 Node 宿主需求、性能瓶颈或独立实现压力，并完成 RFC、维护者和迁移预算后重开。
+- [!] **FUTURE-02 daemon/跨进程仲裁**：只有多个外部框架在同一工作区真实冲突且 worktree 分域无法解决时重开；必须先补 IPC 身份、租约、client_lost 和威胁模型。
+- [!] **FUTURE-03 Windows/远程执行**：先定义平台事实、隔离、artifact/secret 传输和 conformance；不能以 API 形状相同代替能力证明。
+- [!] **FUTURE-04 分布式 opcode/driver 生态**：稳定 ABI、第三方 conformance 和维护治理完成前不建立中心注册表。
 
 ## 二十、逐任务执行模板、阶段门禁与验收场景
 
