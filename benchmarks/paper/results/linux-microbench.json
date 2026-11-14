@@ -1,0 +1,247 @@
+{
+  "benchmark": "microbench-baselines",
+  "env": {
+    "platform": "linux",
+    "arch": "x64",
+    "release": "6.18.33.2-microsoft-standard-WSL2",
+    "nodeVersion": "v22.23.3",
+    "cpuModel": "13th Gen Intel(R) Core(TM) i5-13490F",
+    "cpuCount": 16,
+    "totalMemGiB": 27.41,
+    "collectedAt": "2026-11-14T11:34:47.381Z"
+  },
+  "capabilities": {
+    "reaperAvailable": true,
+    "cgroupAvailable": true,
+    "landlockAbi": 7
+  },
+  "config": {
+    "iterations": 25,
+    "dockerIterations": 10,
+    "warmup": 3,
+    "output": "benchmarks/paper/results/linux-microbench.json"
+  },
+  "results": [
+    {
+      "name": "direct_child_process:noop",
+      "n": 25,
+      "meanMs": 0.842,
+      "stdMs": 0.071,
+      "minMs": 0.75,
+      "p50Ms": 0.815,
+      "p95Ms": 0.982,
+      "p99Ms": 1.002,
+      "maxMs": 1.005
+    },
+    {
+      "name": "direct_child_process:node10",
+      "n": 25,
+      "meanMs": 16.539,
+      "stdMs": 1.485,
+      "minMs": 14.528,
+      "p50Ms": 16.223,
+      "p95Ms": 19.083,
+      "p99Ms": 19.646,
+      "maxMs": 19.806
+    },
+    {
+      "name": "supervisor_node_driver:node10",
+      "n": 25,
+      "meanMs": 30.005,
+      "stdMs": 2.396,
+      "minMs": 26.542,
+      "p50Ms": 29.204,
+      "p95Ms": 34.004,
+      "p99Ms": 35.776,
+      "maxMs": 36.227
+    },
+    {
+      "name": "kernel_reaper:noop",
+      "n": 25,
+      "meanMs": 13.141,
+      "stdMs": 2.039,
+      "minMs": 10.441,
+      "p50Ms": 12.931,
+      "p95Ms": 15.76,
+      "p99Ms": 17.95,
+      "maxMs": 18.639
+    },
+    {
+      "name": "kernel_reaper:node10",
+      "n": 25,
+      "meanMs": 25.58,
+      "stdMs": 1.737,
+      "minMs": 23.146,
+      "p50Ms": 25.39,
+      "p95Ms": 28.341,
+      "p99Ms": 30.029,
+      "maxMs": 30.527
+    },
+    {
+      "name": "kernel_reaper_vfs_ldpreload:node10",
+      "n": 25,
+      "meanMs": 29.832,
+      "stdMs": 1.816,
+      "minMs": 27.255,
+      "p50Ms": 29.171,
+      "p95Ms": 33.019,
+      "p99Ms": 33.315,
+      "maxMs": 33.356
+    },
+    {
+      "name": "kernel_reaper_confinement:node10",
+      "n": 25,
+      "meanMs": 27.021,
+      "stdMs": 1.625,
+      "minMs": 23.917,
+      "p50Ms": 27.037,
+      "p95Ms": 29.193,
+      "p99Ms": 30.688,
+      "maxMs": 31.114
+    },
+    {
+      "name": "kernel_reaper_confinement_vfs:node10",
+      "n": 25,
+      "meanMs": 29.673,
+      "stdMs": 2.045,
+      "minMs": 26.933,
+      "p50Ms": 29.519,
+      "p95Ms": 32.104,
+      "p99Ms": 35.424,
+      "maxMs": 36.452
+    },
+    {
+      "name": "kernel_vfs_tx_isolated_commit",
+      "n": 10,
+      "meanMs": 104.11,
+      "stdMs": 3.893,
+      "minMs": 100.096,
+      "p50Ms": 103.072,
+      "p95Ms": 110.883,
+      "p99Ms": 112.684,
+      "maxMs": 113.134
+    },
+    {
+      "name": "kernel_vfs_tx_isolated_rollback",
+      "n": 10,
+      "meanMs": 57.925,
+      "stdMs": 4.171,
+      "minMs": 53.587,
+      "p50Ms": 56.293,
+      "p95Ms": 64.842,
+      "p99Ms": 66.023,
+      "maxMs": 66.318
+    },
+    {
+      "name": "supervisor_cgroup_v2:noop",
+      "n": 25,
+      "meanMs": 20.44,
+      "stdMs": 4.689,
+      "minMs": 15.332,
+      "p50Ms": 20.258,
+      "p95Ms": 25.957,
+      "p99Ms": 35.026,
+      "maxMs": 37.792
+    },
+    {
+      "name": "supervisor_cgroup_v2:node10",
+      "n": 25,
+      "meanMs": 42.211,
+      "stdMs": 10.834,
+      "minMs": 26.567,
+      "p50Ms": 40.626,
+      "p95Ms": 57.647,
+      "p99Ms": 65.065,
+      "maxMs": 67.256
+    },
+    {
+      "name": "kernel_cold_open_exec_close:noop",
+      "n": 12,
+      "meanMs": 40.702,
+      "stdMs": 1.472,
+      "minMs": 38.84,
+      "p50Ms": 40.745,
+      "p95Ms": 42.827,
+      "p99Ms": 44.19,
+      "maxMs": 44.531
+    },
+    {
+      "name": "arbiter_uds_rpc:noop",
+      "n": 25,
+      "meanMs": 14.02,
+      "stdMs": 2.208,
+      "minMs": 11.006,
+      "p50Ms": 13.231,
+      "p95Ms": 16.322,
+      "p99Ms": 19.139,
+      "maxMs": 20.012
+    },
+    {
+      "name": "arbiter_uds_rpc:node10",
+      "n": 25,
+      "meanMs": 26.462,
+      "stdMs": 1.788,
+      "minMs": 23.678,
+      "p50Ms": 27.051,
+      "p95Ms": 28.584,
+      "p99Ms": 29.972,
+      "maxMs": 30.4
+    },
+    {
+      "name": "docker_run_ephemeral_alpine:noop",
+      "n": 10,
+      "meanMs": 309.417,
+      "stdMs": 31.335,
+      "minMs": 272.019,
+      "p50Ms": 307.253,
+      "p95Ms": 357.705,
+      "p99Ms": 379.37,
+      "maxMs": 384.786
+    },
+    {
+      "name": "docker_exec_persistent_alpine:noop",
+      "n": 10,
+      "meanMs": 47.505,
+      "stdMs": 10.967,
+      "minMs": 33.01,
+      "p50Ms": 48.872,
+      "p95Ms": 61.25,
+      "p99Ms": 62.798,
+      "maxMs": 63.186
+    },
+    {
+      "name": "docker_run_ephemeral_node22:noop",
+      "n": 10,
+      "meanMs": 301.582,
+      "stdMs": 14.724,
+      "minMs": 277.744,
+      "p50Ms": 300.979,
+      "p95Ms": 322.515,
+      "p99Ms": 326.347,
+      "maxMs": 327.305
+    },
+    {
+      "name": "docker_run_ephemeral_node22:node10",
+      "n": 10,
+      "meanMs": 320.521,
+      "stdMs": 23.771,
+      "minMs": 292.591,
+      "p50Ms": 315.32,
+      "p95Ms": 362.555,
+      "p99Ms": 372.167,
+      "maxMs": 374.57
+    },
+    {
+      "name": "docker_exec_persistent_node22:node10",
+      "n": 10,
+      "meanMs": 69.536,
+      "stdMs": 8.511,
+      "minMs": 54.097,
+      "p50Ms": 70.768,
+      "p95Ms": 81.051,
+      "p99Ms": 86.578,
+      "maxMs": 87.96
+    }
+  ],
+  "skipped": []
+}

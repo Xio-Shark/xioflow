@@ -1,0 +1,91 @@
+{
+  "benchmark": "crash-idempotency-baselines",
+  "env": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "release": "27.0.0",
+    "nodeVersion": "v26.12.0",
+    "cpuModel": "Apple M4",
+    "cpuCount": 10,
+    "totalMemGiB": 16,
+    "collectedAt": "2026-11-14T11:49:44.703Z"
+  },
+  "config": {
+    "trials": 5,
+    "output": "benchmarks/paper/results/macos-crash.json"
+  },
+  "orphanEscape": [
+    {
+      "scenario": "S1_detached_setsid_orphan_on_crash",
+      "regime": "langgraph_checkpoint_only_spawn",
+      "trials": 5,
+      "orphanSurvived": 5,
+      "orphanSurvivalRatePct": 100,
+      "postCrashSideEffects": 5,
+      "confirmedTreeEmptyCount": 0,
+      "stopLatencyP50Ms": 1.101
+    },
+    {
+      "scenario": "S1_detached_setsid_orphan_on_crash",
+      "regime": "temporal_activity_retry_only_spawn",
+      "trials": 5,
+      "orphanSurvived": 5,
+      "orphanSurvivalRatePct": 100,
+      "postCrashSideEffects": 5,
+      "confirmedTreeEmptyCount": 0,
+      "stopLatencyP50Ms": 1.121
+    },
+    {
+      "scenario": "S1_detached_setsid_orphan_on_crash",
+      "regime": "xioflow_reaper_subreaper",
+      "trials": 5,
+      "orphanSurvived": 0,
+      "orphanSurvivalRatePct": 0,
+      "postCrashSideEffects": 0,
+      "confirmedTreeEmptyCount": 0,
+      "stopLatencyP50Ms": 208.198
+    }
+  ],
+  "replayAndDirtyTree": [
+    {
+      "scenario": "S2_S3_real_sigkill_before_checkpoint",
+      "regime": "langgraph_checkpoint_only",
+      "trials": 5,
+      "killsDelivered": 5,
+      "duplicateSideEffects": 5,
+      "duplicateRatePct": 100,
+      "dirtyCorruptRepos": 5,
+      "dirtyRatePct": 100
+    },
+    {
+      "scenario": "S2_S3_real_sigkill_before_checkpoint",
+      "regime": "temporal_retry_only",
+      "trials": 5,
+      "killsDelivered": 5,
+      "duplicateSideEffects": 5,
+      "duplicateRatePct": 100,
+      "dirtyCorruptRepos": 5,
+      "dirtyRatePct": 100
+    },
+    {
+      "scenario": "S2_S3_real_sigkill_before_checkpoint",
+      "regime": "xioflow_langgraph_opid_vfs_tx",
+      "trials": 5,
+      "killsDelivered": 5,
+      "duplicateSideEffects": 0,
+      "duplicateRatePct": 0,
+      "dirtyCorruptRepos": 0,
+      "dirtyRatePct": 0
+    },
+    {
+      "scenario": "S2_S3_real_sigkill_before_checkpoint",
+      "regime": "xioflow_temporal_opid_vfs_tx",
+      "trials": 5,
+      "killsDelivered": 5,
+      "duplicateSideEffects": 0,
+      "duplicateRatePct": 0,
+      "dirtyCorruptRepos": 0,
+      "dirtyRatePct": 0
+    }
+  ]
+}

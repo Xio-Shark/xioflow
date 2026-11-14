@@ -1,0 +1,161 @@
+{
+  "benchmark": "microbench-baselines",
+  "env": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "release": "27.0.0",
+    "nodeVersion": "v26.12.0",
+    "cpuModel": "Apple M4",
+    "cpuCount": 10,
+    "totalMemGiB": 16,
+    "collectedAt": "2026-11-14T11:48:59.218Z"
+  },
+  "capabilities": {
+    "reaperAvailable": true,
+    "cgroupAvailable": false,
+    "landlockAbi": 0
+  },
+  "config": {
+    "iterations": 15,
+    "dockerIterations": 8,
+    "warmup": 3,
+    "output": "benchmarks/paper/results/macos-microbench.json"
+  },
+  "results": [
+    {
+      "name": "direct_child_process:noop",
+      "n": 15,
+      "meanMs": 2.834,
+      "stdMs": 0.52,
+      "minMs": 2.277,
+      "p50Ms": 2.736,
+      "p95Ms": 3.759,
+      "p99Ms": 3.811,
+      "maxMs": 3.825
+    },
+    {
+      "name": "direct_child_process:node10",
+      "n": 15,
+      "meanMs": 83.997,
+      "stdMs": 1.86,
+      "minMs": 81.072,
+      "p50Ms": 83.562,
+      "p95Ms": 86.536,
+      "p99Ms": 86.926,
+      "maxMs": 87.024
+    },
+    {
+      "name": "supervisor_node_driver:node10",
+      "n": 15,
+      "meanMs": 97.415,
+      "stdMs": 1.813,
+      "minMs": 95.194,
+      "p50Ms": 97.13,
+      "p95Ms": 100.568,
+      "p99Ms": 101.568,
+      "maxMs": 101.817
+    },
+    {
+      "name": "kernel_reaper:noop",
+      "n": 15,
+      "meanMs": 11.777,
+      "stdMs": 0.714,
+      "minMs": 10.854,
+      "p50Ms": 11.731,
+      "p95Ms": 12.938,
+      "p99Ms": 13.007,
+      "maxMs": 13.024
+    },
+    {
+      "name": "kernel_reaper:node10",
+      "n": 15,
+      "meanMs": 96.835,
+      "stdMs": 2.771,
+      "minMs": 92.853,
+      "p50Ms": 96.697,
+      "p95Ms": 101.84,
+      "p99Ms": 104.213,
+      "maxMs": 104.806
+    },
+    {
+      "name": "kernel_reaper_confinement:node10",
+      "n": 15,
+      "meanMs": 101.895,
+      "stdMs": 2.313,
+      "minMs": 98.046,
+      "p50Ms": 101.988,
+      "p95Ms": 105.146,
+      "p99Ms": 106.443,
+      "maxMs": 106.767
+    },
+    {
+      "name": "kernel_vfs_tx_isolated_commit",
+      "n": 10,
+      "meanMs": 363.516,
+      "stdMs": 30.146,
+      "minMs": 334.048,
+      "p50Ms": 352.379,
+      "p95Ms": 414.538,
+      "p99Ms": 418.54,
+      "maxMs": 419.541
+    },
+    {
+      "name": "kernel_vfs_tx_isolated_rollback",
+      "n": 10,
+      "meanMs": 163.123,
+      "stdMs": 21.32,
+      "minMs": 152.744,
+      "p50Ms": 157.309,
+      "p95Ms": 195.018,
+      "p99Ms": 217.68,
+      "maxMs": 223.346
+    },
+    {
+      "name": "kernel_cold_open_exec_close:noop",
+      "n": 12,
+      "meanMs": 17.642,
+      "stdMs": 1.116,
+      "minMs": 15.322,
+      "p50Ms": 17.863,
+      "p95Ms": 19.204,
+      "p99Ms": 19.506,
+      "maxMs": 19.581
+    },
+    {
+      "name": "arbiter_uds_rpc:noop",
+      "n": 15,
+      "meanMs": 12.051,
+      "stdMs": 1.06,
+      "minMs": 10.471,
+      "p50Ms": 12.096,
+      "p95Ms": 13.347,
+      "p99Ms": 13.929,
+      "maxMs": 14.074
+    },
+    {
+      "name": "arbiter_uds_rpc:node10",
+      "n": 15,
+      "meanMs": 111.973,
+      "stdMs": 17.852,
+      "minMs": 94.4,
+      "p50Ms": 106.882,
+      "p95Ms": 149.592,
+      "p99Ms": 151.356,
+      "maxMs": 151.797
+    }
+  ],
+  "skipped": [
+    {
+      "name": "supervisor_cgroup_v2:*",
+      "reason": "cgroup v2 is Linux only (got darwin)"
+    },
+    {
+      "name": "docker_alpine:*",
+      "reason": "image alpine:3.20 not present locally"
+    },
+    {
+      "name": "docker_node22:*",
+      "reason": "image node:22-bookworm-slim not present locally"
+    }
+  ]
+}
