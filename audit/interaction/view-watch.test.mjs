@@ -12,29 +12,31 @@ async function until(predicate, message) {
   }
 }
 
-function setup(t, options) {
+async function setup(t, options) {
   const fixture = createWatchFixture();
   const observer = new ObservedView(fixture.file, serviceView, options);
   t.after(() => { observer.close(); fixture.cleanup(); });
+  // Give OS directory watchers (kqueue/FSEvents on macOS) a tick to finish arming before mutating files.
+  if (options.mode === 'watch-view') await delay(30);
   return { fixture, observer };
 }
 
 test('server-side polling removes unchanged notifications without removing reads', { timeout: 3000 }, async (t) => {
-  const { observer } = setup(t, { mode: 'server-poll', pollMs: 10 });
+  const { observer } = await setup(t, { mode: 'server-poll', pollMs: 10 });
   await until(() => observer.metrics.readAttempts >= 4, 'poller did not read');
   assert.equal(observer.messages.length, 1);
   assert.equal(observer.latest.status, 'ok');
 });
 
 test('agent polling exposes each observed result including identical values', { timeout: 3000 }, async (t) => {
-  const { observer } = setup(t, { mode: 'agent-poll', pollMs: 10 });
+  const { observer } = await setup(t, { mode: 'agent-poll', pollMs: 10 });
   await until(() => observer.metrics.readAttempts >= 4, 'poller did not read');
   assert.equal(observer.messages.length, observer.metrics.readAttempts);
   assert.equal(new Set(observer.messages.map((message) => message.viewVersion)).size, 1);
 });
 
 test('real directory events observe successive atomic file replacements', { timeout: 3000 }, async (t) => {
-  const { fixture, observer } = setup(t, { mode: 'watch-view', reconcileMs: 10000 });
+  const { fixture, observer } = await setup(t, { mode: 'watch-view', reconcileMs: 10000 });
   for (const enabled of [true, false, true]) {
     fixture.records[0].enabled = enabled;
     fixture.replace();
@@ -45,7 +47,7 @@ test('real directory events observe successive atomic file replacements', { time
 });
 
 test('irrelevant source changes update source evidence without waking the caller', { timeout: 3000 }, async (t) => {
-  const { fixture, observer } = setup(t, { mode: 'watch-view', reconcileMs: 10000 });
+  const { fixture, observer } = await setup(t, { mode: 'watch-view', reconcileMs: 10000 });
   const previous = observer.latest.sourceVersion;
   fixture.records[20].notes = 'unrelated diagnostic changed';
   fixture.replace();
@@ -55,7 +57,7 @@ test('irrelevant source changes update source evidence without waking the caller
 });
 
 test('periodic reconciliation catches a change when event hints are deliberately dropped', { timeout: 3000 }, async (t) => {
-  const { fixture, observer } = setup(t, { mode: 'watch-view', reconcileMs: 60, acceptHint: () => false });
+  const { fixture, observer } = await setup(t, { mode: 'watch-view', reconcileMs: 60, acceptHint: () => false });
   fixture.records[0].enabled = true;
   fixture.replace();
   await until(() => observer.latest.view?.[0].enabled === true && observer.metrics.suppressedHints > 0, 'missed hints were not reconciled');
@@ -64,7 +66,7 @@ test('periodic reconciliation catches a change when event hints are deliberately
 });
 
 test('invalid data becomes unavailable and recovery to the same old value is visible', { timeout: 3000 }, async (t) => {
-  const { fixture, observer } = setup(t, { mode: 'watch-view', reconcileMs: 80 });
+  const { fixture, observer } = await setup(t, { mode: 'watch-view', reconcileMs: 80 });
   fixture.replace('{bad json');
   await until(() => observer.latest.status === 'unavailable', 'invalid data was hidden');
   assert.equal(observer.latest.code, 'invalid_source');
@@ -75,7 +77,7 @@ test('invalid data becomes unavailable and recovery to the same old value is vis
 });
 
 test('closing releases the watcher and timers and prevents later reads', { timeout: 3000 }, async (t) => {
-  const { fixture, observer } = setup(t, { mode: 'watch-view', reconcileMs: 10 });
+  const { fixture, observer } = await setup(t, { mode: 'watch-view', reconcileMs: 10 });
   observer.close();
   const before = observer.metrics;
   fixture.records[0].enabled = true;

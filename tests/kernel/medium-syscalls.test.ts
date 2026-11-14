@@ -7,13 +7,41 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createConfinementDriver, LandlockConfinementDriver } from '../../src/confinement/index.js';
 import { KernelMedium } from '../../src/kernel/index.js';
 
+function waitPortClosed(port: number): Promise<void> {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + 500;
+    const attempt = () => {
+      const sock = net.connect({ host: '127.0.0.1', port });
+      let done = false;
+      const finish = (closed: boolean) => {
+        if (done) return;
+        done = true;
+        sock.destroy();
+        if (closed || Date.now() >= deadline) {
+          resolve();
+        } else {
+          setTimeout(attempt, 15);
+        }
+      };
+      sock.once('error', (err: NodeJS.ErrnoException) => finish(err.code === 'ECONNREFUSED'));
+      sock.once('connect', () => finish(false));
+      sock.setTimeout(50, () => finish(false));
+    };
+    attempt();
+  });
+}
+
 function getFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const srv = net.createServer();
     srv.listen(0, '127.0.0.1', () => {
       const addr = srv.address();
       const port = typeof addr === 'object' && addr ? addr.port : 0;
-      srv.close((err) => (err ? reject(err) : resolve(port)));
+      srv.close((err) => {
+        if (err) return reject(err);
+        // On WSL2 localhost relays, an immediately-closed port can briefly accept+RST SYN packets.
+        void waitPortClosed(port).then(() => resolve(port));
+      });
     });
   });
 }

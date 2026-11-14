@@ -16,12 +16,14 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   ExecutionDomain,
-  Http304CausalCache,
   ProcessSupervisor,
+} from '../../dist/index.js';
+import {
+  Http304CausalCache,
   raceAgentsInVirtualWorkspaces,
   runInVirtualWorkspace,
   wrapAgent,
-} from '../../dist/index.js';
+} from '../../dist/wrap/index.js';
 
 const tscBin = path.resolve(import.meta.dirname, '../../node_modules/typescript/bin/tsc');
 

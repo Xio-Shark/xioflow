@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { FileObservation, ObservationError, wireBytes } from './observation.mjs';
 
@@ -69,10 +71,18 @@ export class TaskHost {
       if (typeof args.program !== 'string' || args.program.length === 0 || args.program.length > 16384) {
         throw new ObservationError('invalid_args', 'program must be a nonempty jq expression of at most 16384 characters');
       }
-      const execution = spawnSync('jq', ['-c', '--', args.program], {
-        input: JSON.stringify(this.#observation.full().records), encoding: 'utf8', timeout: 2000,
-        maxBuffer: 1024 * 1024, cwd: path.dirname(this.#file), env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LC_ALL: 'C' },
-      });
+      const filterDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xio-jq-'));
+      const filterFile = path.join(filterDir, 'filter.jq');
+      let execution;
+      try {
+        fs.writeFileSync(filterFile, args.program, 'utf8');
+        execution = spawnSync('jq', ['-c', '-f', filterFile], {
+          input: JSON.stringify(this.#observation.full().records), encoding: 'utf8', timeout: 2000,
+          maxBuffer: 1024 * 1024, cwd: path.dirname(this.#file), env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LC_ALL: 'C' },
+        });
+      } finally {
+        fs.rmSync(filterDir, { recursive: true, force: true });
+      }
       if (execution.error) {
         // jq can reject a malformed program and exit before reading its stdin; the
         // pending stdin write then surfaces as EPIPE. jq did run and fail, so

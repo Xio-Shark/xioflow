@@ -2,7 +2,7 @@
 // Executable wrapper that runs any black-box agent harness under `xio wrap` (dual-boundary gateway + reaper).
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { wrapAgent } from '../../dist/index.js';
+import { wrapAgent } from '../../dist/wrap/index.js';
 
 const argv = process.argv.slice(2);
 
